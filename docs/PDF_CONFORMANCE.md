@@ -25,9 +25,16 @@ per-fixture history below quotes those numbers.
 
 ## Current state
 
-**9 / 17 strict** · **10 / 17 whitespace-normalized.** (The two Korean
-image-only pages `skipped_1page`/`skipped_2pages` carry no text groundtruth and
-are no longer scored.)
+**9 / 18 strict** · **10 / 18 whitespace-normalized** against upstream's
+current groundtruth (docling ≥ 2.123: docling-parse render, `do_ocr=False`,
+`compact_tables=True`; 18 fixtures — `table_misidentified_as_form`
+(docling#4064) joined the corpus with this refresh). Total 374 diff lines with
+the docling-parse renderer the baselines are measured with, 458 with
+`DOCLING_RS_RENDERER=pdfium` on the same tree and files (2203 69→19,
+table_mislabeled 97→85, redp5110 193→180, 2206 29→22, normal_4pages 14→12,
+right_to_left_03 4→2; nothing worse) — the renderer gap of #478, now scored
+against a groundtruth rendered the same way. (The two Korean image-only pages
+`skipped_1page`/`skipped_2pages` carry no text groundtruth and are not scored.)
 
 | PDF | diff | dominant remaining blocker |
 |---|---:|---|
@@ -36,22 +43,27 @@ are no longer scored.)
 | 2305.03393v1-pg9 | **exact** | — (TableFormer table, cell-for-cell) |
 | right_to_left_01 | **exact** | — (RTL period attachment) |
 | right_to_left_02 | **exact** | — (kashida dedup + page-number layout) |
-| base14_fonts_rot90 / _rot180 / _rot270 | **exact** | — (`/Rotate` display-frame normalization, docling#4008) |
-| amt_handbook_sample | 2 *(ws-ok)* | docling's spurious fraction double space — ours is more faithful |
+| base14_fonts_rot90 / _rot180 / _rot270 | **exact** | — (`/Rotate` display-frame normalization, docling#4008; our own fixtures, groundtruth = the unrotated upstream file) |
 | code_and_formula | **exact** | — (flat legacy code, line-preserving `pretty` in strict) |
-| normal_4pages | 28 | two-column line interleave + section-1 numeral claim; 12 of the lines are the Korean table's word spacing, where the committed groundtruth is an older docling's (`1군감염병`) and docling 2.129 writes `1군 감염병` as we now do |
-| 2305.03393v1 | 18 | author-block cluster split + in-figure label clusters (model-level) |
-| table_mislabeled_as_picture | 66 | layout over-detects tables (survey rendered as tables); 18 of the lines are one table's word spacing, where the committed groundtruth is an older docling's (`Refugees,asylum seekers,or`) and docling 2.129 writes `Refugees, asylum seekers, or` as we now do |
-| 2203.01017v2 | 51 | reference-accent spacing + author-block splits (in-picture table recovered: same grid as docling, different OCR engine noise) |
-| 2206.01062 | 56 | author-block cluster splits (model-borderline) + one int8-borderline header rowspan; 4 of the lines are the #424 same-row author order, which docling 2.127 produces too — the committed groundtruth is an older docling's |
-| right_to_left_03 | 56 | RTL bidi + wrapper (form) children order |
-| redp5110_sampled | 70 | TOC row structure tails + cover-page ordering |
+| amt_handbook_sample | 2 *(ws-ok)* | docling's spurious fraction double space — ours is more faithful |
+| right_to_left_03 | 2 | one RTL heading line (bidi run order) |
+| 2305.03393v1 | 4 | one author-block cluster (model-borderline) |
+| normal_4pages | 12 | docling folds the page-number glyph into the heading cluster (`## 들어가며 1`) where we emit it as its own item, and the `※` footnotes order |
+| 2203.01017v2 | 19 | caption vs enumerated-list order around Figure 1, accent spacing in the references (`Herv´e D´ejean`) |
+| 2206.01062 | 22 | author-block cluster splits (model-borderline) |
+| table_misidentified_as_form | 48 | the form container's nested table / picture (docling#4064): docling nests them inside the form region and keeps the heading, we flatten the region |
+| table_mislabeled_as_picture | 85 | the survey over-detected as tables; docling keeps a cell's leading indentation (`\|   They work in parallel…`) |
+| redp5110_sampled | 180 | TOC: docling's cell matching puts the dot leaders into the page-number column (`. . . . . . . vii`), ours keeps them with the title (`. vii`); cover-page ordering |
 
-Measured on the current tree with `scripts/conformance/pdf_groundtruth.sh`.
-The earlier revision of this table predated docling 2.118's reading-order
-dehyphenation (docling#3888, ported in #250) — both sides now join a
-hard-hyphenated lowercase continuation across a column/page break without the
-`word- continuation` artifact — and the groundtruth refresh below.
+Measured on the current tree with `scripts/conformance/pdf_groundtruth.sh`
+(`--skip-ocr --compact-tables`, docling-parse renderer). Two ports landed with
+this refresh because the new groundtruth surfaced them: docling's
+`ListItemMarkerProcessor` (a leading `-`/bullet/`N.`/`a)` marker is split off
+the item text — 2305's OTSL list reads `- "C" cell`, not `- - "C" cell`; a
+compound `3.a.` marker rides in the text, `- 3.a. If all…`), and
+`--compact-tables` on the streaming Markdown path (it reached only
+`--no-stream` before). Against the previous, pypdfium2-era groundtruth this
+tree scored 9/17 strict; every per-fixture history below quotes that scale.
 
 ### The layout input is pypdfium2-exact, not docling-parse-exact (#478)
 
@@ -121,7 +133,8 @@ the knob is exactly docling 2.129's input. With it:
 * *Snapshots:* 34 of 97 fixtures drift (2203 63, redp5110 103, 2206 11,
   table_mislabeled 48 lines, the OCR'd scans 2–20, the LaTeX figure PDFs up to
   139) — every ML-borderline decision moves once, as expected.
-* *Committed groundtruth* gets **worse**: 2203 51→84, 2206 56→61,
+* *The then-committed groundtruth* (pypdfium2-era, before the refresh above)
+  got **worse**: 2203 51→84, 2206 56→61,
   normal_4pages 28→30, redp5110 70→171, table_mislabeled 66→96 (9/17 strict,
   10/17 normalized either way; identical under `DOCLING_RS_FP32=1`). Not a
   regression of the render: the committed groundtruths of the ML-dependent
