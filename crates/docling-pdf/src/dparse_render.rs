@@ -16,9 +16,14 @@
 //!
 //! Selection is an environment knob, never a build feature: nothing links the
 //! C++ side, CI and wasm are untouched, and a missing library degrades to
-//! pdfium with one warning.
+//! pdfium.
 //!
-//! * `DOCLING_RS_RENDERER` — `pdfium` (default) or `docling-parse`.
+//! * `DOCLING_RS_RENDERER` — `auto` (default: docling-parse when the shim
+//!   library resolves, pdfium otherwise, silently — the baselines in
+//!   `tests/snapshots` and `docs/PDF_CONFORMANCE.md` are docling-parse's, so a
+//!   checkout with the library converts like the baselines and one without
+//!   still converts), `docling-parse` (required: a missing library warns
+//!   once and falls back to pdfium) or `pdfium` (never load the plugin).
 //! * `DOCLING_PARSE_RENDER_LIB` — the shim library (a file, or the directory
 //!   holding `libdparse_render.so`/`.dylib`); default `.docling-parse/lib`
 //!   resolved like `.pdfium/lib` ([`crate::resolve_asset`]).
@@ -73,6 +78,8 @@ pub struct Plugin {
     close: Symbol<'static, CloseFn>,
     /// docling-parse's version the shim was built against (`DPR_VERSION`).
     pub docling_parse_version: String,
+    /// Where the library was loaded from.
+    pub path: PathBuf,
     _lib: &'static Library,
 }
 
@@ -88,14 +95,39 @@ fn err_string(buf: &[c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Is the docling-parse renderer requested (`DOCLING_RS_RENDERER=docling-parse`)?
+/// What `DOCLING_RS_RENDERER` asks for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Choice {
+    /// docling-parse when its library resolves, pdfium otherwise (the default).
+    Auto,
+    /// docling-parse, warning when it is unavailable.
+    DoclingParse,
+    /// pdfium only.
+    Pdfium,
+}
+
+/// The renderer `DOCLING_RS_RENDERER` selects; unset, empty or `auto` is
+/// [`Choice::Auto`], an unknown value warns once and counts as `auto`.
+pub fn choice() -> Choice {
+    match docling_core::env::nonempty("DOCLING_RS_RENDERER") {
+        None => Choice::Auto,
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "auto" | "" => Choice::Auto,
+            "docling-parse" | "docling_parse" | "dparse" => Choice::DoclingParse,
+            "pdfium" => Choice::Pdfium,
+            other => {
+                eprintln!(
+                    "docling-pdf: unknown DOCLING_RS_RENDERER={other:?} (auto | docling-parse | pdfium); using auto"
+                );
+                Choice::Auto
+            }
+        },
+    }
+}
+
+/// Is the docling-parse renderer explicitly requested?
 pub fn requested() -> bool {
-    docling_core::env::nonempty("DOCLING_RS_RENDERER")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "docling-parse" || v == "docling_parse" || v == "dparse"
-        })
-        .unwrap_or(false)
+    choice() == Choice::DoclingParse
 }
 
 fn platform_lib_name() -> &'static str {
@@ -180,39 +212,59 @@ fn load() -> Result<Plugin, String> {
             free: lib.get(b"dpr_free\0").map_err(|e| e.to_string())?,
             close: lib.get(b"dpr_close\0").map_err(|e| e.to_string())?,
             docling_parse_version,
+            path,
             _lib: lib,
         })
     }
 }
 
-/// The plugin when `DOCLING_RS_RENDERER=docling-parse` and the shim loads;
-/// `None` otherwise. A requested-but-unloadable plugin warns once and the
-/// pipeline keeps rendering with pdfium (degradation over failure).
+/// The plugin when the shim loads and [`choice`] allows it; `None` otherwise.
+/// Under `auto` an unavailable library is a quiet (`DOCLING_RS_DEBUG`) note
+/// and the pipeline renders with pdfium; under `docling-parse` it warns once
+/// first (degradation over failure either way).
 pub fn plugin() -> Option<&'static Plugin> {
     static PLUGIN: OnceLock<Option<Plugin>> = OnceLock::new();
     PLUGIN
         .get_or_init(|| {
-            if !requested() {
+            let choice = choice();
+            if choice == Choice::Pdfium {
                 return None;
             }
             match load() {
                 Ok(p) => {
                     docling_core::debug_log!(
-                        "docling-pdf: rendering page images with docling-parse {} (DOCLING_RS_RENDERER)",
-                        p.docling_parse_version
+                        "docling-pdf: rendering page images with docling-parse {} ({})",
+                        p.docling_parse_version,
+                        p.path.display()
                     );
                     Some(p)
                 }
-                Err(e) => {
+                Err(e) if choice == Choice::DoclingParse => {
                     eprintln!(
                         "docling-pdf: DOCLING_RS_RENDERER=docling-parse but the renderer plugin \
                          is unavailable ({e}); rendering with pdfium"
                     );
                     None
                 }
+                Err(e) => {
+                    docling_core::debug_log!(
+                        "docling-pdf: docling-parse renderer plugin not loaded ({e}); rendering with pdfium"
+                    );
+                    None
+                }
             }
         })
         .as_ref()
+}
+
+/// Which renderer produces the model inputs in this process: `"docling-parse"`
+/// or `"pdfium"` — for diagnostics (`--version`-style banners, serve health).
+pub fn active_name() -> &'static str {
+    if plugin().is_some() {
+        "docling-parse"
+    } else {
+        "pdfium"
+    }
 }
 
 /// A PDF opened by docling-parse; renders its pages on request.

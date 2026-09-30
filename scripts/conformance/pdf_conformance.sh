@@ -29,6 +29,16 @@ for f in "$PDFIUM_DYNAMIC_LIB_PATH/libpdfium.so" "$DOCLING_LAYOUT_ONNX" \
          "$DOCLING_OCR_REC_ONNX" "$DOCLING_OCR_DICT" "$DOCLING_OCR_DET_ONNX"; do
   [ -e "$f" ] || { echo "MISSING: $f  (run scripts/install/pdf_setup.sh)"; exit 1; }
 done
+# The snapshots are rendered by docling-parse's renderer (#478 — the raster
+# docling 2.123+ feeds its models); without the shim the pipeline would fall
+# back to pdfium and every ML-borderline fixture would read as drift.
+export DOCLING_RS_RENDERER="${DOCLING_RS_RENDERER:-docling-parse}"
+export DOCLING_PARSE_RENDER_LIB="${DOCLING_PARSE_RENDER_LIB:-$(pwd)/.docling-parse/lib}"
+if [ "$DOCLING_RS_RENDERER" = docling-parse ]; then
+  for f in "$DOCLING_PARSE_RENDER_LIB"/libdparse_render.*; do
+    [ -e "$f" ] || { echo "MISSING: $DOCLING_PARSE_RENDER_LIB/libdparse_render.so  (run scripts/install/build_docling_parse_render.sh, or DOCLING_RS_RENDERER=pdfium)"; exit 1; }
+  done
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

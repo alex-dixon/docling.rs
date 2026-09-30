@@ -2,11 +2,20 @@
 
 How close the Rust PDF pipeline gets to docling's **default** Markdown, measured
 byte-for-byte against the committed groundtruth (`tests/data/pdf/groundtruth/*.md`).
-The groundtruth is regenerated from **live published docling**. The numbers in
-this document are measured with `scripts/conformance/pdf_groundtruth.sh`,
-which pins the conformance model set (fp32 layout/OCR env overrides below);
-`scripts/conformance/conformance.sh pdf` runs the *default* (int8, English-OCR)
-models over every source PDF, so its totals differ from this table.
+The groundtruth **mirrors upstream docling's own `tests/data/pdf/groundtruth`**
+(taken at docling v2.130.0-26; upstream last regenerated it on 2026-09-10 for
+docling-ibm-models 4.0.1 — docling#4122/#4200/#4213), which docling writes with
+its default backend since 2.123 (threaded docling-parse, its own page renderer)
+and `do_ocr=False` (`tests/test_e2e_conversion.py`: layout + TableFormer with
+cell matching, CPU). The numbers in this document are measured with
+`scripts/conformance/pdf_groundtruth.sh`, which runs the pipeline the same way —
+`--skip-ocr`, the model inputs rendered by docling-parse's renderer
+(`DOCLING_RS_RENDERER=docling-parse`, #478) — and pins the conformance model
+set (fp32 layout/OCR env overrides below); `scripts/conformance/conformance.sh
+pdf` runs the *default* (int8, English-OCR) models over every source PDF, so
+its totals differ from this table. Before this refresh the groundtruth was an
+older, pypdfium2-era docling's and the pipeline was scored with OCR on; the
+per-fixture history below quotes those numbers.
 
 > Measure locally with `scripts/conformance/pdf_groundtruth.sh` (diffs the checked-in
 > reference; no docling install needed) or `scripts/conformance/conformance.sh pdf` (installs
