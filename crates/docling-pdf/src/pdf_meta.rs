@@ -72,6 +72,16 @@ impl PdfMeta {
         self.pages.len()
     }
 
+    /// The parsed document, for the other pure-Rust readers (`raster`).
+    pub(crate) fn doc(&self) -> &Document {
+        &self.doc
+    }
+
+    /// The page object id of the 0-based `index`.
+    pub(crate) fn page_id(&self, index: usize) -> Option<ObjectId> {
+        self.pages.get(index).copied()
+    }
+
     /// Display geometry of the 0-based `index`; `None` past the last page.
     pub fn geometry(&self, index: usize) -> Option<PageGeom> {
         let pid = *self.pages.get(index)?;

@@ -861,6 +861,7 @@ dependencies = [
  "tar",
  "time",
  "tokenizers",
+ "weezl 0.2.1",
 ]
 
 [[package]]

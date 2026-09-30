@@ -32,6 +32,7 @@ ml = [
     "dep:ort",
     "dep:image",
     "dep:fast_image_resize",
+    "dep:weezl",
     "dep:tokenizers",
     "dep:flate2",
     "dep:tar",
@@ -81,6 +82,11 @@ lopdf = "0.44"
 # workspace MSRV; it never enters docling-core's 1.85-only tree.)
 time = { version = "0.3.48", default-features = false }
 fast_image_resize = { version = "5.1.4", optional = true }
+# `/LZWDecode` image data for the pure-Rust raster of image-only pages
+# (`raster/filters.rs`) — lopdf's own LZW crate. (The raster's JPEG decoder
+# is in-tree, `raster/jpeg.rs`: neither zune-jpeg nor jpeg-decoder reproduces
+# libjpeg's bytes.)
+weezl = { version = "0.2", optional = true }
 # CodeFormula enrichment decodes its VLM output with the HF tokenizer
 # (.models/code_formula/tokenizer.json) — same crate/features as docling-core's
 # chunking tokenizer.

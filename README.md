@@ -92,10 +92,14 @@ lives in `docling-pdf`: a pure-Rust PDF text parser and page-metadata reader
 (page count, geometry, `/Rotate`, link annotations — all lopdf), the
 docling-parse renderer plugin for the page images the models see (the very
 canvas docling 2.123+ feeds them — #478), and an ONNX layout/TableFormer/OCR
-stack. pdfium is a fallback only: the raster when the plugin is not installed,
-the text layer of a file the Rust parser cannot read, and a scanned page's OCR
-bitmap; a checkout with `.docling-parse/` and no `libpdfium` converts PDFs end
-to end (`docs/PDF_CONFORMANCE.md`, "Retiring pdfium"). TableFormer is ported
+stack. Image-only pages — scans — are rasterized in pure Rust, byte for byte
+what pdfium renders (its stretch engine and a libjpeg-exact JPEG decoder,
+ported; `DOCLING_RS_SCAN_RASTER=pdfium` switches back). pdfium is a fallback
+only: the raster of a born-digital page when the plugin is not installed, the
+text layer of a file the Rust parser cannot read, and the image codecs the
+Rust raster lacks (JPX, JBIG2, CCITT); a checkout with `.docling-parse/` and
+no `libpdfium` converts PDFs end to end, one with `.models/` alone converts
+scans (`docs/PDF_CONFORMANCE.md`, "Retiring pdfium"). TableFormer is ported
 to ONNX and run on every detected table region to recover its structure;
 geometric reconstruction from cell positions remains only as the fallback when
 the TableFormer graphs aren't present (see `docs/PDF_CONFORMANCE.md`).
@@ -1615,7 +1619,9 @@ small plugin library `download_dependencies.sh` fetches into
 builds) is present, and from pdfium otherwise; `docling-parse` requires the
 plugin and warns once when it is missing, `pdfium` never loads it;
 `DOCLING_PARSE_RENDER_LIB` / `DOCLING_PARSE_RESOURCES` point at it
-explicitly), `DOCLING_RS_PDF_THREADS` (total thread budget;
+explicitly), `DOCLING_RS_SCAN_RASTER` (`rust`, the default: an image-only
+page's bitmap comes from the pure-Rust raster, pdfium's bytes exactly;
+`pdfium` renders it with the library), `DOCLING_RS_PDF_THREADS` (total thread budget;
 `_WORKERS`/`_INTRA` below split it), `DOCLING_RS_TIMING=1` (per-stage
 timings on stderr), `DOCLING_RS_MAX_IMAGE_PIXELS` (image-input decompression
 cap), `DOCLING_RS_MAX_HTML_DEPTH`, `DOCLING_RS_MAX_PART_BYTES` (HTML/OOXML

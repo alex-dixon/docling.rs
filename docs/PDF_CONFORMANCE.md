@@ -207,8 +207,8 @@ still has a job:
 | page count, size, `/Rotate`, links | `pdf_meta` (lopdf) | lopdf cannot read the file at all |
 | text layer | `textparse` (lopdf) | a page the parser reads no text from, when the library is present (`DOCLING_PDFIUM_TEXT`, the unreadable-font fallbacks) |
 | layout / TableFormer page images | the docling-parse renderer plugin | the plugin is not installed (`DOCLING_RS_RENDERER=pdfium`, or `.docling-parse/lib` missing) |
-| a scanned page's OCR bitmap | pdfium's render + downscale (the `JsON` note above) | present; absent → the plugin's scale-2.0 canvas, rather than failing the page |
-| `render_pages` (the `pages` / VLM raster) | the plugin | the plugin is not installed |
+| a scanned page's OCR bitmap | the Rust raster (phase 2 below — pdfium's bitmap byte for byte) | the page is not image-only in the raster's sense (then pdfium's render + downscale, the `JsON` note above; absent → the plugin's scale-2.0 canvas rather than failing the page) |
+| `render_pages` (the `pages` / VLM raster) | the plugin, else the Rust raster of an image-only page | neither applies |
 
 So a checkout with `.docling-parse/` and no `libpdfium` converts the corpus
 end to end (`bind_or_skip` notes the missing library under
@@ -223,18 +223,80 @@ answers. Speed does not move: pdfium's open + geometry was ~1–2 % of a
 conversion (layout inference is ~30 %), so this phase is about parity and a
 single-runtime build, not wall time.
 
+### Retiring pdfium — phase 2 landed: the Rust raster of image-only pages
+
+A scanned page is one (sometimes a few) `/Image` XObjects blitted onto a
+white page, and pdfium's rendering of such a page is a small, deterministic
+pipeline — decode, one axis-aligned stretch, composite — that
+`crates/docling-pdf/src/raster/` now reproduces **byte for byte**:
+
+* `raster/mod.rs` walks the content stream the way pdfium's parser and
+  renderer would see it — `q`/`Q`/`cm` (prepended, `f32`), Form XObjects with
+  their `/Matrix` and `/BBox` clip, rectangular `re W n` clips through the
+  agg driver's `GetRect` shortcut (float rect ∩ device, `GetOuterRect`),
+  ExtGStates that change nothing visible, `3 Tr` invisible text — and builds
+  each image's device matrix as `CTM · form_matrix · page_matrix · display`
+  in pdfium's float order. It decodes the image as `CPDF_DIB` presents it
+  (1/8-bit DeviceGray/CalGray, 8-bit DeviceRGB/CalRGB/sRGB-ICC; the
+  `/Decode [1 0]` palette rules: an 8-bit gray inverts before the stretch,
+  a 1-bit one through the 256-step ramp after it), then follows
+  `CFX_AggImageRenderer`: `GetUnitRect().GetOuterRect()`, the clip box, the
+  axis-aligned path with its negative-size flips or the 90° path with the
+  swapped clip and the column-wise composite.
+* `raster/stretch.rs` is pdfium's `CStretchEngine`: area weights when
+  shrinking, two-tap interpolation when enlarging (the image's
+  `/Interpolate`, pdfium's own size heuristic, or the > 60 MB rule), nearest
+  otherwise — 16.16 fixed point, `round(w · 65536)` with the running rounding
+  error carried and the last tap taking the unsigned remainder, the source
+  clip from a *float* scale, a horizontal pass into an 8-bit intermediate
+  and a vertical pass over it, both truncating with `>> 16`.
+* `raster/jpeg.rs` is a libjpeg-exact `DCTDecode`: baseline and progressive
+  Huffman, 8-bit, 1 or 3 components, restart intervals, `jidctint.c`'s
+  islow IDCT with its constants and descaling, `jdsample.c`'s fancy
+  upsampling (`h2v1` `+1/+2`, `h2v2` `+8/+7`, `h1v2`, edge replication) and
+  `jdcolor.c`'s fixed-point YCbCr→RGB tables, with pdfium's
+  `/ColorTransform` / Adobe-marker rule for whether a 3-component image is
+  converted at all. Neither `zune-jpeg` nor `jpeg-decoder` matches those
+  bytes (their upsamplers and colour conversions round differently — ±1,
+  invisible, and fatal to a byte-for-byte oracle). Checked against Pillow's
+  libjpeg-turbo on ten synthetic fixtures (`crates/docling-pdf/tests/data/jpeg/`:
+  gray/RGB, 4:4:4/4:2:2/4:2:0, baseline/progressive, restarts, odd sizes):
+  **10/10 byte-identical**.
+* `raster/filters.rs`: Flate/LZW/RunLength/ASCII85/ASCIIHex with the PNG
+  and TIFF predictors, sized for 1-bit rows.
+
+**Oracle** (`raster::tests::matches_pdfium_on_the_scanned_fixtures`, runs
+when `.pdfium/lib` is present): the eleven image-only fixture pages —
+`ocr_test` and its three `/Rotate` variants (cairo: a Form XObject with a
+4960 × 7016 `/Interpolate` gray Flate image), the four `ocr_test_raster*`
+(RGB Flate, enlarged 1190 → 1785), `nemotron_multipage` (4 pages, three
+rotations), `scanned_chart_table` and `docling-rs-demotion-repro` (RGB 4:2:0
+JPEG) — at both pipeline sizes (the 3× OCR bitmap and the 1.5× layout image):
+**22/22 renders byte-identical to `FPDF_RenderPageBitmap`**. So the scanned
+groundtruth stays pinned to the byte, and a checkout with only `.models/`
+(no pdfium, no plugin) converts every one of them; `pdfium_backend` tries
+the Rust raster before pdfium wherever it used to render a page bitmap
+(`DOCLING_RS_SCAN_RASTER=pdfium` switches it off for an A/B run).
+
+**What still goes to pdfium** (the module declines, `DOCLING_RS_DEBUG` says
+why): JPX, JBIG2 and CCITT images (no decoder yet); CMYK, Indexed, Lab,
+Separation and every ICC profile but the 3144-byte sRGB one (pdfium runs
+Little-CMS on them); `/ImageMask` stencils, `/SMask` and colour-key `/Mask`;
+a JPEG at least twice the bitmap size in both dimensions (pdfium decodes it
+at a reduced DCT scale — libjpeg's `jidctred`, the next port);
+non-axis-aligned placements (`CFX_ImageTransformer`); isolated or knockout
+transparency groups; pages with annotations other than links; and, of
+course, any drawn path, shading, inline image or visible glyph.
+`sample_with_rotation_mismatch` is the corpus example: its image is
+`ICCBased` with a 344-byte profile.
+
 **The roadmap.** The aim is everything in Rust except the ONNX models; the
 shim stays as long as it is the byte-exact oracle for what replaces it.
 
-2. *Rust raster for image-only pages.* A scanned page is one (sometimes a few)
-   `/Image` XObjects blitted onto a white page. Decode the embedded image in
-   Rust (`image` for DCT/Flate/LZW/RunLength, plus the PDF predictors and
-   `/Decode` arrays; `/ImageMask` and `/SMask` compositing), place it by its
-   CTM, resample to the 2.0 canvas with the pipeline's existing cv2/PIL-exact
-   kernels — and keep pdfium for the codecs Rust lacks a maintained decoder
-   for (JBIG2, JPX, CCITT G4) until `jbig2dec`/`jpeg2k`-class crates are
-   proven on the scanned corpus. Oracle: pdfium's own bitmap on
-   `tests/data/scanned/`, byte-for-byte, so the OCR groundtruth stays pinned.
+2. *Rust raster for image-only pages* — landed above. Follow-ups inside the
+   same design: the reduced-scale JPEG IDCTs, CCITT G4 (a small decoder),
+   `/ImageMask` stencils, Indexed palettes; JPX and JBIG2 wait for proven
+   Rust decoders.
 3. *Rust vector + text renderer.* The renderer docling-parse runs: content
    stream interpretation (paths, clipping, transparency groups as docling-parse
    flattens them), glyph outlines from the embedded / bundled fonts (a Rust

@@ -89,8 +89,10 @@ cargo check -p docling --no-default-features --features pdf-text \
   layer: page count, geometry, `/Rotate` and links come from lopdf
   (`pdf_meta.rs`), the model images from the docling-parse plugin, and pdfium
   is loaded only when one of those cannot answer (`bind_or_skip`), so a
-  checkout with the plugin and no pdfium converts PDFs end to end. Fetch:
-  `scripts/install/download_dependencies.sh`.
+  checkout with the plugin and no pdfium converts PDFs end to end; image-only
+  pages (scans) are rasterized by `raster/` in pure Rust, byte-identical to
+  pdfium (`DOCLING_RS_SCAN_RASTER=pdfium` disables it), so `.models/` alone
+  converts scans. Fetch: `scripts/install/download_dependencies.sh`.
 - Resolution is CWD-relative, then `$DOCLING_RS_MODELS_DIR` for `.models/…`
   paths (#285 — whole-dir override keeping the engine's own selection logic,
   e.g. the OCR en/ch pair; the py bindings point it at their cache), then
