@@ -576,8 +576,8 @@ impl EnrichmentOptions {
 }
 
 #[cfg(feature = "ml")]
-/// The layout model's input for a page: the docling-exact scale-1.0 page
-/// image when the renderer produced one, else the legacy stretch of the 2×
+/// The layout model's input for a page: the pypdfium2-exact scale-1.0 page
+/// image (#478) when the renderer produced one, else the legacy stretch of the 2×
 /// bitmap (browser / METS paths) — see [`layout::LayoutSrc`]. Public so the
 /// diagnostic examples feed [`layout::LayoutModel::predict`] the same input
 /// the pipeline does.

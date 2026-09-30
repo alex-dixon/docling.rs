@@ -89,7 +89,10 @@ parameter, `multipart/alternative`) and routed through the HTML backend; with
 `--fetch-images` the archive's own image parts are embedded, resolved by
 `Content-Location`/`cid:` like docling resolves them. The discriminative PDF/image pipeline
 lives in `docling-pdf`: a pure-Rust PDF text parser, pdfium for page
-rasterization, and an ONNX layout/TableFormer/OCR stack. TableFormer is ported
+rasterization (the model inputs are rendered exactly like docling's
+`PyPdfiumDocumentBackend`; docling 2.123+'s default docling-parse renderer
+anti-aliases glyphs differently, which moves the layout model's borderline
+labels — #478), and an ONNX layout/TableFormer/OCR stack. TableFormer is ported
 to ONNX and run on every detected table region to recover its structure;
 geometric reconstruction from cell positions remains only as the fallback when
 the TableFormer graphs aren't present (see `docs/PDF_CONFORMANCE.md`).
