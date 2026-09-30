@@ -63,6 +63,8 @@ pub mod scanned;
 pub mod pdf_meta;
 #[cfg(feature = "ml")]
 pub mod raster;
+#[cfg(feature = "ml")]
+pub mod render;
 mod std14;
 #[cfg(feature = "ml")]
 pub mod tableformer;

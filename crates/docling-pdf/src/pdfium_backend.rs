@@ -386,6 +386,12 @@ where
             .as_ref()
             .is_none_or(|p| p.len() as usize == m.page_count())
     });
+    // The pure-Rust renderer (phase 3 of retiring pdfium): the model inputs
+    // of every page the plugin does not render and the Rust raster declines.
+    let renderer = match (&meta, render_image) {
+        (Some(m), true) => Some(crate::render::Renderer::new(m)),
+        _ => None,
+    };
     let (first, last) = range.unwrap_or((0, total.saturating_sub(1)));
     // Index the window directly: iterating `pages.iter()` from page 0 and
     // skipping to `first` loads (and closes) every page before the window —
@@ -416,6 +422,7 @@ where
                 ffi: session.as_ref().map(|s| &s.ffi),
                 dparse: dparse.as_ref(),
                 meta: meta.as_ref(),
+                renderer: renderer.as_ref(),
             },
             geom,
             links,
@@ -547,6 +554,10 @@ pub fn render_pages(
             (first - 1, last.min(total) - 1)
         }
     };
+    let renderer = match (&dparse, &meta) {
+        (None, Some(m)) => Some(crate::render::Renderer::new(m)),
+        _ => None,
+    };
     let mut out = Vec::with_capacity(last.saturating_sub(first) + 1);
     for i in first..=last {
         if i >= total {
@@ -558,7 +569,8 @@ pub fn render_pages(
         // one).
         // The plugin's canvas first (the renderer whenever it resolves), then
         // the Rust raster of an image-only page (pdfium's bitmap byte for
-        // byte, no library needed), then pdfium.
+        // byte, no library needed) or the Rust page renderer, then pdfium
+        // (`DOCLING_RS_RENDERER=pdfium`, or a file lopdf cannot read).
         let rust = || {
             let m = meta.as_ref()?;
             let g = m.geometry(i)?;
@@ -568,7 +580,7 @@ pub fn render_pages(
                 i + 1,
             )
             .ok()?;
-            crate::raster::render(m, i, tw as u32, th as u32)
+            rust_bitmap(Some(m), renderer.as_ref(), i as i32, tw as u32, th as u32)
         };
         let bitmap = match (&dparse, &pages) {
             (Some(dp), _) => {
@@ -647,26 +659,39 @@ pub(crate) fn bind_for_tests() -> Result<Pdfium, PdfiumError> {
 /// renderer plugin nor pdfium is available.
 fn no_raster(index: i32) -> PdfiumError {
     PdfiumError::IoError(std::io::Error::other(format!(
-        "page {}: no page renderer — the docling-parse renderer plugin is not installed \
-         (.docling-parse/lib, fetched by scripts/install/download_dependencies.sh) and \
-         pdfium could not be loaded (PDFIUM_DYNAMIC_LIB_PATH / .pdfium/lib)",
+        "page {}: no page renderer — the file's object model could not be read, the \
+         docling-parse renderer plugin is not installed (.docling-parse/lib, fetched by \
+         scripts/install/download_dependencies.sh) and pdfium could not be loaded \
+         (PDFIUM_DYNAMIC_LIB_PATH / .pdfium/lib)",
         index + 1
     )))
 }
 
-/// The pure-Rust raster of an image-only page at `width` × `height`
-/// (`raster::render`), when the object model is loaded and the page
-/// qualifies; timed like the pdfium render it replaces.
+/// The pure-Rust bitmap of a page at `width` × `height`: the raster of an
+/// image-only page (`raster::render`, pdfium's bytes) when the page
+/// qualifies, the page renderer (`render`) otherwise — `None` only when the
+/// object model is not loaded or `DOCLING_RS_RENDERER=pdfium` asks for
+/// pdfium's render of a page the raster declines.
 #[cfg(feature = "ml")]
-fn rust_raster(
+fn rust_bitmap(
     meta: Option<&crate::pdf_meta::PdfMeta>,
+    renderer: Option<&crate::render::Renderer<'_>>,
     index: i32,
     width: u32,
     height: u32,
 ) -> Option<RgbImage> {
     let meta = meta?;
-    crate::timing::timed("raster.render", || {
+    if let Some(img) = crate::timing::timed("raster.render", || {
         crate::raster::render(meta, index as usize, width, height)
+    }) {
+        return Some(img);
+    }
+    if crate::dparse_render::choice() == crate::dparse_render::Choice::Pdfium {
+        return None;
+    }
+    let renderer = renderer?;
+    crate::timing::timed("render.page", || {
+        renderer.render(index as usize, width, height)
     })
 }
 
@@ -709,7 +734,7 @@ fn bind_or_skip(meta_ok: bool) -> Result<Option<Pdfium>, PdfiumError> {
         Ok(p) => Ok(Some(p)),
         Err(e) if meta_ok => {
             docling_core::debug_log!(
-                "docling-pdf: pdfium unavailable ({e}); converting with the pure-Rust object model, the docling-parse renderer and the Rust raster"
+                "docling-pdf: pdfium unavailable ({e}); converting with the pure-Rust object model and renderer (or the docling-parse renderer)"
             );
             Ok(None)
         }
@@ -729,6 +754,9 @@ struct PageSources<'a> {
     dparse: Option<&'a crate::dparse_render::Doc>,
     /// The object model, for the Rust raster of an image-only page.
     meta: Option<&'a crate::pdf_meta::PdfMeta>,
+    /// The pure-Rust page renderer over the same object model (its
+    /// per-document caches live for the whole conversion).
+    renderer: Option<&'a crate::render::Renderer<'a>>,
 }
 
 #[cfg(feature = "ml")]
@@ -746,6 +774,7 @@ fn extract_page(
         ffi,
         dparse,
         meta,
+        renderer,
     } = sources;
     // The page size (and the render) is the *display* frame — `/Rotate`
     // applied — while every text coordinate (pdfium's own text page, the
@@ -875,11 +904,13 @@ fn extract_page(
         )
         .map_err(|e| PdfiumError::IoError(std::io::Error::other(e.to_string())))?;
         // An image-only page (a scan) is rendered by the pure-Rust raster —
-        // pdfium's bitmap byte for byte (`raster`, its oracle test) — so the
-        // OCR path needs no `libpdfium`; pdfium renders whatever it declines.
+        // pdfium's bitmap byte for byte (`raster`, its oracle test) — and any
+        // other page by the pure-Rust renderer (`render`), so the OCR path
+        // needs no `libpdfium`; pdfium renders only when asked for
+        // (`DOCLING_RS_RENDERER=pdfium`).
         let dw = (width * RENDER_SCALE).round().max(1.0) as u32;
         let dh = (height * RENDER_SCALE).round().max(1.0) as u32;
-        let big = match rust_raster(meta, index, tw as u32, th as u32) {
+        let big = match rust_bitmap(meta, renderer, index, tw as u32, th as u32) {
             Some(img) => Some(img),
             None if page.is_some() => {
                 let cfg = PdfRenderConfig::new()
@@ -915,7 +946,7 @@ fn extract_page(
     } else if render_image {
         let tw = f64::from(width * 1.5).ceil().max(1.0) as i32;
         let th = f64::from(height * 1.5).ceil().max(1.0) as i32;
-        let big = match rust_raster(meta, index, tw as u32, th as u32) {
+        let big = match rust_bitmap(meta, renderer, index, tw as u32, th as u32) {
             Some(img) => img,
             None => {
                 let cfg = PdfRenderConfig::new()

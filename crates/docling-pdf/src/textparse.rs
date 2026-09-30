@@ -505,7 +505,7 @@ fn num(o: &Object) -> Option<f64> {
 }
 
 /// Parse a ToUnicode CMap's `bfchar` / `bfrange` sections into code→string.
-fn parse_tounicode(data: &[u8]) -> HashMap<u32, String> {
+pub(crate) fn parse_tounicode(data: &[u8]) -> HashMap<u32, String> {
     let text = String::from_utf8_lossy(data);
     let mut map = HashMap::new();
     let hex = |s: &str| -> Option<Vec<u16>> {
@@ -1785,7 +1785,7 @@ fn tex_math_builtin(fdict: &Dictionary) -> Option<HashMap<u8, char>> {
 /// digit/punctuation names from the Adobe Glyph List, and common typographic
 /// names. A `.suffix` (`one.taboldstyle`, `a.sc`) is stripped and the base name
 /// retried — docling renders these as the base character.
-fn glyph_name_to_char(name: &[u8]) -> Option<char> {
+pub(crate) fn glyph_name_to_char(name: &[u8]) -> Option<char> {
     let s = std::str::from_utf8(name).ok()?;
     if let Some(hex) = s.strip_prefix("uni") {
         if let Ok(cp) = u32::from_str_radix(hex.get(0..4)?, 16) {

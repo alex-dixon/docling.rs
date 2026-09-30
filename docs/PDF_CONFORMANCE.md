@@ -111,8 +111,10 @@ model inputs — ~4,300 lines of Blend2D drawing code, a 2,200-line font
 resolver with the bundled fallback faces, FreeType outline extraction, and a
 rasterizer whose 8-bit coverage matches Blend2D's, or the borderline scores
 still move (Blend2D generates its pipelines with a JIT; none of it runs in
-wasm). That port is phase 3 of "Retiring pdfium" below; until it lands the
-plugin is the reference renderer and pdfium's chain the fallback.
+wasm). Phase 3 of "Retiring pdfium" below is that port short of the
+coverage values — the pure-Rust renderer is the fallback, measured against
+the plugin rather than byte-identical to it, and the plugin stays the
+reference renderer.
 
 **The docling-parse renderer as an opt-in plugin (measured).** To put a
 number on the gap without making a C++ tree a build dependency, docling-parse's
@@ -206,14 +208,14 @@ still has a job:
 |---|---|---|
 | page count, size, `/Rotate`, links | `pdf_meta` (lopdf) | lopdf cannot read the file at all |
 | text layer | `textparse` (lopdf) | a page the parser reads no text from, when the library is present (`DOCLING_PDFIUM_TEXT`, the unreadable-font fallbacks) |
-| layout / TableFormer page images | the docling-parse renderer plugin | the plugin is not installed (`DOCLING_RS_RENDERER=pdfium`, or `.docling-parse/lib` missing) |
-| a scanned page's OCR bitmap | the Rust raster (phase 2 below — pdfium's bitmap byte for byte) | the page is not image-only in the raster's sense (then pdfium's render + downscale, the `JsON` note above; absent → the plugin's scale-2.0 canvas rather than failing the page) |
-| `render_pages` (the `pages` / VLM raster) | the plugin, else the Rust raster of an image-only page | neither applies |
+| layout / TableFormer page images | the docling-parse renderer plugin, else the Rust renderer (phase 3 below) | `DOCLING_RS_RENDERER=pdfium` |
+| a scanned page's OCR bitmap | the Rust raster (phase 2 below — pdfium's bitmap byte for byte), else the Rust renderer | `DOCLING_RS_RENDERER=pdfium` on a page the raster declines |
+| `render_pages` (the `pages` / VLM raster) | the plugin, else the Rust raster of an image-only page, else the Rust renderer | `DOCLING_RS_RENDERER=pdfium`, or a file lopdf cannot read |
 
-So a checkout with `.docling-parse/` and no `libpdfium` converts the corpus
-end to end (`bind_or_skip` notes the missing library under
-`DOCLING_RS_DEBUG`); a checkout with neither still fails a raster-needing page
-with the install hint for both. Text-only conversion (`--no-ocr` on a
+So a checkout with `.models/` and no `libpdfium` converts the corpus end to
+end (`bind_or_skip` notes the missing library under `DOCLING_RS_DEBUG`), with
+or without the plugin; only a file whose object model lopdf cannot read
+still needs a native library for its raster. Text-only conversion (`--no-ocr` on a
 born-digital file with `extract_text` and no images) never touches pdfium
 either way (pdfium, when installed, is still opened for the text-layer
 fallback). Outputs are unchanged by construction — snapshots 98/98,
@@ -316,8 +318,8 @@ them; `pdfium_backend` tries the Rust raster before pdfium wherever it used
 to render a page bitmap (`DOCLING_RS_SCAN_RASTER=pdfium` switches it off for
 an A/B run).
 
-**What still goes to pdfium** (the module declines, `DOCLING_RS_DEBUG` says
-why): JPX and JBIG2 images (no decoder); CMYK, Lab, Separation, DeviceN and
+**What the raster declines** (and the page renderer of phase 3 draws
+instead; `DOCLING_RS_DEBUG` says why): JPX and JBIG2 images (no decoder); CMYK, Lab, Separation, DeviceN and
 every ICC profile but the 3144-byte sRGB one (pdfium runs Little-CMS on
 them); `/SMask` and colour-key `/Mask`; a stencil mask whose fill colour is
 CMYK or a pattern; 16-bit samples; non-axis-aligned placements
@@ -326,6 +328,111 @@ with annotations other than links; and, of course, any drawn path, shading,
 inline image or visible glyph. `sample_with_rotation_mismatch` is the corpus
 example: its image is `ICCBased` with a 344-byte profile.
 
+### Retiring pdfium — phase 3 landed: the pure-Rust page renderer
+
+`crates/docling-pdf/src/render/` (≈9,000 lines) renders a page's vector
+content, text and images for the models when the docling-parse plugin is not
+installed — what pdfium's chain used to do — in docling-parse's frame:
+
+* **Canvas and frame** (`render/mod.rs`): `ceil(extent − 1e-6)` pixels per
+  side, the crop box (`textparse::page_box`) stretched onto the whole canvas
+  with `scale_x = W / box_w` and `y_canvas = H − (y − b) · scale_y`, drawn
+  in the unrotated frame and `/Rotate` applied to the finished pixels, the
+  way `renderer<BLEND2D>` sizes and orients its bitmap; premultiplied RGBA
+  over white → RGB. A `Renderer` owns one document's caches (parsed fonts,
+  the CMYK table, decoded image samples under a 256 MB budget) across the
+  two scales the pipeline renders every page at.
+* **Content streams** (`render/content.rs`): the graphics state stack,
+  `cm`, paths and their painting operators, clipping (a rectangle clip is a
+  box intersection; any other path becomes a coverage mask, cached by path
+  hash and reused across the text objects a page sets it before), ExtGState
+  alpha / blend mode / line parameters / `SMask`-less groups, `/Rotate`,
+  colour operators over DeviceGray/RGB/CMYK, Indexed, Lab, ICCBased (by
+  `/N`), Separation / DeviceN (tint transforms — PDF functions of types
+  0/2/3/4 in `render/function.rs`, with the PostScript calculator) and
+  Pattern spaces; text objects with every `Tf`/`Td`/`TJ`/`Tz`/`Ts`/`Tr`
+  rule (render modes, word spacing on single-byte 32, invisible text);
+  Form XObjects with `/Matrix` and `/BBox`; transparency groups flattened
+  the way docling-parse's `enter_transparency_group` does (alpha and blend
+  pushed down onto the contents, no soft masks); shadings of all seven types
+  (`sh` and shading patterns; meshes flat-shaded per triangle/patch) and
+  tiling patterns (a nested interpreter renders the cell, tiny-skia tiles
+  it); Widget annotation appearances (`/AP /N`, `/AS`, Hidden/NoView flags —
+  the only annotations docling-parse draws); the docling-parse details a
+  byte-oracle exposed — minimum stroke width one pixel, line width scaled by
+  √|det CTM|, dashes drawn (docling-parse drops them), CMYK through its
+  Yule–Nielsen Neugebauer model (`render/color.rs`; pure K is (35, 31, 32)),
+  an unresolvable glyph as its thin blue box.
+* **Fonts** (`render/font/`): glyph outlines from the embedded program —
+  TrueType/OpenType and bare CFF through `ttf-parser` (with the name→GID map
+  built from `glyph_name` for CFF fonts on a predefined charset, which
+  `ttf-parser` does not index), Type 1 through an own charstring
+  interpreter (`type1.rs`: PFB/PFA, eexec, `Subrs`, `seac`, flex/othersubr),
+  Type 3 through the glyph procedures — selected per ISO 32000-1 9.6.6 /
+  9.7.4 (`/Differences` and base encodings from the generated tables in
+  `encodings.rs`, `cmap` subtable rules, `post` names, CMaps predefined and
+  embedded in `cmap.rs`, `/CIDToGIDMap`); fonts without a program draw
+  from a host face (`fallback.rs`: `.models/fonts`, then the Liberation /
+  DejaVu / URW / Noto directories, `DOCLING_RS_FONT_DIRS` adds more; the
+  style from the base-font name and descriptor flags).
+* **Images** (`render/image.rs`): the phase-2 decoders (`raster::filters`,
+  `raster::jpeg` — now 4-component YCCK/CMYK too — `raster::fax`) behind a
+  general sample reader (1–16 bpc, any colour space above, `/Decode`,
+  `/SMask`, stencil `/Mask` and colour-key masks, `/ImageMask` stencils in
+  the fill colour), reduced by docling-parse's integer factor
+  `fx = src_w / dst_w` with premultiplied box averaging before the bilinear
+  blit; JPX and JBIG2 are placeholders, as docling-parse draws them.
+* **A content pre-pass** (`render/prepass.rs`) for two constructs lopdf's
+  content lexer does not hand over: inline images — lopdf drops every one
+  whose colour space is an abbreviation it does not know (`/G`, `/I`), an
+  Indexed array or a resource name, and every filtered one — are cut out by
+  the pre-pass (header parsed as a dictionary, data by computed length or
+  the `EI` delimiter) and drawn from a side table; the Type 3 operators
+  `d0`/`d1`, which the alphabetic operator lexer splits into `d` and a stray
+  operand that corrupts the next operator, are renamed.
+
+**Measured against the shim** (`render::tests::against_the_docling_parse_shim`,
+run when `.docling-parse/lib` is present; `examples/render_compare.rs` for
+one page with a diff image): all 88 corpus pages at scales 1.0 and 2.0 —
+**178 renders, mean |Δ| 1.05 / 255 per channel, worst
+5.89** (a scanned photograph resampled through a different
+bilinear phase; text pages sit at 0.1–2.3). The renderer is *not* byte-
+identical to Blend2D — its analytic rasterizer, FreeType's hinting-free
+outlines and the JIT compositor round differently from tiny-skia — so the
+shim stays the reference the baselines are pinned to, and the test gates a
+regression (worst < 10, mean < 2), not identity. What that gap does to the
+models, scored against the docling-parse-rendered baselines with the two
+conformance scripts (`DOCLING_RS_RENDERER=rust` / `=pdfium`):
+
+| model inputs rendered by | snapshots exact (98) | groundtruth (18 files) |
+|---|---|---|
+| docling-parse plugin (the reference) | 98 | 374 diff lines, 9 strict |
+| **Rust renderer** (`DOCLING_RS_RENDERER=rust`) | 71 | 454 diff lines, 9 strict |
+| pdfium (`DOCLING_RS_RENDERER=pdfium`, the previous fallback) | 72 | 458 diff lines, 9 strict |
+
+The two fallbacks land in the same place — heron's borderline labels move
+with ±1/255 of anti-aliasing either way — and the Rust renderer is a little
+closer on the heavy files (`2203.01017v2` 58 vs 69 lines, `redp5110` 186 vs
+193, `table_mislabeled_as_picture` 88 vs 97) and further on one
+(`right_to_left_03` 30 vs 4); neither replaces the plugin as the reference.
+
+Synthetic pages (`render::synthetic`, 18 tests) pin the frame mapping, the
+crop box, `/Rotate`, hairline and wide strokes, constant alpha, rectangle and
+shape clips, XObject and inline images with a stencil, axial shadings as
+`sh` and as a pattern, tiling patterns, form `/Matrix` + `/BBox`, group
+alpha pushdown, widget visibility flags, fallback-face text (render mode 3,
+`Tz`), Type 3 procedures, the CMYK model and cache reuse across renders.
+Cost in release (scale 2.0, this container): a plain text page 50–60 ms
+(the shim 70–80), `2206.01062` p1 with its 10k glyphs and six images
+200 ms (shim 470), the clip-heavy `amt_handbook_sample` p1 with 334 clips
+and 157 shadings 190 ms (shim 220 — after `shape_mask` replaced
+`Mask::intersect_path`'s three full-canvas passes per clip with one pass
+over the shape's box, from 1.8 s), a scanned page in its JPEG decode
+(310 ms, shim 110); `DOCLING_RS_TIMING=1` breaks it down
+(`render.content`, `render.glyph_fill`, `render.apply_clip`,
+`render.clip_mask`, `render.sh`, `render.pattern_fill`, `render.image`,
+`render.image_decode`).
+
 **The roadmap.** The aim is everything in Rust except the ONNX models; the
 shim stays as long as it is the byte-exact oracle for what replaces it.
 
@@ -333,17 +440,13 @@ shim stays as long as it is the byte-exact oracle for what replaces it.
    (CCITT, stencil masks, Indexed and low-depth palettes, `/Decode` ranges,
    the reduced-scale JPEG IDCTs). JPX and JBIG2 wait for proven Rust
    decoders.
-3. *Rust vector + text renderer.* The renderer docling-parse runs: content
-   stream interpretation (paths, clipping, transparency groups as docling-parse
-   flattens them), glyph outlines from the embedded / bundled fonts (a Rust
-   FreeType-free outline reader — `ttf-parser`/`skrifa` — for TrueType, CFF
-   and Type 1, plus docling-parse's font-similarity resolver and its bundled
-   fallback faces), and an analytic-coverage rasterizer that reproduces
-   Blend2D's 8-bit coverage values (`tiny-skia`/`zeno`-class, with the exact
-   accumulation order checked). Oracle: the shim, byte-for-byte, via a Rust
-   twin of `dparse_render_check.py` over all 88 corpus pages at scales 1.0 and
-   2.0 — the criterion the plugin itself met (176/176). Landing it does not
-   change one snapshot, by definition.
+3. *Rust vector + text renderer* — landed above as the fallback renderer,
+   measured (not byte-identical) against the shim. What would close the
+   remaining gap: Blend2D's analytic rasterizer and its coverage
+   accumulation order, FreeType's outline flattening, docling-parse's
+   font-similarity resolver with its bundled faces (the host faces differ
+   in metrics where a PDF embeds no program), and the bilinear phase of
+   its image blit. Each is a measurable step on the same test.
 4. *Drop the pdfium text fallback.* Make `textparse` read the corpus files
    pdfium still handles better (broken xref chains lopdf cannot repair, Type 3
    fonts, ToUnicode gaps), fixture by fixture, then delete `ffi_text.rs` and
@@ -1205,11 +1308,12 @@ model-level (or by-design) residual each issue closed with:
    (`DOCLING_RS_RENDERER=auto`, byte-identical to the Python package's
    canvas; measured there: −6 % Markdown diff lines against live docling
    2.129 on the corpus, more on table-heavy manuals), and the baselines are
-   its renders. Closing it for a build *without* the plugin means porting
-   that renderer to the 8-bit coverage value — phase 3 of "Retiring pdfium"
-   above; until then such a build renders with the pdfium chain, and a
-   byte-exact claim about a model *input* there is exactness against the
-   pypdfium2 backend.
+   its renders. A build *without* the plugin renders with the pure-Rust
+   renderer of phase 3 ("Retiring pdfium" above) — docling-parse's frame and
+   drawing rules, tiny-skia's coverage values, mean |Δ| ≈ 1 / 255 against
+   the plugin — so its model inputs are close to, not identical with,
+   docling's; closing that last gap means the 8-bit coverage values
+   themselves.
 
 ---
 

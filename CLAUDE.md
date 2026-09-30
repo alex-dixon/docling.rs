@@ -46,7 +46,7 @@ validated for byte-for-byte conformance against upstream Python docling.
 | --- | --- |
 | `crates/docling-core` | `DoclingDocument` model, Markdown/JSON/DCLX serializers, `MarkdownStreamer`, chunkers; `tree::ItemTree` — docling's item tree a backend can hand the JSON export when the flat nodes cannot express upstream's structure (HTML via `html_tree.rs`, DOCX via `docx_tree.rs`) |
 | `crates/docling` | `DocumentConverter` (format routing), declarative backends (`src/backend/`), streaming (`src/stream.rs`), video (`src/video.rs`) |
-| `crates/docling-pdf` | ML pipeline: pdfium + RT-DETR layout + TableFormer + PP-OCRv3 + enrichment (`ml` feature); pure-Rust text-layer path compiles for wasm without it |
+| `crates/docling-pdf` | ML pipeline: lopdf object model + pure-Rust page renderer (`render/`) / raster (`raster/`) + RT-DETR layout + TableFormer + PP-OCRv3 + enrichment (`ml` feature; pdfium only on request); pure-Rust text-layer path compiles for wasm without it |
 | `crates/docling-onnx` | Shared ONNX Runtime execution-provider selection (`DOCLING_RS_EP`, `cuda`/`tensorrt`/`directml`/`coreml`/`xnnpack` features) for docling-pdf/docling-asr/docling-rag |
 | `crates/docling-asr` | Whisper ASR: symphonia decode (audio + video containers) → log-mel → ONNX encoder/decoder |
 | `crates/docling-cli` | `docling-rs` binary (also `serve` subcommand behind `--features serve`) |
@@ -85,14 +85,16 @@ cargo check -p docling --no-default-features --features pdf-text \
 - `.models/` (repo root): layout, TableFormer, OCR (rec pairs + the optional
   `ocr_det.onnx` text detector, #429), ASR (`.models/asr/`,
   presets in subdirs), enrichment, embedder. `.pdfium/lib/libpdfium.so`
-  (`libpdfium.dylib` on macOS, #298/#299) — the *fallback* renderer/text
-  layer: page count, geometry, `/Rotate` and links come from lopdf
-  (`pdf_meta.rs`), the model images from the docling-parse plugin, and pdfium
-  is loaded only when one of those cannot answer (`bind_or_skip`), so a
-  checkout with the plugin and no pdfium converts PDFs end to end; image-only
-  pages (scans) are rasterized by `raster/` in pure Rust, byte-identical to
-  pdfium (`DOCLING_RS_SCAN_RASTER=pdfium` disables it), so `.models/` alone
-  converts scans. Fetch: `scripts/install/download_dependencies.sh`.
+  (`libpdfium.dylib` on macOS, #298/#299) — optional: page count, geometry,
+  `/Rotate` and links come from lopdf (`pdf_meta.rs`), the model images from
+  the docling-parse plugin when it is installed and from the pure-Rust page
+  renderer (`render/` — tiny-skia paths, embedded/host fonts, shadings,
+  patterns, images; measured against the shim) otherwise, image-only pages
+  (scans) from `raster/` byte-identical to pdfium
+  (`DOCLING_RS_SCAN_RASTER=pdfium` disables it), so `.models/` alone
+  converts every PDF; pdfium is loaded only for the text layer of a file
+  lopdf cannot read and under `DOCLING_RS_RENDERER=pdfium` (`bind_or_skip`).
+  Fetch: `scripts/install/download_dependencies.sh`.
 - Resolution is CWD-relative, then `$DOCLING_RS_MODELS_DIR` for `.models/…`
   paths (#285 — whole-dir override keeping the engine's own selection logic,
   e.g. the OCR en/ch pair; the py bindings point it at their cache), then
@@ -140,9 +142,13 @@ cargo check -p docling --no-default-features --features pdf-text \
   docling-parse's Blend2D renderer for the model inputs whenever the
   `dlopen`ed shim `.docling-parse/lib/libdparse_render.so` resolves
   (`download_dependencies.sh` fetches it from the models release,
-  `scripts/install/build_docling_parse_render.sh` builds it), else pdfium
-  quietly; `docling-parse` = require it, missing → one warning + pdfium;
-  `pdfium` = never load it. `DOCLING_PARSE_RENDER_LIB` /
+  `scripts/install/build_docling_parse_render.sh` builds it), else the
+  pure-Rust renderer quietly; `docling-parse` = require it, missing → one
+  warning + the Rust renderer; `rust` = never load the shim; `pdfium` =
+  the library's render, docling's pypdfium2 chain. `DOCLING_RS_FONT_DIRS`
+  adds host font directories for fonts without a program (`.models/fonts`,
+  Liberation/DejaVu/URW/Noto system dirs are scanned by default).
+  `DOCLING_PARSE_RENDER_LIB` /
   `DOCLING_PARSE_RESOURCES` override the library and `pdf_resources`
   locations. The PDF baselines — `tests/snapshots`, the groundtruth table —
   are docling-parse-rendered, and `tests/data/pdf/groundtruth` mirrors

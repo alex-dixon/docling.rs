@@ -39,6 +39,8 @@ ml = [
     "dep:regex",
     "dep:docling-onnx",
     "dep:libloading",
+    "dep:tiny-skia",
+    "dep:ttf-parser",
 ]
 # GPU execution providers (#74). Each feature makes `ort` link/download an
 # ONNX Runtime binary that contains that provider; which provider actually
@@ -87,6 +89,13 @@ fast_image_resize = { version = "5.1.4", optional = true }
 # is in-tree, `raster/jpeg.rs`: neither zune-jpeg nor jpeg-decoder reproduces
 # libjpeg's bytes.)
 weezl = { version = "0.2", optional = true }
+# The pure-Rust page renderer (`render/`, phase 3 of retiring pdfium): the
+# anti-aliased path rasterizer, masks, gradients and image blits are
+# tiny-skia's (a Skia port, already in the tree through resvg), the TrueType /
+# OpenType / bare-CFF glyph outlines ttf-parser's; Type 1 programs are read in
+# `render/font/type1.rs`.
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"], optional = true }
+ttf-parser = { version = "0.25", default-features = false, features = ["std", "glyph-names", "opentype-layout"], optional = true }
 # CodeFormula enrichment decodes its VLM output with the HF tokenizer
 # (.models/code_formula/tokenizer.json) — same crate/features as docling-core's
 # chunking tokenizer.

@@ -100,11 +100,14 @@ fn err_string(buf: &[c_char]) -> String {
 /// What `DOCLING_RS_RENDERER` asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Choice {
-    /// docling-parse when its library resolves, pdfium otherwise (the default).
+    /// docling-parse when its library resolves, the pure-Rust renderer
+    /// ([`crate::render`]) otherwise (the default).
     Auto,
     /// docling-parse, warning when it is unavailable.
     DoclingParse,
-    /// pdfium only.
+    /// The pure-Rust renderer only (never load the shim).
+    Rust,
+    /// pdfium only (the renderer of docling's pypdfium2 backend).
     Pdfium,
 }
 
@@ -116,10 +119,11 @@ pub fn choice() -> Choice {
         Some(v) => match v.trim().to_ascii_lowercase().as_str() {
             "auto" | "" => Choice::Auto,
             "docling-parse" | "docling_parse" | "dparse" => Choice::DoclingParse,
+            "rust" => Choice::Rust,
             "pdfium" => Choice::Pdfium,
             other => {
                 eprintln!(
-                    "docling-pdf: unknown DOCLING_RS_RENDERER={other:?} (auto | docling-parse | pdfium); using auto"
+                    "docling-pdf: unknown DOCLING_RS_RENDERER={other:?} (auto | docling-parse | rust | pdfium); using auto"
                 );
                 Choice::Auto
             }
@@ -222,14 +226,14 @@ fn load() -> Result<Plugin, String> {
 
 /// The plugin when the shim loads and [`choice`] allows it; `None` otherwise.
 /// Under `auto` an unavailable library is a quiet (`DOCLING_RS_DEBUG`) note
-/// and the pipeline renders with pdfium; under `docling-parse` it warns once
-/// first (degradation over failure either way).
+/// and the pipeline renders with the pure-Rust renderer; under
+/// `docling-parse` it warns once first (degradation over failure either way).
 pub fn plugin() -> Option<&'static Plugin> {
     static PLUGIN: OnceLock<Option<Plugin>> = OnceLock::new();
     PLUGIN
         .get_or_init(|| {
             let choice = choice();
-            if choice == Choice::Pdfium {
+            if matches!(choice, Choice::Rust | Choice::Pdfium) {
                 return None;
             }
             match load() {
@@ -244,13 +248,13 @@ pub fn plugin() -> Option<&'static Plugin> {
                 Err(e) if choice == Choice::DoclingParse => {
                     eprintln!(
                         "docling-pdf: DOCLING_RS_RENDERER=docling-parse but the renderer plugin \
-                         is unavailable ({e}); rendering with pdfium"
+                         is unavailable ({e}); rendering with the Rust renderer"
                     );
                     None
                 }
                 Err(e) => {
                     docling_core::debug_log!(
-                        "docling-pdf: docling-parse renderer plugin not loaded ({e}); rendering with pdfium"
+                        "docling-pdf: docling-parse renderer plugin not loaded ({e}); rendering with the Rust renderer"
                     );
                     None
                 }
@@ -259,13 +263,16 @@ pub fn plugin() -> Option<&'static Plugin> {
         .as_ref()
 }
 
-/// Which renderer produces the model inputs in this process: `"docling-parse"`
-/// or `"pdfium"` — for diagnostics (`--version`-style banners, serve health).
+/// Which renderer produces the model inputs in this process:
+/// `"docling-parse"`, `"rust"` or `"pdfium"` — for diagnostics
+/// (`--version`-style banners, serve health).
 pub fn active_name() -> &'static str {
     if plugin().is_some() {
         "docling-parse"
-    } else {
+    } else if choice() == Choice::Pdfium {
         "pdfium"
+    } else {
+        "rust"
     }
 }
 

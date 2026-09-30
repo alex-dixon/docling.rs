@@ -89,17 +89,20 @@ parameter, `multipart/alternative`) and routed through the HTML backend; with
 `--fetch-images` the archive's own image parts are embedded, resolved by
 `Content-Location`/`cid:` like docling resolves them. The discriminative PDF/image pipeline
 lives in `docling-pdf`: a pure-Rust PDF text parser and page-metadata reader
-(page count, geometry, `/Rotate`, link annotations — all lopdf), the
-docling-parse renderer plugin for the page images the models see (the very
-canvas docling 2.123+ feeds them — #478), and an ONNX layout/TableFormer/OCR
-stack. Image-only pages — scans — are rasterized in pure Rust, byte for byte
-what pdfium renders (its stretch engine and a libjpeg-exact JPEG decoder,
-ported; `DOCLING_RS_SCAN_RASTER=pdfium` switches back). pdfium is a fallback
-only: the raster of a born-digital page when the plugin is not installed, the
-text layer of a file the Rust parser cannot read, and the two image codecs
-the Rust raster lacks (JPX, JBIG2); a checkout with `.docling-parse/` and
-no `libpdfium` converts PDFs end to end, one with `.models/` alone converts
-scans (`docs/PDF_CONFORMANCE.md`, "Retiring pdfium"). TableFormer is ported
+(page count, geometry, `/Rotate`, link annotations — all lopdf), a pure-Rust
+page renderer for the page images the models see (paths, clips, embedded
+and host fonts, shadings, patterns, images and widget appearances drawn in
+docling-parse's frame with tiny-skia; the docling-parse renderer plugin —
+the very canvas docling 2.123+ feeds them, #478 — takes over whenever it is
+installed), and an ONNX layout/TableFormer/OCR stack. Image-only pages —
+scans — are rasterized byte for byte what pdfium renders (its stretch engine
+and a libjpeg-exact JPEG decoder, ported; `DOCLING_RS_SCAN_RASTER=pdfium`
+switches back). pdfium is no longer needed to convert a PDF: a checkout with
+`.models/` alone converts the whole corpus; the library is loaded only for
+the text layer of a file the Rust parser cannot read, for the two image
+codecs the Rust decoders lack (JPX, JBIG2 — drawn as placeholders otherwise)
+and under `DOCLING_RS_RENDERER=pdfium` (`docs/PDF_CONFORMANCE.md`,
+"Retiring pdfium"). TableFormer is ported
 to ONNX and run on every detected table region to recover its structure;
 geometric reconstruction from cell positions remains only as the fallback when
 the TableFormer graphs aren't present (see `docs/PDF_CONFORMANCE.md`).
@@ -1290,7 +1293,7 @@ instead — same models plus `pdfium.dll` — and see
 
 | Asset | Destination |
 | --- | --- |
-| pdfium (Linux x64/arm64, macOS arm64/x64) — the fallback renderer / text layer; optional once the docling-parse plugin is present | `.pdfium/lib/libpdfium.so` (`libpdfium.dylib` on macOS) |
+| pdfium (Linux x64/arm64, macOS arm64/x64) — optional: the text layer of files lopdf cannot read, JPX/JBIG2 images, `DOCLING_RS_RENDERER=pdfium` | `.pdfium/lib/libpdfium.so` (`libpdfium.dylib` on macOS) |
 | RT-DETR layout | `.models/layout_heron.onnx` |
 | PP-OCRv3 rec + dictionary, English (the runtime default) | `.models/ocr_rec_en.onnx`, `.models/en_dict.txt` |
 | PP-OCRv3 rec + dictionary, multilingual `ch_` (`DOCLING_RS_OCR_LANG=ch`; the docling-conformance model — weak Latin word spacing) | `.models/ocr_rec.onnx`, `.models/ppocr_keys_v1.txt` |
@@ -1616,10 +1619,14 @@ layout/TableFormer/OCR page images come from docling-parse's own Blend2D
 renderer — the raster docling 2.123+ feeds its models, #478 — whenever the
 small plugin library `download_dependencies.sh` fetches into
 `.docling-parse/` (or `scripts/install/build_docling_parse_render.sh`
-builds) is present, and from pdfium otherwise; `docling-parse` requires the
-plugin and warns once when it is missing, `pdfium` never loads it;
-`DOCLING_PARSE_RENDER_LIB` / `DOCLING_PARSE_RESOURCES` point at it
-explicitly), `DOCLING_RS_SCAN_RASTER` (`rust`, the default: an image-only
+builds) is present, and from the pure-Rust renderer otherwise;
+`docling-parse` requires the plugin and warns once when it is missing,
+`rust` never loads it, `pdfium` renders with the pdfium library — docling's
+pypdfium2 chain; `DOCLING_PARSE_RENDER_LIB` / `DOCLING_PARSE_RESOURCES`
+point at the plugin explicitly), `DOCLING_RS_FONT_DIRS` (extra font
+directories for the Rust renderer's fallback faces — fonts a PDF does not
+embed; `.models/fonts` and the usual Liberation/DejaVu/URW/Noto system
+directories are scanned by default), `DOCLING_RS_SCAN_RASTER` (`rust`, the default: an image-only
 page's bitmap comes from the pure-Rust raster, pdfium's bytes exactly;
 `pdfium` renders it with the library), `DOCLING_RS_PDF_THREADS` (total thread budget;
 `_WORKERS`/`_INTRA` below split it), `DOCLING_RS_TIMING=1` (per-stage

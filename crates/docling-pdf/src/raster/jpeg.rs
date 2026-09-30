@@ -26,6 +26,10 @@ pub struct Image {
     pub height: usize,
     pub channels: usize,
     pub data: Vec<u8>,
+    /// A four-component image carried an Adobe APP14 marker: its CMYK
+    /// samples are stored inverted (Adobe's convention), as libjpeg hands
+    /// them out.
+    pub adobe_inverted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,7 +442,7 @@ impl<'a> Decoder<'a> {
         if self.height == 0 {
             return Err(Error::Unsupported("DNL-defined height"));
         }
-        if self.width == 0 || !(n == 1 || n == 3) {
+        if self.width == 0 || !(n == 1 || n == 3 || n == 4) {
             return Err(Error::Unsupported("component count"));
         }
         if seg.len() < 6 + 3 * n {
@@ -870,6 +874,26 @@ impl<'a> Decoder<'a> {
         let mut out = vec![0u8; w * h * n];
         if n == 1 {
             out.copy_from_slice(&planes[0][..w * h]);
+        } else if n == 4 {
+            // `ycck_cmyk_convert` (jdcolor.c) for Adobe transform 2, else
+            // the four planes as stored (transform 0 = CMYK).
+            let ycck = self.adobe_transform == Some(2);
+            let t = ycc_tables();
+            for i in 0..w * h {
+                if ycck {
+                    let y = i32::from(planes[0][i]);
+                    let cb = usize::from(planes[1][i]);
+                    let cr = usize::from(planes[2][i]);
+                    out[4 * i] = range_limit(255 - (y + t.cr_r[cr]));
+                    out[4 * i + 1] = range_limit(255 - (y + ((t.cb_g[cb] + t.cr_g[cr]) >> 16)));
+                    out[4 * i + 2] = range_limit(255 - (y + t.cb_b[cb]));
+                } else {
+                    out[4 * i] = planes[0][i];
+                    out[4 * i + 1] = planes[1][i];
+                    out[4 * i + 2] = planes[2][i];
+                }
+                out[4 * i + 3] = planes[3][i];
+            }
         } else if convert {
             let t = ycc_tables();
             for i in 0..w * h {
@@ -892,6 +916,7 @@ impl<'a> Decoder<'a> {
             height: h,
             channels: n,
             data: out,
+            adobe_inverted: n == 4 && self.adobe_transform.is_some(),
         })
     }
 

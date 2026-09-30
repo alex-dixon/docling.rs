@@ -860,7 +860,9 @@ dependencies = [
  "regex",
  "tar",
  "time",
+ "tiny-skia",
  "tokenizers",
+ "ttf-parser",
  "weezl 0.2.1",
 ]
 
