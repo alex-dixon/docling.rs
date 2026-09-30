@@ -847,6 +847,11 @@ library builder, a `force_full_page_ocr` option in docling-rs-serve, the
 `--no-text-panels` keeps every detected picture as a picture: it disables the
 demotion of uncaptioned dense-text "picture" regions into paragraphs (the
 recovery that turns misdetected text panels back into text, issue #173).
+A second recovery of the same kind has no flag: a one-line paragraph in the
+bottom margin directly under a heading that has no other body — a CV's
+`Languages` line — comes out of the layout model as `page_footer` and would
+vanish from the Markdown with the rest of the page furniture; it is read as
+that heading's text instead.
 
 Scanned pages with a `/Rotate` flag (a scan that came in sideways or
 upside-down — the most common defect of real-world scans) are normalized
