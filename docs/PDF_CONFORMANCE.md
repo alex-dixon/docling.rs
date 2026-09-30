@@ -111,8 +111,8 @@ model inputs — ~4,300 lines of Blend2D drawing code, a 2,200-line font
 resolver with the bundled fallback faces, FreeType outline extraction, and a
 rasterizer whose 8-bit coverage matches Blend2D's, or the borderline scores
 still move (Blend2D generates its pipelines with a JIT; none of it runs in
-wasm). That is model-level work, item 5 of the blocker list below; the pdfium
-chain stays the reference.
+wasm). That port is phase 3 of "Retiring pdfium" below; until it lands the
+plugin is the reference renderer and pdfium's chain the fallback.
 
 **The docling-parse renderer as an opt-in plugin (measured).** To put a
 number on the gap without making a C++ tree a build dependency, docling-parse's
@@ -182,10 +182,83 @@ with docling's hint, byte-identical to its inputs.
 
 So the renderer explains a measurable but modest share of the corpus residual
 (the issue's 1,962-page manual, with whole tables flipping label, is the
-heavier case), and the corpus baselines were produced against a pdfium-era
-docling. The plugin therefore stays opt-in: snapshots and the groundtruth
-table are pdfium's, and a switch of the default would come with a baseline
-regeneration against live docling, not against the committed groundtruth.
+heavier case). Since the baseline refresh against live docling above
+(`DOCLING_RS_RENDERER=auto`), the plugin is the renderer whenever it resolves:
+the snapshots and the groundtruth table are its renders, and pdfium's chain is
+what a checkout without the plugin falls back to.
+
+### Retiring pdfium — phase 1 landed: the object model answers everything but the raster
+
+Everything the pipeline asked pdfium for *besides* rasterizing is now read
+from the PDF object model in pure Rust (`pdf_meta.rs`, on the same lopdf
+`Document` the text parser loads with its xref/stream repairs): the page count,
+each page's display geometry (`textparse::page_box` — CropBox ∩ MediaBox with
+pdfium's fallbacks — with the inherited `/Rotate` normalized the way
+`CPDF_Page::GetPageRotation` normalizes it, `(rotate / 90) % 4`), and the URI
+link annotations (`/Link` annots whose `/A` is a `/URI` action, as top-left
+rects in the content frame). `pdfium_backend::tests::pdf_meta_matches_pdfium_on_the_corpus`
+checks all three against the library on every PDF of `tests/data/pdf/sources`
+and `tests/data/scanned/sources` (geometry to 0.01 pt, rotation and link
+rects to 0.1 pt): identical. The conversion then loads pdfium only when it
+still has a job:
+
+| need | answered by | pdfium when |
+|---|---|---|
+| page count, size, `/Rotate`, links | `pdf_meta` (lopdf) | lopdf cannot read the file at all |
+| text layer | `textparse` (lopdf) | a page the parser reads no text from, when the library is present (`DOCLING_PDFIUM_TEXT`, the unreadable-font fallbacks) |
+| layout / TableFormer page images | the docling-parse renderer plugin | the plugin is not installed (`DOCLING_RS_RENDERER=pdfium`, or `.docling-parse/lib` missing) |
+| a scanned page's OCR bitmap | pdfium's render + downscale (the `JsON` note above) | present; absent → the plugin's scale-2.0 canvas, rather than failing the page |
+| `render_pages` (the `pages` / VLM raster) | the plugin | the plugin is not installed |
+
+So a checkout with `.docling-parse/` and no `libpdfium` converts the corpus
+end to end (`bind_or_skip` notes the missing library under
+`DOCLING_RS_DEBUG`); a checkout with neither still fails a raster-needing page
+with the install hint for both. Text-only conversion (`--no-ocr` on a
+born-digital file with `extract_text` and no images) never touches pdfium
+either way (pdfium, when installed, is still opened for the text-layer
+fallback). Outputs are unchanged by construction — snapshots 98/98,
+groundtruth 374 lines / 9 of 18 strict, the scanned suite byte-identical —
+because the same numbers flow into the same places; what changed is who
+answers. Speed does not move: pdfium's open + geometry was ~1–2 % of a
+conversion (layout inference is ~30 %), so this phase is about parity and a
+single-runtime build, not wall time.
+
+**The roadmap.** The aim is everything in Rust except the ONNX models; the
+shim stays as long as it is the byte-exact oracle for what replaces it.
+
+2. *Rust raster for image-only pages.* A scanned page is one (sometimes a few)
+   `/Image` XObjects blitted onto a white page. Decode the embedded image in
+   Rust (`image` for DCT/Flate/LZW/RunLength, plus the PDF predictors and
+   `/Decode` arrays; `/ImageMask` and `/SMask` compositing), place it by its
+   CTM, resample to the 2.0 canvas with the pipeline's existing cv2/PIL-exact
+   kernels — and keep pdfium for the codecs Rust lacks a maintained decoder
+   for (JBIG2, JPX, CCITT G4) until `jbig2dec`/`jpeg2k`-class crates are
+   proven on the scanned corpus. Oracle: pdfium's own bitmap on
+   `tests/data/scanned/`, byte-for-byte, so the OCR groundtruth stays pinned.
+3. *Rust vector + text renderer.* The renderer docling-parse runs: content
+   stream interpretation (paths, clipping, transparency groups as docling-parse
+   flattens them), glyph outlines from the embedded / bundled fonts (a Rust
+   FreeType-free outline reader — `ttf-parser`/`skrifa` — for TrueType, CFF
+   and Type 1, plus docling-parse's font-similarity resolver and its bundled
+   fallback faces), and an analytic-coverage rasterizer that reproduces
+   Blend2D's 8-bit coverage values (`tiny-skia`/`zeno`-class, with the exact
+   accumulation order checked). Oracle: the shim, byte-for-byte, via a Rust
+   twin of `dparse_render_check.py` over all 88 corpus pages at scales 1.0 and
+   2.0 — the criterion the plugin itself met (176/176). Landing it does not
+   change one snapshot, by definition.
+4. *Drop the pdfium text fallback.* Make `textparse` read the corpus files
+   pdfium still handles better (broken xref chains lopdf cannot repair, Type 3
+   fonts, ToUnicode gaps), fixture by fixture, then delete `ffi_text.rs` and
+   `DOCLING_PDFIUM_TEXT`.
+5. *Remove pdfium and the shim.* Once 2–4 hold on the corpus and on the
+   2,000-page manuals of #478, `pdfium-render` leaves `Cargo.toml`, the
+   `.pdfium/` asset goes out of `download_dependencies.sh`, the shim becomes a
+   development-only oracle (kept in `ffi/` for the conformance scripts), and
+   the `pdf-text` (wasm) build and the default one share one PDF stack.
+
+Each phase is one branch and lands only with the conformance runs of this
+document unchanged (`pdf_conformance.sh`, `pdf_groundtruth.sh`, the scanned
+suite) plus its own oracle check; none of them is scheduled by a date.
 
 ### Region-scoped OCR reads overlapping regular regions once
 
@@ -805,9 +878,11 @@ fixtures.
 
 ## How the pipeline works
 
-pdfium extracts the glyph layer and renders each page to a bitmap; an ONNX stack
-(layout detection, TableFormer, PaddleOCR) interprets it; regions are assembled in
-reading order into a `DoclingDocument`. Note on OCR models: everything in this
+A pure-Rust parser (lopdf) reads the glyph layer and the page metadata, the
+docling-parse renderer plugin renders each page to a bitmap (pdfium is the
+fallback for both — "Retiring pdfium" above); an ONNX stack (layout detection,
+TableFormer, PaddleOCR) interprets it; regions are assembled in reading order
+into a `DoclingDocument`. Note on OCR models: everything in this
 document — snapshots, groundtruth, the conformance numbers — is measured with the
 multilingual `ch_PP-OCRv3` recognition model (docling parity), which
 `scripts/conformance/pdf_*.sh` pin via `DOCLING_OCR_REC_ONNX`/`DOCLING_OCR_DICT`.
@@ -1028,14 +1103,15 @@ model-level (or by-design) residual each issue closed with:
    pixels — the anti-aliasing of every glyph edge and hairline — and on
    borderline regions heron labels a whole table the other way (measured in
    "The layout input is pypdfium2-exact, not docling-parse-exact" above).
-   The renderer is available as a runtime plugin
-   (`DOCLING_RS_RENDERER=docling-parse`, byte-identical to the Python
-   package's canvas; measured there: −6 % Markdown diff lines against live
-   docling 2.129 on the corpus, more on table-heavy manuals). Closing it for
-   the default build means porting that renderer to the 8-bit coverage value;
-   until then the pdfium chain is the reference, and every byte-exact claim
-   about a model *input* in this document is exactness against the pypdfium2
-   backend.
+   The renderer runs as a runtime plugin whenever it is installed
+   (`DOCLING_RS_RENDERER=auto`, byte-identical to the Python package's
+   canvas; measured there: −6 % Markdown diff lines against live docling
+   2.129 on the corpus, more on table-heavy manuals), and the baselines are
+   its renders. Closing it for a build *without* the plugin means porting
+   that renderer to the 8-bit coverage value — phase 3 of "Retiring pdfium"
+   above; until then such a build renders with the pdfium chain, and a
+   byte-exact claim about a model *input* there is exactness against the
+   pypdfium2 backend.
 
 ---
 

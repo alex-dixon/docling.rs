@@ -39,7 +39,7 @@ bulk of the porting under review).
 > OPC archive), **image extraction**, and **MHTML** (docling#4184's
 > `InputFormat.MHTML`). The declarative formats are pure-Rust and checked byte-for-byte
 > against *live* docling; the PDF/image/METS ML path lives in `docling-pdf`
-> (a pure-Rust PDF text parser + pdfium rasterization + ONNX
+> (a pure-Rust PDF text/metadata parser + the docling-parse renderer plugin, pdfium as the fallback, + ONNX
 > layout/TableFormer/OCR + a port of docling-parse's line sanitizer) and is also
 > measured byte-for-byte against live docling — **6 / 14 PDF fixtures exact, 7 / 14
 > whitespace-normalized** (see `PDF_CONFORMANCE.md`), with a snapshot baseline
@@ -457,7 +457,10 @@ These are deliberate or unavoidable divergences, not bugs.
      reading-order predictor (2.127's same-row links included, #424) with
      cluster cells joined in docling-parse index order, and false-picture /
      page-number layout fixes. The parser is now the **sole** text
-     source — pdfium does only page rasterisation + link annotations. Its per-word
+     source, and page count / geometry / `/Rotate` / link annotations are read
+     from the same lopdf document (`pdf_meta.rs`) — pdfium is left with the
+     raster when the docling-parse plugin is absent and the text layer of a
+     file the parser cannot read. Its per-word
      cells reproduce docling-parse's `word_cells` byte-for-byte (377/377 on
      `2305-pg9`), which is what TableFormer matches against; a char-frequency
      validator (`scripts/test/parser_completeness.py`) confirms nothing is silently

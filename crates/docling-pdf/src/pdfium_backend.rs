@@ -249,24 +249,11 @@ impl PdfDocument {
     /// Note: this materialises **every** page's rendered bitmap in memory at
     /// once. For large documents prefer [`for_each_page`], which streams.
     pub fn open(bytes: &[u8], password: Option<&str>) -> Result<Self, PdfiumError> {
-        let pdfium = bind()?;
-        let ffi = FfiText::load(pdfium.bindings(), bytes, password);
-        let doc = pdfium.load_pdf_from_byte_slice(bytes, password)?;
-        let dparse = crate::dparse_render::Doc::open_if_enabled(bytes, password);
-        let mut rust = rust_parser_cells(bytes);
         let mut pages = Vec::new();
-        for (i, page) in doc.pages().iter().enumerate() {
-            let rc = rust.as_mut().map(|p| p.cells_timed(i));
-            pages.push(extract_page(
-                &page,
-                &ffi,
-                i as i32,
-                rc,
-                true,
-                true,
-                dparse.as_ref(),
-            )?);
-        }
+        for_each_page::<PdfiumError, _>(bytes, password, true, true, None, |_, _, page| {
+            pages.push(page);
+            Ok(())
+        })?;
         Ok(PdfDocument { pages })
     }
 }
@@ -302,6 +289,16 @@ impl crate::textparse::PageTextParser {
 /// Number of pages in a PDF, without rendering any of them — used to decide
 /// whether a document is worth spinning up the parallel worker pool.
 pub fn page_count(bytes: &[u8], password: Option<&str>) -> Result<usize, PdfiumError> {
+    // The pure-Rust object model first (no pdfium needed), then the
+    // docling-parse plugin's count, then pdfium — the order every entry point
+    // here follows now.
+    if let Some(meta) = crate::timing::timed("meta.open", || crate::pdf_meta::PdfMeta::open(bytes))
+    {
+        return Ok(meta.page_count());
+    }
+    if let Some(dp) = crate::dparse_render::Doc::open_if_enabled(bytes, password) {
+        return Ok(dp.page_count());
+    }
     crate::timing::timed("pdfium.page_count", || {
         let pdfium = bind()?;
         let doc = pdfium.load_pdf_from_byte_slice(bytes, password)?;
@@ -345,13 +342,24 @@ where
     E: From<PdfiumError>,
     F: FnMut(usize, usize, PdfPage) -> Result<(), E>,
 {
-    let pdfium = bind()?;
-    let (ffi, doc) = crate::timing::timed("pdfium.open", || {
-        let ffi = FfiText::load(pdfium.bindings(), bytes, password);
-        pdfium
-            .load_pdf_from_byte_slice(bytes, password)
-            .map(|doc| (ffi, doc))
-    })?;
+    // The pure-Rust object model: page count, geometry, `/Rotate`, links.
+    // `None` only for a file lopdf cannot read even after the parser's
+    // repairs; pdfium then answers for it, as it always did.
+    let meta = crate::timing::timed("meta.open", || crate::pdf_meta::PdfMeta::open(bytes));
+    // The docling-parse renderer (#478, the `auto` default when its library
+    // is installed): the page images the models see come from it.
+    let dparse = if render_image {
+        crate::dparse_render::Doc::open_if_enabled(bytes, password)
+    } else {
+        None
+    };
+    // pdfium, when it is installed — and only required when the plugin or the
+    // object model cannot stand in for it.
+    let pdfium = bind_or_skip(meta.is_some(), !render_image || dparse.is_some())?;
+    let session = match &pdfium {
+        Some(p) => Some(PdfiumSession::open(p, bytes, password)?),
+        None => None,
+    };
     // `extract_text = false` (full-page OCR forced, docling#4061 / 2.122):
     // the text layer would be cleared unread, so neither the pure-Rust parser
     // nor pdfium's text page is decoded at all — on vector-dense pages (CAD
@@ -361,15 +369,23 @@ where
     } else {
         None
     };
-    // The opt-in docling-parse renderer (#478): when active, the page images
-    // the models see come from it instead of pdfium.
-    let dparse = if render_image {
-        crate::dparse_render::Doc::open_if_enabled(bytes, password)
-    } else {
-        None
+    let pages = session.as_ref().map(|s| s.doc.pages());
+    // pdfium's count when it is loaded (a damaged file can make the two
+    // object models disagree, and pdfium's pages are the ones rendered), the
+    // object model's otherwise.
+    let total = match (&pages, &meta) {
+        (Some(p), _) => p.len() as usize,
+        (None, Some(m)) => m.page_count(),
+        (None, None) => 0,
     };
-    let pages = doc.pages();
-    let total = pages.len() as usize;
+    // The object model's geometry and links are used whenever it read the same
+    // number of pages pdfium did (or pdfium is absent); a disagreeing file keeps
+    // pdfium's answers throughout.
+    let meta = meta.filter(|m| {
+        pages
+            .as_ref()
+            .is_none_or(|p| p.len() as usize == m.page_count())
+    });
     let (first, last) = range.unwrap_or((0, total.saturating_sub(1)));
     // Index the window directly: iterating `pages.iter()` from page 0 and
     // skipping to `first` loads (and closes) every page before the window —
@@ -379,16 +395,33 @@ where
         if i >= total {
             break;
         }
-        let page = pages.get(i as pdfium_render::prelude::PdfPageIndex)?;
+        let page = match &pages {
+            Some(p) => Some(p.get(i as pdfium_render::prelude::PdfPageIndex)?),
+            None => None,
+        };
+        let geom = match (&meta, &page) {
+            (Some(m), _) => m.geometry(i).ok_or_else(|| no_raster(i as i32))?,
+            (None, Some(p)) => pdfium_geom(p),
+            (None, None) => return Err(no_raster(i as i32).into()),
+        };
+        let links = match (&meta, &page) {
+            (Some(m), _) => m.links(i),
+            (None, Some(p)) => extract_links(p, geom.unrotated().1),
+            (None, None) => Vec::new(),
+        };
         let rc = rust.as_mut().map(|p| p.cells_timed(i));
         let extracted = extract_page(
-            &page,
-            &ffi,
+            PageSources {
+                page: page.as_ref(),
+                ffi: session.as_ref().map(|s| &s.ffi),
+                dparse: dparse.as_ref(),
+            },
+            geom,
+            links,
             i as i32,
             rc,
             render_image,
             extract_text,
-            dparse.as_ref(),
         )?;
         f(i, total, extracted)?;
     }
@@ -473,10 +506,24 @@ pub fn render_pages(
     range: Option<(usize, usize)>,
     scale: f32,
 ) -> Result<Vec<RenderedPage>, crate::PdfError> {
-    let pdfium = bind()?;
-    let doc = pdfium.load_pdf_from_byte_slice(bytes, password)?;
-    let pages = doc.pages();
-    let total = pages.len() as usize;
+    // The docling-parse renderer plugin renders the display bitmap when it is
+    // installed (full-resolution bitmap decode: this is a viewer's render,
+    // not a model input); pdfium otherwise.
+    let dparse = crate::dparse_render::Doc::open_if_enabled(bytes, password);
+    let pdfium = match &dparse {
+        Some(_) => None,
+        None => Some(bind()?),
+    };
+    let doc = match &pdfium {
+        Some(p) => Some(p.load_pdf_from_byte_slice(bytes, password)?),
+        None => None,
+    };
+    let pages = doc.as_ref().map(|d| d.pages());
+    let total = match (&pages, &dparse) {
+        (Some(p), _) => p.len() as usize,
+        (None, Some(dp)) => dp.page_count(),
+        (None, None) => 0,
+    };
     let (first, last) = match range {
         None => (0, total.saturating_sub(1)),
         Some((first, last)) => {
@@ -498,22 +545,32 @@ pub fn render_pages(
         if i >= total {
             break;
         }
-        let page = pages.get(i as pdfium_render::prelude::PdfPageIndex)?;
-        // pdfium applies /Rotate itself, so the bitmap is the page as a viewer
-        // shows it — no orientation handling needed (the pipeline's scanned-page
-        // un-rotation is an OCR-conformance concern, not a display one).
-        let (tw, th) = checked_render_dims(
-            f64::from(page.width().value * scale),
-            f64::from(page.height().value * scale),
-            i + 1,
-        )?;
-        let cfg = PdfRenderConfig::new()
-            .set_target_width(tw)
-            .set_target_height(th);
-        let bitmap = crate::timing::timed("pdfium.rasterize", || {
-            page.render_with_config(&cfg)
-                .map(|b| b.as_image().into_rgb8())
-        })?;
+        // Both renderers apply /Rotate themselves, so the bitmap is the page as
+        // a viewer shows it — no orientation handling needed (the pipeline's
+        // scanned-page un-rotation is an OCR-conformance concern, not a display
+        // one).
+        let bitmap = match (&pages, &dparse) {
+            (Some(pages), _) => {
+                let page = pages.get(i as pdfium_render::prelude::PdfPageIndex)?;
+                let (tw, th) = checked_render_dims(
+                    f64::from(page.width().value * scale),
+                    f64::from(page.height().value * scale),
+                    i + 1,
+                )?;
+                let cfg = PdfRenderConfig::new()
+                    .set_target_width(tw)
+                    .set_target_height(th);
+                crate::timing::timed("pdfium.rasterize", || {
+                    page.render_with_config(&cfg)
+                        .map(|b| b.as_image().into_rgb8())
+                })?
+            }
+            (None, Some(dp)) => {
+                crate::timing::timed("dparse.rasterize", || dp.render(i, f64::from(scale), 0.0))
+                    .map_err(crate::PdfError::Pdfium)?
+            }
+            (None, None) => return Err(no_raster(i as i32).into()),
+        };
         let mut png = Vec::new();
         bitmap
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -529,33 +586,112 @@ pub fn render_pages(
 }
 
 #[cfg(feature = "ml")]
+/// pdfium's view of a page's geometry, for the files lopdf cannot read
+/// ([`crate::pdf_meta::PdfMeta::open`] returned `None`) — the same numbers
+/// `pdf_meta` computes from the object model.
+fn pdfium_geom(page: &pdfium_render::prelude::PdfPage<'_>) -> crate::pdf_meta::PageGeom {
+    crate::pdf_meta::PageGeom {
+        width: page.width().value,
+        height: page.height().value,
+        rotation: match page.rotation() {
+            Ok(PdfPageRenderRotation::Degrees90) => 90u16,
+            Ok(PdfPageRenderRotation::Degrees180) => 180,
+            Ok(PdfPageRenderRotation::Degrees270) => 270,
+            _ => 0,
+        },
+    }
+}
+
+#[cfg(feature = "ml")]
+/// The error for a page that needs a raster when neither the docling-parse
+/// renderer plugin nor pdfium is available.
+fn no_raster(index: i32) -> PdfiumError {
+    PdfiumError::IoError(std::io::Error::other(format!(
+        "page {}: no page renderer — the docling-parse renderer plugin is not installed \
+         (.docling-parse/lib, fetched by scripts/install/download_dependencies.sh) and \
+         pdfium could not be loaded (PDFIUM_DYNAMIC_LIB_PATH / .pdfium/lib)",
+        index + 1
+    )))
+}
+
+#[cfg(feature = "ml")]
+/// Everything pdfium contributes to a conversion when it is present: the
+/// document, its page handles, and the raw text FFI. Absent (`None`) when the
+/// library is not installed and the conversion can do without it — the page
+/// geometry and links come from [`crate::pdf_meta`], the raster from the
+/// docling-parse plugin, the text layer from the pure-Rust parser.
+struct PdfiumSession<'a> {
+    doc: pdfium_render::prelude::PdfDocument<'a>,
+    ffi: FfiText<'a>,
+}
+
+#[cfg(feature = "ml")]
+impl<'a> PdfiumSession<'a> {
+    fn open(
+        pdfium: &'a Pdfium,
+        bytes: &'a [u8],
+        password: Option<&str>,
+    ) -> Result<Self, PdfiumError> {
+        crate::timing::timed("pdfium.open", || {
+            let ffi = FfiText::load(pdfium.bindings(), bytes, password);
+            pdfium
+                .load_pdf_from_byte_slice(bytes, password)
+                .map(|doc| PdfiumSession { doc, ffi })
+        })
+    }
+}
+
+#[cfg(feature = "ml")]
+/// Bind pdfium for a conversion, or decide it can run without it: when the
+/// pure-Rust object model read the file (`meta`) and either no raster is
+/// needed or the docling-parse plugin renders it (`raster_ready`), a missing
+/// pdfium is a quiet note; otherwise its load error — with the install hint —
+/// is the conversion's error, as before.
+fn bind_or_skip(meta_ok: bool, raster_ready: bool) -> Result<Option<Pdfium>, PdfiumError> {
+    match bind() {
+        Ok(p) => Ok(Some(p)),
+        Err(e) if meta_ok && raster_ready => {
+            docling_core::debug_log!(
+                "docling-pdf: pdfium unavailable ({e}); converting with the pure-Rust object model and the docling-parse renderer"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The native sources a page may draw on, each optional: pdfium's page handle
+/// and raw text FFI (absent in a plugin-only checkout — [`bind_or_skip`]) and
+/// the docling-parse renderer (absent when the plugin is not installed or no
+/// raster is wanted).
+#[cfg(feature = "ml")]
+#[derive(Clone, Copy)]
+struct PageSources<'a> {
+    page: Option<&'a pdfium_render::prelude::PdfPage<'a>>,
+    ffi: Option<&'a FfiText<'a>>,
+    dparse: Option<&'a crate::dparse_render::Doc>,
+}
+
+#[cfg(feature = "ml")]
 fn extract_page(
-    page: &pdfium_render::prelude::PdfPage<'_>,
-    ffi: &FfiText<'_>,
+    sources: PageSources<'_>,
+    geom: crate::pdf_meta::PageGeom,
+    links: Vec<LinkAnnot>,
     index: i32,
     rust_cells: Option<crate::textparse::PageParserCells>,
     render_image: bool,
     extract_text: bool,
-    dparse: Option<&crate::dparse_render::Doc>,
 ) -> Result<PdfPage, PdfiumError> {
-    // pdfium reports the page size (and renders) in the *display* frame —
-    // `/Rotate` applied — while every text coordinate (its own text page, the
+    let PageSources { page, ffi, dparse } = sources;
+    // The page size (and the render) is the *display* frame — `/Rotate`
+    // applied — while every text coordinate (pdfium's own text page, the
     // pure-Rust parser's MediaBox-based glyphs, link annotation rects) lives
     // in the unrotated frame (docling#4008, 2.121). Keep the unrotated box
     // around for the y-flips and bring every rect into the display frame.
-    let width = page.width().value;
-    let height = page.height().value;
-    let rotation = match page.rotation() {
-        Ok(PdfPageRenderRotation::Degrees90) => 90u16,
-        Ok(PdfPageRenderRotation::Degrees180) => 180,
-        Ok(PdfPageRenderRotation::Degrees270) => 270,
-        _ => 0,
-    };
-    let (unrot_w, unrot_h) = if rotation == 90 || rotation == 270 {
-        (height, width)
-    } else {
-        (width, height)
-    };
+    let width = geom.width;
+    let height = geom.height;
+    let rotation = geom.rotation;
+    let (unrot_w, unrot_h) = geom.unrotated();
 
     // Default: use the pure-Rust text parser instead of pdfium's text layer
     // (override with `DOCLING_PDFIUM_TEXT`). Prose line cells always come from the
@@ -571,17 +707,19 @@ fn extract_page(
     // The parser covers prose/words/code from one shared glyph pass, so on the
     // common (parser-succeeded) page all three are already satisfied and this
     // pdfium FFI call — otherwise fully discarded below — is skipped outright.
-    let (mut cells, mut code_cells, mut word_cells) =
-        if need_pdfium_prose || need_pdfium_words || need_pdfium_code {
+    // Without pdfium (plugin-only checkout) the parser's cells are all there
+    // is: a page it cannot read is a scanned page for the OCR path.
+    let (mut cells, mut code_cells, mut word_cells) = match (ffi, page) {
+        (Some(ffi), Some(page)) if need_pdfium_prose || need_pdfium_words || need_pdfium_code => {
             let (mut cells, code_cells, word_cells) =
                 crate::timing::timed("ffi.page_cells", || ffi.page_cells(index, unrot_h));
             if cells.is_empty() {
                 cells = segment_cells(&page.text()?, unrot_h);
             }
             (cells, code_cells, word_cells)
-        } else {
-            (Vec::new(), Vec::new(), Vec::new())
-        };
+        }
+        _ => (Vec::new(), Vec::new(), Vec::new()),
+    };
     if !rc.prose.is_empty() {
         cells = rc.prose;
     }
@@ -614,10 +752,12 @@ fn extract_page(
     // `ch` conformance recognizer feels (`scanned/ocr_test.pdf` read `JsON` for
     // `JSON` from either docling-parse raster, hint 1.0 or full resolution);
     // pdfium's raster is the one the scanned groundtruth was matched with, so
-    // OCR keeps it (recorded in PDF_CONFORMANCE.md). The canvases are
-    // `ceil`-sized where pdfium's are `round`ed; every consumer maps points
-    // through `RENDER_SCALE`, not through the image size, so the extra
-    // row/column is harmless.
+    // OCR keeps it (recorded in PDF_CONFORMANCE.md) — as long as pdfium is
+    // loaded: a checkout with the plugin and no `libpdfium` OCRs the
+    // docling-parse raster rather than failing the page (degradation over
+    // failure). The canvases are `ceil`-sized where pdfium's are `round`ed;
+    // every consumer maps points through `RENDER_SCALE`, not through the
+    // image size, so the extra row/column is harmless.
     let scanned = cells.is_empty() && word_cells.is_empty() && code_cells.is_empty();
     let (mut dp_image, mut dp_layout) = (None, None);
     if let (true, Some(dp)) = (render_image, dparse) {
@@ -626,7 +766,7 @@ fn extract_page(
             dp.render(index as usize, 1.0, 1.0)
         })
         .map_err(io_err)?;
-        if !scanned {
+        if !scanned || page.is_none() {
             let full = crate::timing::timed("dparse.render", || {
                 dp.render(index as usize, f64::from(RENDER_SCALE), 1.0)
             })
@@ -658,6 +798,7 @@ fn extract_page(
         let cfg = PdfRenderConfig::new()
             .set_target_width(tw)
             .set_target_height(th);
+        let page = page.ok_or_else(|| no_raster(index))?;
         let big = crate::timing::timed("pdfium.render", || {
             page.render_with_config(&cfg)
                 .map(|b| b.as_image().into_rgb8())
@@ -685,6 +826,7 @@ fn extract_page(
         let cfg = PdfRenderConfig::new()
             .set_target_width(tw)
             .set_target_height(th);
+        let page = page.ok_or_else(|| no_raster(index))?;
         let big = crate::timing::timed("pdfium.render_layout", || {
             page.render_with_config(&cfg)
                 .map(|b| b.as_image().into_rgb8())
@@ -698,7 +840,7 @@ fn extract_page(
         None
     };
 
-    let mut links = extract_links(page, unrot_h);
+    let mut links = links;
     if rotation != 0 {
         for l in &mut links {
             let (a, t, r, b) = to_display_frame((l.l, l.t, l.r, l.b), rotation, unrot_w, unrot_h);
@@ -1560,6 +1702,85 @@ fn push_line(
 #[cfg(test)]
 mod tests {
     use super::{checked_render_dims, max_render_side, to_display_frame};
+
+    /// The pure-Rust object model must answer exactly what pdfium answers —
+    /// page count, display size, `/Rotate`, URI links — on every corpus PDF,
+    /// or a checkout without pdfium would convert differently. Needs the
+    /// library; skips cleanly without it (CI has no pdfium).
+    #[test]
+    fn pdf_meta_matches_pdfium_on_the_corpus() {
+        let Ok(pdfium) = super::bind() else {
+            eprintln!("skipping: pdfium not found");
+            return;
+        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for dir in ["tests/data/pdf/sources", "tests/data/scanned/sources"] {
+            let Ok(rd) = std::fs::read_dir(root.join(dir)) else {
+                continue;
+            };
+            files.extend(
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|e| e == "pdf")),
+            );
+        }
+        files.sort();
+        assert!(!files.is_empty(), "corpus not found");
+        let mut checked = 0;
+        for path in files {
+            let bytes = std::fs::read(&path).unwrap();
+            let Ok(doc) = pdfium.load_pdf_from_byte_slice(&bytes, None) else {
+                continue; // password fixtures etc.
+            };
+            let Some(meta) = crate::pdf_meta::PdfMeta::open(&bytes) else {
+                panic!(
+                    "{}: lopdf could not read a file pdfium reads",
+                    path.display()
+                );
+            };
+            let pages = doc.pages();
+            assert_eq!(
+                meta.page_count(),
+                pages.len() as usize,
+                "{}",
+                path.display()
+            );
+            for i in 0..meta.page_count() {
+                let page = pages
+                    .get(i as pdfium_render::prelude::PdfPageIndex)
+                    .unwrap();
+                let want = super::pdfium_geom(&page);
+                let got = meta.geometry(i).unwrap();
+                assert!(
+                    (got.width - want.width).abs() < 0.01
+                        && (got.height - want.height).abs() < 0.01
+                        && got.rotation == want.rotation,
+                    "{} p{}: meta {got:?} vs pdfium {want:?}",
+                    path.display(),
+                    i + 1
+                );
+                let mut want_links = super::extract_links(&page, want.unrotated().1);
+                let mut got_links = meta.links(i);
+                let key = |l: &super::LinkAnnot| {
+                    (
+                        l.uri.clone(),
+                        (l.l * 10.0) as i64,
+                        (l.t * 10.0) as i64,
+                        (l.r * 10.0) as i64,
+                        (l.b * 10.0) as i64,
+                    )
+                };
+                want_links.sort_by_key(key);
+                got_links.sort_by_key(key);
+                let want_keys: Vec<_> = want_links.iter().map(key).collect();
+                let got_keys: Vec<_> = got_links.iter().map(key).collect();
+                assert_eq!(got_keys, want_keys, "{} p{}: links", path.display(), i + 1);
+                checked += 1;
+            }
+        }
+        eprintln!("pdf_meta checked against pdfium on {checked} pages");
+    }
 
     /// A page whose declared size renders past the per-side cap is rejected
     /// with a recoverable error, before pdfium or `image` allocates the

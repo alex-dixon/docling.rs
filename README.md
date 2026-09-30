@@ -88,11 +88,14 @@ MHTML (docling's `InputFormat.MHTML`, docling#4184): saved-webpage
 parameter, `multipart/alternative`) and routed through the HTML backend; with
 `--fetch-images` the archive's own image parts are embedded, resolved by
 `Content-Location`/`cid:` like docling resolves them. The discriminative PDF/image pipeline
-lives in `docling-pdf`: a pure-Rust PDF text parser, pdfium for page
-rasterization (the model inputs are rendered exactly like docling's
-`PyPdfiumDocumentBackend`; docling 2.123+'s default docling-parse renderer
-anti-aliases glyphs differently, which moves the layout model's borderline
-labels — #478), and an ONNX layout/TableFormer/OCR stack. TableFormer is ported
+lives in `docling-pdf`: a pure-Rust PDF text parser and page-metadata reader
+(page count, geometry, `/Rotate`, link annotations — all lopdf), the
+docling-parse renderer plugin for the page images the models see (the very
+canvas docling 2.123+ feeds them — #478), and an ONNX layout/TableFormer/OCR
+stack. pdfium is a fallback only: the raster when the plugin is not installed,
+the text layer of a file the Rust parser cannot read, and a scanned page's OCR
+bitmap; a checkout with `.docling-parse/` and no `libpdfium` converts PDFs end
+to end (`docs/PDF_CONFORMANCE.md`, "Retiring pdfium"). TableFormer is ported
 to ONNX and run on every detected table region to recover its structure;
 geometric reconstruction from cell positions remains only as the fallback when
 the TableFormer graphs aren't present (see `docs/PDF_CONFORMANCE.md`).
@@ -1187,7 +1190,8 @@ const json = await convertFileAsync('report.docx', { to: 'json' })
 ```
 
 Declarative formats (Markdown, HTML, DOCX, XLSX, …) work out of the box. The
-PDF/image pipeline needs pdfium + the ONNX models (not bundled), so it throws
+PDF/image pipeline needs the ONNX models plus a page renderer — the
+docling-parse plugin, or pdfium as the fallback (none bundled) — so it throws
 until you fetch them with `scripts/install/download_dependencies.sh` — see
 [Getting the ML models](#getting-the-ml-models) below. `pipeline: 'vlm'` is the
 exception: it loads no ONNX models, so it needs pdfium alone (and nothing for
@@ -1282,7 +1286,7 @@ instead — same models plus `pdfium.dll` — and see
 
 | Asset | Destination |
 | --- | --- |
-| pdfium (Linux x64/arm64, macOS arm64/x64) | `.pdfium/lib/libpdfium.so` (`libpdfium.dylib` on macOS) |
+| pdfium (Linux x64/arm64, macOS arm64/x64) — the fallback renderer / text layer; optional once the docling-parse plugin is present | `.pdfium/lib/libpdfium.so` (`libpdfium.dylib` on macOS) |
 | RT-DETR layout | `.models/layout_heron.onnx` |
 | PP-OCRv3 rec + dictionary, English (the runtime default) | `.models/ocr_rec_en.onnx`, `.models/en_dict.txt` |
 | PP-OCRv3 rec + dictionary, multilingual `ch_` (`DOCLING_RS_OCR_LANG=ch`; the docling-conformance model — weak Latin word spacing) | `.models/ocr_rec.onnx`, `.models/ppocr_keys_v1.txt` |

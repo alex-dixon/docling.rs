@@ -819,7 +819,7 @@ pub fn xref_repair_status(bytes: &[u8]) -> String {
 /// a single `xref` section that begins after the last object. The repair then
 /// has to prove itself — the padded bytes are used only if they load — so a
 /// mis-repair degrades to today's behaviour rather than to silent garbage.
-fn load_document(bytes: &[u8]) -> Option<Document> {
+pub(crate) fn load_document(bytes: &[u8]) -> Option<Document> {
     // Try progressively more repair, and accept a candidate only once the pages
     // actually carry content — a document whose streams were dropped still
     // "loads", so loading alone is not evidence the repair helped. A

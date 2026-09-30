@@ -85,7 +85,11 @@ cargo check -p docling --no-default-features --features pdf-text \
 - `.models/` (repo root): layout, TableFormer, OCR (rec pairs + the optional
   `ocr_det.onnx` text detector, #429), ASR (`.models/asr/`,
   presets in subdirs), enrichment, embedder. `.pdfium/lib/libpdfium.so`
-  (`libpdfium.dylib` on macOS, #298/#299) for page rendering. Fetch:
+  (`libpdfium.dylib` on macOS, #298/#299) — the *fallback* renderer/text
+  layer: page count, geometry, `/Rotate` and links come from lopdf
+  (`pdf_meta.rs`), the model images from the docling-parse plugin, and pdfium
+  is loaded only when one of those cannot answer (`bind_or_skip`), so a
+  checkout with the plugin and no pdfium converts PDFs end to end. Fetch:
   `scripts/install/download_dependencies.sh`.
 - Resolution is CWD-relative, then `$DOCLING_RS_MODELS_DIR` for `.models/…`
   paths (#285 — whole-dir override keeping the engine's own selection logic,

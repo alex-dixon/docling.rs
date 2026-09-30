@@ -60,6 +60,7 @@ pub mod resample;
 pub mod scanned;
 // Built-in standard-14 font metrics for the pure-Rust text parser (#187) —
 // no feature gate: the wasm/pdf-text path needs them like the native one.
+pub mod pdf_meta;
 mod std14;
 #[cfg(feature = "ml")]
 pub mod tableformer;
