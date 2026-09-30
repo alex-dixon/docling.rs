@@ -12,6 +12,12 @@
 //! chunking) — both answer without models present.
 //!
 //! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--abort-on-error] <input-file> | SOURCE...
+//!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
+//!                      md --to json`): each document converts once and is
+//!                      written in every format named, `<stem>.md` +
+//!                      `<stem>.json` under `--output` (several formats need
+//!                      it — stdout carries one document). `--to md,json`
+//!                      is the same; a format named twice is written once.
 //!   SOURCE...          one positional file converts to stdout; several
 //!                      positional sources — files, directories, quoted globs,
 //!                      like Python's `docling convert a.docx sub/b.docx
@@ -203,7 +209,8 @@ const HELP: &str = "\
 Convert documents to Markdown, JSON, DocLang, LaTeX or chunks.
 
 OUTPUT
-  --to md|json|dclx|chunks|images|latex   output format (default: md)
+  --to md|json|dclx|chunks|images|latex   output format (default: md); repeat it (or
+                          comma-separate) to write several — needs --output
   --strict                cleaner, more conformant Markdown (Markdown only)
   --page-break-placeholder TEXT   insert TEXT between pages (Markdown only, e.g. <!-- page break -->)
   --images MODE           picture handling: placeholder (default) | embedded | referenced
@@ -316,7 +323,10 @@ fn main() -> ExitCode {
     }
 
     let mut strict = false;
-    let mut to = "md".to_string();
+    // `--to` is repeatable (#491, Python's `--to md --to json`): every
+    // occurrence — or comma-separated entry — is collected here and resolved
+    // to a de-duplicated format list below; empty means Markdown.
+    let mut to: Vec<String> = Vec::new();
     let mut images = "placeholder".to_string();
     let mut fetch_images = false;
     let mut list_attachments = false;
@@ -432,7 +442,13 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
-            "--to" => to = args.next().unwrap_or_default(),
+            "--to" => match args.next() {
+                Some(v) => to.extend(v.split(',').map(|f| f.trim().to_string())),
+                None => {
+                    eprintln!("error: --to needs a format (md, json, dclx, chunks, images, latex)");
+                    return ExitCode::from(2);
+                }
+            },
             // Named Whisper preset for audio inputs (English-only /
             // Distil-Whisper variants under .models/asr/<preset>/; fetch with
             // download_dependencies.sh --asr-model=<preset>).
@@ -645,13 +661,25 @@ fn main() -> ExitCode {
         }
     }
 
-    if !matches!(
-        to.as_str(),
-        "md" | "markdown" | "json" | "dclx" | "chunks" | "images" | "latex"
-    ) {
-        eprintln!("error: unknown --to '{to}' (expected: md, json, dclx, chunks, images, latex)");
-        return ExitCode::from(2);
+    if to.is_empty() {
+        to.push("md".to_string());
     }
+    // `markdown` is `md`; a format named twice is written once (upstream's
+    // typer list would write it twice, which is never what was meant).
+    let mut formats: Vec<String> = Vec::new();
+    for f in &to {
+        let f = if f == "markdown" { "md" } else { f.as_str() };
+        if !matches!(f, "md" | "json" | "dclx" | "chunks" | "images" | "latex") {
+            eprintln!(
+                "error: unknown --to '{f}' (expected: md, json, dclx, chunks, images, latex)"
+            );
+            return ExitCode::from(2);
+        }
+        if !formats.iter().any(|known| known == f) {
+            formats.push(f.to_string());
+        }
+    }
+    let to = formats;
     // `--ocr-lang` is checked against the engine it will drive, whichever
     // order the two flags came in: en/ch (or a BCP-47 tag for either) under
     // PP-OCR, tessdata stems or BCP-47 tags under Tesseract.
@@ -684,13 +712,19 @@ fn main() -> ExitCode {
     // Python's `docling convert a.docx sub/b.docx --output out/`. A single
     // positional file with `--output` routes through the same writer (a
     // batch of one).
-    if !inputs.is_empty() || output.is_some() || paths.len() > 1 {
+    // Several `--to` formats go the same way (#491): stdout carries one
+    // document, so every format is a file under `--output`.
+    if !inputs.is_empty() || output.is_some() || paths.len() > 1 || to.len() > 1 {
         if bench_warm.is_some() {
             eprintln!("error: --bench-warm is a single-file mode; drop --input/--output");
             return ExitCode::from(2);
         }
         let Some(outdir) = output else {
-            if paths.len() > 1 {
+            if to.len() > 1 {
+                eprintln!(
+                    "error: several --to formats need --output DIR (stdout carries one document)"
+                );
+            } else if paths.len() > 1 {
                 eprintln!("error: converting several sources needs --output DIR");
             } else {
                 eprintln!("error: --input needs --output DIR for the converted files");
@@ -770,6 +804,9 @@ fn main() -> ExitCode {
         return run_batch(files, Path::new(&outdir), jobs, abort_on_error, &cfg);
     }
 
+    // Past the batch branch exactly one format remains (several returned
+    // above): the single-document stdout mode below reads it as before.
+    let to = to.into_iter().next().unwrap_or_else(|| "md".to_string());
     let Some(path) = paths.into_iter().next() else {
         eprintln!("error: no input file");
         eprintln!("{USAGE}");
@@ -1058,7 +1095,9 @@ fn resolve_vlm_flags(
 /// paths: `--to` selection, image sidecars, exit code.
 /// The CLI flags a batch run freezes for every file (#205).
 struct BatchCfg {
-    to: String,
+    /// The `--to` formats, de-duplicated, in the order given (#491): each
+    /// document converts once and is written in every one of them.
+    to: Vec<String>,
     image_mode: ImageMode,
     strict: bool,
     fetch_images: bool,
@@ -1126,11 +1165,14 @@ fn expand_source(arg: &str) -> Result<(Vec<std::path::PathBuf>, std::path::PathB
 fn check_output_collisions(
     files: &[(std::path::PathBuf, std::path::PathBuf)],
     output: &Path,
-    to: &str,
+    formats: &[String],
 ) -> Result<(), String> {
     let mut seen: std::collections::HashMap<std::path::PathBuf, &Path> =
         std::collections::HashMap::new();
-    for (file, base) in files {
+    for ((file, base), to) in files
+        .iter()
+        .flat_map(|fb| formats.iter().map(move |to| (fb, to)))
+    {
         let out = batch_out_path(file, base, output, to);
         if let Some(first) = seen.insert(out.clone(), file) {
             if first != file {
@@ -1370,7 +1412,7 @@ fn batch_convert_one(
     cfg: &BatchCfg,
     converter: &DocumentConverter,
     pipe: &std::sync::Mutex<Option<Pipeline>>,
-) -> Result<(std::path::PathBuf, f64, Option<usize>), String> {
+) -> Result<(Vec<std::path::PathBuf>, f64, Option<usize>), String> {
     let source = SourceDocument::from_file(file).map_err(|e| e.to_string())?;
     // Announce the document up front — with its page count for PDFs, so long
     // conversions are attributable while the dots tick.
@@ -1388,16 +1430,19 @@ fn batch_convert_one(
         None => eprintln!("start: {}", file.display()),
     }
     let started = std::time::Instant::now();
-    if cfg.to == "images" {
-        // #243: rasterize instead of converting — PDF-only, like the serve
-        // endpoint. A non-PDF file fails its item, not the batch.
+    let mut written: Vec<std::path::PathBuf> = Vec::new();
+    // `images` is rasterization, not conversion (#243): it runs on its own,
+    // PDF-only like the serve endpoint (a non-PDF file fails its item, not
+    // the batch), and the document formats, if any, follow from one
+    // conversion below.
+    if cfg.to.iter().any(|t| t == "images") {
         if source.format != InputFormat::Pdf {
             return Err(format!(
                 "--to images rasterizes PDF inputs only ({} is not a PDF)",
                 file.display()
             ));
         }
-        let out = batch_out_path(file, base, output, &cfg.to);
+        let out = batch_out_path(file, base, output, "images");
         let dir = out.parent().unwrap_or(Path::new("")).to_path_buf();
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         let stem = out
@@ -1407,10 +1452,20 @@ fn batch_convert_one(
         // pdfium is not thread-safe: the shared pipeline mutex is this
         // process's "who owns pdfium" lock, held here even though no models
         // run — a render must not race a concurrent PDF conversion.
-        let _pdfium_owner = pipe.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let written = write_page_images(&source.bytes, cfg.pages, cfg.scale, &dir, &stem)?;
-        let shown = written.first().cloned().unwrap_or(out);
-        return Ok((shown, started.elapsed().as_secs_f64(), pages));
+        let pages_written = {
+            let _pdfium_owner = pipe.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            write_page_images(&source.bytes, cfg.pages, cfg.scale, &dir, &stem)?
+        };
+        written.push(pages_written.first().cloned().unwrap_or(out));
+    }
+    let formats: Vec<&str> = cfg
+        .to
+        .iter()
+        .map(String::as_str)
+        .filter(|t| *t != "images")
+        .collect();
+    if formats.is_empty() {
+        return Ok((written, started.elapsed().as_secs_f64(), pages));
     }
     let mut document = if let Some(vlm) = &cfg.vlm {
         docling::vlm::convert_vlm(&source, vlm).map_err(|e| e.to_string())?
@@ -1434,47 +1489,52 @@ fn batch_convert_one(
     document.strict_markdown = cfg.strict;
     document.page_break_placeholder = cfg.page_break_placeholder.clone();
 
-    let out = batch_out_path(file, base, output, &cfg.to);
-    if let Some(dir) = out.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    }
-    match cfg.to.as_str() {
-        "json" => std::fs::write(&out, document.export_to_json())
-            .map_err(|e| format!("writing {}: {e}", out.display()))?,
-        "chunks" => std::fs::write(&out, chunks_json(&document, &cfg.chunk)?)
-            .map_err(|e| format!("writing {}: {e}", out.display()))?,
-        // #317: the upstream CLI writes the serializer's text verbatim.
-        "latex" => std::fs::write(&out, document.export_to_latex())
-            .map_err(|e| format!("writing {}: {e}", out.display()))?,
-        "dclx" => docling::dclx::save_as_dclx(&document, &out).map_err(|e| e.to_string())?,
-        _ => {
-            if cfg.image_mode == ImageMode::Placeholder {
-                std::fs::write(&out, document.export_to_markdown())
-                    .map_err(|e| format!("writing {}: {e}", out.display()))?;
-            } else {
-                // `referenced` images land next to the output file, in a
-                // per-document `<stem>_artifacts/` dir the links point into.
-                let stem = out
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "document".into());
-                let art = format!("{stem}_artifacts");
-                let (md, artifacts) = document.export_to_markdown_with_images(cfg.image_mode, &art);
-                let parent = out.parent().unwrap_or(Path::new(""));
-                for (rel, bytes) in &artifacts {
-                    let target = parent.join(rel);
-                    if let Some(dir) = target.parent() {
-                        std::fs::create_dir_all(dir)
-                            .map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    for to in formats {
+        let out = batch_out_path(file, base, output, to);
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+        }
+        match to {
+            "json" => std::fs::write(&out, document.export_to_json())
+                .map_err(|e| format!("writing {}: {e}", out.display()))?,
+            "chunks" => std::fs::write(&out, chunks_json(&document, &cfg.chunk)?)
+                .map_err(|e| format!("writing {}: {e}", out.display()))?,
+            // #317: the upstream CLI writes the serializer's text verbatim.
+            "latex" => std::fs::write(&out, document.export_to_latex())
+                .map_err(|e| format!("writing {}: {e}", out.display()))?,
+            "dclx" => docling::dclx::save_as_dclx(&document, &out).map_err(|e| e.to_string())?,
+            _ => {
+                if cfg.image_mode == ImageMode::Placeholder {
+                    std::fs::write(&out, document.export_to_markdown())
+                        .map_err(|e| format!("writing {}: {e}", out.display()))?;
+                } else {
+                    // `referenced` images land next to the output file, in a
+                    // per-document `<stem>_artifacts/` dir the links point into.
+                    let stem = out
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "document".into());
+                    let art = format!("{stem}_artifacts");
+                    let (md, artifacts) =
+                        document.export_to_markdown_with_images(cfg.image_mode, &art);
+                    let parent = out.parent().unwrap_or(Path::new(""));
+                    for (rel, bytes) in &artifacts {
+                        let target = parent.join(rel);
+                        if let Some(dir) = target.parent() {
+                            std::fs::create_dir_all(dir)
+                                .map_err(|e| format!("creating {}: {e}", dir.display()))?;
+                        }
+                        std::fs::write(&target, bytes)
+                            .map_err(|e| format!("writing {}: {e}", target.display()))?;
                     }
-                    std::fs::write(&target, bytes)
-                        .map_err(|e| format!("writing {}: {e}", target.display()))?;
+                    std::fs::write(&out, md)
+                        .map_err(|e| format!("writing {}: {e}", out.display()))?;
                 }
-                std::fs::write(&out, md).map_err(|e| format!("writing {}: {e}", out.display()))?;
             }
         }
+        written.push(out);
     }
-    Ok((out, started.elapsed().as_secs_f64(), pages))
+    Ok((written, started.elapsed().as_secs_f64(), pages))
 }
 
 /// Convert every matched file, `--jobs` workers wide. Output paths print to
@@ -1528,21 +1588,23 @@ fn run_batch(
                         Err("the conversion panicked (its message and backtrace are above)".into())
                     });
                     match outcome {
-                        Ok((out, secs, pages)) => {
+                        Ok((outs, secs, pages)) => {
+                            let shown = outs
+                                .iter()
+                                .map(|o| o.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ");
                             match pages {
                                 Some(n) if n > 0 => eprintln!(
-                                    "ok: {} -> {} ({secs:.1}s, {:.0} ms/page)",
+                                    "ok: {} -> {shown} ({secs:.1}s, {:.0} ms/page)",
                                     file.display(),
-                                    out.display(),
                                     secs * 1000.0 / n as f64
                                 ),
-                                _ => eprintln!(
-                                    "ok: {} -> {} ({secs:.1}s)",
-                                    file.display(),
-                                    out.display()
-                                ),
+                                _ => eprintln!("ok: {} -> {shown} ({secs:.1}s)", file.display()),
                             }
-                            println!("{}", out.display());
+                            for out in &outs {
+                                println!("{}", out.display());
+                            }
                             succeeded.fetch_add(1, Ordering::Relaxed);
                         }
                         Err(e) => {

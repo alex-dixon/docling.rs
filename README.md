@@ -1071,6 +1071,9 @@ structure below a directory or a pattern's static prefix is preserved:
 ```bash
 docling-rs a.docx sub/b.docx other/c.pdf --output ./converted
 # ./converted/a.md, ./converted/b.md, ./converted/c.md — models load once
+docling-rs --to md --to json report.pdf --output ./converted
+# one conversion, every format: ./converted/report.md + report.json (#491;
+# `--to md,json` is the same, `--to` twice with one format writes it once)
 docling-rs --input '/data/reports/**/*.pdf' --output ./converted --to json
 # /data/reports/2024/q1/a.pdf  ->  ./converted/2024/q1/a.json
 docling-rs --input /data/reports --output ./converted
@@ -1083,7 +1086,9 @@ Two sources that would write the same output file (`sub/b.docx` and
 pass a common parent directory instead, whose tree is kept (`sub/b.md`,
 `other/b.md`), or separate `--output` directories. `--abort-on-error` stops the batch at the first failed file
 (Python's flag of the same name); by default the file is reported and
-skipped.
+skipped. `--to` is repeatable like Python's: each document converts once and
+is written in every format named — several formats need `--output`, since
+stdout carries one document.
 
 The PDF/image ML pipeline loads its models **once** and every matched file
 reuses the warm sessions — the same amortization `docling-rs serve` does
