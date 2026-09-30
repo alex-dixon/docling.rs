@@ -19,34 +19,27 @@
 # emulation. Single-arch CPU images are pushed by digest and assembled into
 # multi-arch manifest lists by the `merge-cpu` job.
 #
-# CUDA images are built on `ubuntu-latest` (linux/amd64) and tagged with
-# explicit release versions and `master` (never floating `:latest`, matching
-# upstream docling-serve CUDA tagging policy).
+# CUDA images are built on `ubuntu-latest` (linux/amd64) and tagged like the
+# CPU ones: semantic versions plus a floating `:latest`. (Upstream
+# docling-serve gives its CUDA flavours no `:latest`; one convention across
+# all four images was preferred here — a CUDA-base bump is called out in the
+# release notes, and the version tags stay for anyone pinning.)
 #
 # Triggers:
-#   - Release published: tags with semantic versions (vX.Y.Z, X.Y, X, latest for CPU; vX.Y.Z, X.Y, X for CUDA)
-#   - Push to master: tags with `master` (and `latest` for CPU)
-#   - Manual dispatch: tag override or dry-run testing (with optional CUDA toggle)
-#   - Pull requests do NOT run this workflow: images build only on merge to
-#     master, release, or manual dispatch — the smoke tests below still gate
-#     every publish (a failing smoke test fails the run before any push).
+#   - Release published: tags with semantic versions (vX.Y.Z, X.Y, X) and latest, CPU and CUDA alike
+#   - Manual dispatch: tag override or dry-run testing (with optional CUDA
+#     toggle); dispatched from a branch it also tags the branch name.
+#   - Pushes to master do NOT run this workflow (nor do pull requests): every
+#     merge that changes a publishable crate is released by ci.yml minutes
+#     later, and that release publishes the same images — the former
+#     push-triggered run built each merge twice (a `master` tag first, the
+#     version tags right after) for no image the release run did not also
+#     produce. The smoke tests below still gate every publish (a failing smoke
+#     test fails the run before any push).
 
 name: docker-publish
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - "crates/docling-serve/**"
-      - "crates/docling/**"
-      - "crates/docling-core/**"
-      - "crates/docling-pdf/**"
-      - "crates/docling-onnx/**"
-      - "crates/docling-asr/**"
-      - "scripts/install/download_dependencies.sh"
-      - ".github/workflows/docker-publish.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
   release:
     types: [published]
   workflow_dispatch:
@@ -72,8 +65,8 @@ permissions:
 
 concurrency:
   group: docker-publish-${{ github.workflow }}-${{ github.ref }}
-  # Publishing runs are never cancelled mid-flight; a superseded master push
-  # simply queues behind the running one.
+  # Publishing runs are never cancelled mid-flight; a second release or
+  # dispatch on the same ref simply queues behind the running one.
   cancel-in-progress: false
 
 env:
@@ -431,7 +424,7 @@ jobs:
           push-to-registry: true
 
   # ============================================================================
-  # 3. CUDA GPU Build & Publish (Linux x86_64, CUDA 12 + cuDNN 9, no :latest)
+  # 3. CUDA GPU Build & Publish (Linux x86_64, CUDA 12 + cuDNN 9)
   # ============================================================================
   build-and-publish-cuda:
     name: build & publish CUDA (linux/amd64)
@@ -466,20 +459,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # CUDA images follow upstream tagging policy: explicit version tags and master, NO :latest.
+      # CUDA images are tagged exactly like the CPU ones: version tags plus :latest on a release.
       - name: Extract metadata for CUDA serve image
         id: meta_cuda_serve
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.SERVE_CUDA_IMAGE }}
           flavor: |
-            latest=false
+            latest=auto
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern=v{{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' || github.event_name == 'release' }}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
           labels: |
             org.opencontainers.image.title=docling-rs-serve-cuda
@@ -493,13 +487,14 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.CLI_CUDA_IMAGE }}
           flavor: |
-            latest=false
+            latest=auto
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern=v{{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' || github.event_name == 'release' }}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
           labels: |
             org.opencontainers.image.title=docling-rs-cuda
