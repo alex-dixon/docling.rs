@@ -402,3 +402,148 @@ fn abort_on_error_stops_at_the_first_failure() {
     );
     assert!(out.0.join("good.md").is_file(), "stderr: {stderr}");
 }
+
+/// `--to` is repeatable (#491, Python's `docling convert --to md --to json`):
+/// one conversion, every format written under `--output`, each path on
+/// stdout; the Markdown is byte-identical to the single-format stdout run,
+/// so existing `--to md` callers see no change.
+#[test]
+fn repeated_to_writes_every_format_from_one_conversion() {
+    let out = Scratch::new("to-multi");
+    let src = format!("{MD_FIXTURES}/duck.md");
+    let (code, stdout, stderr) = run(&[
+        "--to",
+        "md",
+        "--to",
+        "json",
+        "--output",
+        &out.path(""),
+        &src,
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(out.0.join("duck.md").is_file(), "stderr: {stderr}");
+    assert!(out.0.join("duck.json").is_file(), "stderr: {stderr}");
+    assert!(
+        stdout.contains("duck.md") && stdout.contains("duck.json"),
+        "stdout: {stdout}"
+    );
+    assert_eq!(stdout.lines().count(), 2, "one path per format: {stdout}");
+    assert!(
+        stderr.contains("batch: 1 converted, 0 failed"),
+        "stderr: {stderr}"
+    );
+    let (code, single, _) = run(&["--to", "md", &src]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        single,
+        std::fs::read_to_string(out.0.join("duck.md")).unwrap()
+    );
+    let (code, single_json, _) = run(&["--to", "json", &src]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        single_json.trim_end(),
+        std::fs::read_to_string(out.0.join("duck.json"))
+            .unwrap()
+            .trim_end()
+    );
+}
+
+/// Several sources × several formats in one run; the comma form
+/// (`--to md,json`) and `markdown` spell the same list, and a format named
+/// twice is written once.
+#[test]
+fn repeated_to_covers_every_source_and_dedupes() {
+    let out = Scratch::new("to-matrix");
+    let a = format!("{MD_FIXTURES}/duck.md");
+    let b = format!("{MD_FIXTURES}/blocks.md");
+    let (code, stdout, stderr) = run(&[
+        "--to",
+        "markdown,json",
+        "--to",
+        "latex",
+        "--to",
+        "md",
+        "--output",
+        &out.path(""),
+        &a,
+        &b,
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    for stem in ["duck", "blocks"] {
+        for ext in ["md", "json", "tex"] {
+            assert!(
+                out.0.join(format!("{stem}.{ext}")).is_file(),
+                "{stem}.{ext}; stderr: {stderr}"
+            );
+        }
+    }
+    assert_eq!(
+        stdout.lines().count(),
+        6,
+        "2 documents × 3 formats, md once: {stdout}"
+    );
+    assert!(
+        stderr.contains("batch: 2 converted, 0 failed"),
+        "stderr: {stderr}"
+    );
+}
+
+/// Several formats without `--output` is a usage error (stdout carries one
+/// document), and an unknown entry anywhere in the list is rejected.
+#[test]
+fn repeated_to_needs_an_output_dir_and_validates_each_entry() {
+    let src = format!("{MD_FIXTURES}/duck.md");
+    let (code, _, stderr) = run(&["--to", "md", "--to", "json", &src]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("several --to formats need --output DIR"),
+        "stderr: {stderr}"
+    );
+    let (code, _, stderr) = run(&["--to", "md,pdf", &src]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("unknown --to 'pdf'"), "stderr: {stderr}");
+    let (code, _, stderr) = run(&["--to"]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("--to needs a format"), "stderr: {stderr}");
+}
+
+/// A failed document fails all of its formats at once, and `--abort-on-error`
+/// still stops the batch before the next document writes anything.
+#[test]
+fn repeated_to_respects_abort_on_error() {
+    let src = Scratch::new("to-abort");
+    std::fs::write(src.0.join("bad.xyz"), "not a document\n").unwrap();
+    std::fs::write(src.0.join("good.md"), "# good\n").unwrap();
+    let out = Scratch::new("to-abort-out");
+    let (code, stdout, stderr) = run(&[
+        "--to",
+        "md",
+        "--to",
+        "json",
+        "--abort-on-error",
+        "--output",
+        &out.path(""),
+        &src.path("bad.xyz"),
+        &src.path("good.md"),
+    ]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(stdout.is_empty(), "stdout: {stdout}");
+    assert!(
+        stderr.contains("batch: 0 converted, 1 failed, 1 skipped"),
+        "stderr: {stderr}"
+    );
+    assert!(!out.0.join("good.md").exists() && !out.0.join("good.json").exists());
+    let (code, stdout, stderr) = run(&[
+        "--to",
+        "md",
+        "--to",
+        "json",
+        "--output",
+        &out.path(""),
+        &src.path("bad.xyz"),
+        &src.path("good.md"),
+    ]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert_eq!(stdout.lines().count(), 2, "stdout: {stdout}");
+    assert!(out.0.join("good.md").is_file() && out.0.join("good.json").is_file());
+}
