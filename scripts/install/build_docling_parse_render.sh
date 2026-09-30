@@ -12,7 +12,7 @@
 #      plus one extra target: crates/docling-pdf/ffi/docling-parse-render/
 #      dparse_render.cpp, a C ABI over `renderer<BLEND2D>`,
 #   3. installs into $OUT_DIR (default `.docling-parse/` at the repo root, next
-#      to `.pdfium/` and `.models/`):
+#      to `.models/`):
 #        .docling-parse/lib/libdparse_render.so     (.dylib on macOS)
 #        .docling-parse/pdf_resources/              (fallback fonts, encodings, cmaps)
 #
@@ -20,7 +20,9 @@
 #   DOCLING_RS_RENDERER=docling-parse docling-rs file.pdf
 # (or set DOCLING_PARSE_RENDER_LIB / DOCLING_PARSE_RESOURCES explicitly — see
 # crates/docling-pdf/src/dparse_render.rs). Nothing in the normal build or CI
-# depends on this: without the library the pipeline renders with pdfium.
+# depends on this: the pipeline renders in pure Rust by default and loads the
+# library only when asked for by name — it is the development oracle the PDF
+# conformance scripts run against (the baselines are its renders).
 #
 # Requirements: git, cmake ≥ 3.20, a C++20 compiler, make, python3 (pybind11
 # is installed into a throwaway venv because docling-parse's CMakeLists

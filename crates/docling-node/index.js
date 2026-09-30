@@ -3,7 +3,7 @@
 // Wraps the native N-API binding (loaded by `native.js`, which picks the right
 // prebuilt `.node` for the host platform) with two things:
 //   1. dependency guards — converting a PDF/image/METS input throws a clear
-//      error unless the ML models + pdfium are on disk (see
+//      error unless the ML models are on disk (see
 //      scripts/install/download_dependencies.sh);
 //   2. `streamFileMarkdown` async generators over Markdown chunks (module-level
 //      and on the warm `Pipeline`).

@@ -1,7 +1,8 @@
 //! The pure-Rust page renderer — phase 3 of retiring pdfium
 //! (docs/PDF_CONFORMANCE.md, "Retiring pdfium"): the raster of a page's
 //! vector content, text and images that the layout / TableFormer / OCR
-//! stages consume when docling-parse's renderer plugin is not installed.
+//! stages consume — the default renderer since phase 5 (docling-parse's
+//! renderer plugin draws them only under `DOCLING_RS_RENDERER=docling-parse`).
 //!
 //! It draws what docling-parse's `renderer<BLEND2D>` draws, in its frame:
 //! the page's crop box on a `ceil(width · scale)` × `ceil(height · scale)`
@@ -12,8 +13,7 @@
 //! It is not byte-identical to that renderer — Blend2D's font engine,
 //! rasterizer and JIT compositor round differently — and the docling-parse
 //! shim stays the reference the PDF baselines are pinned to; this renderer
-//! is measured against it (`tests::against_the_docling_parse_shim`) and
-//! replaces pdfium as the fallback.
+//! is measured against it (`tests::against_the_docling_parse_shim`).
 
 pub mod color;
 pub mod content;
@@ -224,6 +224,9 @@ mod tests {
                 std::env::set_var("DOCLING_PARSE_RENDER_LIB", &lib);
             }
         }
+        // The shim loads only when asked for by name (phase 5); no other test
+        // in this binary resolves the plugin, so the once-only load sees this.
+        std::env::set_var("DOCLING_RS_RENDERER", "docling-parse");
         let Some(plugin) = crate::dparse_render::plugin() else {
             eprintln!("docling-parse shim not installed — skipping the renderer comparison");
             return;

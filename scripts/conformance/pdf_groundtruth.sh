@@ -10,7 +10,6 @@
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.."
 
-export PDFIUM_DYNAMIC_LIB_PATH="${PDFIUM_DYNAMIC_LIB_PATH:-$(pwd)/.pdfium/lib}"
 # Pin the snapshot-baseline pixel path: the scalar image-crate resize (the
 # committed snapshots were generated with it; the SIMD default differs by
 # ±1/255 per pixel, enough to flip borderline table cells).

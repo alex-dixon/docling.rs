@@ -93,14 +93,16 @@ lives in `docling-pdf`: a pure-Rust PDF text parser and page-metadata reader
 page renderer for the page images the models see (paths, clips, embedded
 and host fonts, shadings, patterns, images and widget appearances drawn in
 docling-parse's frame with tiny-skia; the docling-parse renderer plugin —
-the very canvas docling 2.123+ feeds them, #478 — takes over whenever it is
-installed), and an ONNX layout/TableFormer/OCR stack. Image-only pages —
+the very canvas docling 2.123+ feeds them, #478 — is a development oracle
+the conformance scripts ask for by name), and an ONNX layout/TableFormer/OCR
+stack. Image-only pages —
 scans — are rasterized byte for byte what pdfium renders (its stretch engine
 and a libjpeg-exact JPEG decoder, ported; `DOCLING_RS_SCAN_RASTER=pdfium`
-switches back). pdfium is no longer needed to convert a PDF: a checkout with
-`.models/` alone converts the whole corpus; the text layer has one source,
-the Rust parser, and the library is loaded only under
-`DOCLING_RS_RENDERER=pdfium` and for a file lopdf cannot read
+switches back). pdfium is gone from the default build: `.models/` alone
+converts every PDF, the text layer has one source (the Rust parser), and no
+native PDF library is fetched or linked. The opt-in `pdfium` cargo feature
+brings the library back for `DOCLING_RS_RENDERER=pdfium` (docling's
+pypdfium2 chain) and for a file lopdf cannot read
 (`docs/PDF_CONFORMANCE.md`, "Retiring pdfium"; JPX and JBIG2 images draw as
 placeholders, as docling-parse draws them). TableFormer is ported
 to ONNX and run on every detected table region to recover its structure;
@@ -298,8 +300,8 @@ with a silent empty 200 or a hanging request (#396). The panic still prints its
 message and backtrace to the server log, and the batch CLI reports that file as
 failed and moves on to the next one.
 
-`to=images` skips conversion entirely and rasterizes a PDF's pages to PNG
-through pdfium — `{"pages": [{"page", "width", "height", "png_base64"}]}` —
+`to=images` skips conversion entirely and rasterizes a PDF's pages to PNG —
+`{"pages": [{"page", "width", "height", "png_base64"}]}` —
 honoring `pages=A-B` and a `scale` of 0.1–4.0 pixels per PDF point (default
 2.0 = 144 dpi). Capped at 100 pages per request
 (`DOCLING_RS_MAX_RASTER_PAGES`); narrow big documents with `pages`.
@@ -336,7 +338,7 @@ multi-arch images (`linux/amd64`, `linux/arm64`) publish to GHCR:
 `ghcr.io/docling-project/docling-rs:latest` (the CLI, `docker run --rm -v
 "$PWD:/data" ghcr.io/docling-project/docling-rs report.pdf --to md`), both
 built from [`crates/docling-serve/Dockerfile`](./crates/docling-serve/Dockerfile)
-with models and pdfium baked in (or mountable with `--build-arg
+with the models baked in (or mountable with `--build-arg
 FETCH_ASSETS=0`). Docker
 Compose setups are in [`examples/docker-compose/`](./examples/docker-compose/) and
 the full guide is in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
@@ -425,7 +427,7 @@ control keeps memory bounded, and every language has an HTTP client;
 **Node / Python** for in-process use from those runtimes with zero extra
 services; **wasm** when the document must not leave the user's machine;
 **FFI** for everything else that can call a C function. The ML assets
-(`.models/`, `.pdfium/`) are the same for all of them — see
+(`.models/`) are the same for all of them — see
 [Getting the ML models](#getting-the-ml-models); the Python and Node packages
 fetch them on first use, the container images ship them baked in.
 
@@ -995,7 +997,7 @@ default output stays byte-for-byte docling), on every surface (CLI flag,
 ### VLM pipeline (remote endpoint)
 
 `--pipeline vlm` (issue #77) replaces the whole discriminative ML stack with a
-Vision Language Model: each PDF page is rendered (pdfium) and sent to any
+Vision Language Model: each PDF page is rendered (in pure Rust) and sent to any
 **OpenAI-compatible** vision endpoint — LM Studio, Ollama, vLLM, or a hosted
 service — with docling's page-conversion prompt; the returned DocLang markup
 is parsed by the same reader that `.dclg`/`.dclx` inputs use. An image input
@@ -1197,12 +1199,10 @@ const json = await convertFileAsync('report.docx', { to: 'json' })
 ```
 
 Declarative formats (Markdown, HTML, DOCX, XLSX, …) work out of the box. The
-PDF/image pipeline needs the ONNX models plus a page renderer — the
-docling-parse plugin, or pdfium as the fallback (none bundled) — so it throws
+PDF/image pipeline needs the ONNX models (none bundled) — so it throws
 until you fetch them with `scripts/install/download_dependencies.sh` — see
 [Getting the ML models](#getting-the-ml-models) below. `pipeline: 'vlm'` is the
-exception: it loads no ONNX models, so it needs pdfium alone (and nothing for
-image input).
+exception: it loads no ONNX models, so it needs nothing on disk.
 
 A reusable `Pipeline` keeps those models warm across many PDFs.
 
@@ -1232,7 +1232,7 @@ data = result.document.export_to_dict()   # docling JSON wire format (schema 1.1
 ```
 
 Declarative formats (Markdown, HTML, DOCX, XLSX, …) work with no models; the
-PDF/image pipeline downloads pdfium + the ONNX models on first use via
+PDF/image pipeline downloads the ONNX models on first use via
 `docling_rs.download_models()`. On an NVIDIA machine install
 **`docling-rs-cuda`** instead (same `docling_rs` module compiled with the CUDA
 provider — GPU automatically, CPU fallback). See
@@ -1269,13 +1269,13 @@ Swift, and header regeneration.
 
 ## Getting the ML models
 
-The PDF/image pipeline needs native assets that aren't bundled in the crate or
-the npm addon: [pdfium](https://pdfium.googlesource.com/pdfium/) (text
-extraction + page rendering) and three ONNX models — RT-DETR layout, PP-OCRv3
-recognition, and TableFormer (optional; tables fall back to geometric
-reconstruction without it). `scripts/install/download_dependencies.sh` fetches all of
-them from this repo's [GitHub Releases](https://github.com/docling-project/docling.rs/releases)
-(tag `models-v1`) straight into `./models` and `./.pdfium`, relative to the
+The PDF/image pipeline needs three ONNX models that aren't bundled in the
+crate or the npm addon — RT-DETR layout, PP-OCRv3 recognition, and
+TableFormer (optional; tables fall back to geometric reconstruction without
+it); the PDF pages themselves are parsed and rendered in pure Rust.
+`scripts/install/download_dependencies.sh` fetches all of them from this
+repo's [GitHub Releases](https://github.com/docling-project/docling.rs/releases)
+(tag `models-v1`) straight into `./.models`, relative to the
 current directory — both the Rust CLI/library and the Node.js/Bun bindings
 look there by default, so no env vars or extra setup are needed afterwards:
 
@@ -1288,12 +1288,11 @@ curl -fsSL https://raw.githubusercontent.com/docling-project/docling.rs/master/s
 ```
 
 On **native Windows** (no WSL) use `scripts\install\download_dependencies.bat`
-instead — same models plus `pdfium.dll` — and see
+instead — the same models — and see
 [docs/WINDOWS.md](./docs/WINDOWS.md) for the MSVC build walkthrough.
 
 | Asset | Destination |
 | --- | --- |
-| pdfium (Linux x64/arm64, macOS arm64/x64) — optional: the text layer of files lopdf cannot read, JPX/JBIG2 images, `DOCLING_RS_RENDERER=pdfium` | `.pdfium/lib/libpdfium.so` (`libpdfium.dylib` on macOS) |
 | RT-DETR layout | `.models/layout_heron.onnx` |
 | PP-OCRv3 rec + dictionary, English (the runtime default) | `.models/ocr_rec_en.onnx`, `.models/en_dict.txt` |
 | PP-OCRv3 rec + dictionary, multilingual `ch_` (`DOCLING_RS_OCR_LANG=ch`; the docling-conformance model — weak Latin word spacing) | `.models/ocr_rec.onnx`, `.models/ppocr_keys_v1.txt` |
@@ -1314,9 +1313,11 @@ install needs is served from that one host; where the release tag predates a
 mirrored asset the script falls back to its upstream home (Hugging Face for
 the Whisper and OCR models, PaddleOCR for the dictionaries) —
 `$DOCLING_RS_ASR_MODELS_URL` overrides the Whisper host outright, or point
-`DOCLING_ASR_{ENCODER,DECODER,VOCAB}` at explicit files. pdfium is Linux x64
-only for now — other platforms, or building the models from source, need
-[`scripts/install/pdf_setup.sh`](#testing) instead.
+`DOCLING_ASR_{ENCODER,DECODER,VOCAB}` at explicit files. Building the models
+from source instead: [`scripts/install/pdf_setup.sh`](#testing). The
+docling-parse renderer plugin (the conformance oracle) is fetched only with
+`--with-docling-parse`; a build with the opt-in `pdfium` cargo feature looks
+for `libpdfium` under `PDFIUM_DYNAMIC_LIB_PATH` / `.pdfium/lib`.
 
 #### Whisper models for audio/ASR
 
@@ -1604,31 +1605,32 @@ console.log(content)
 
 The layout model and TableFormer are PyTorch→ONNX exports of docling-project's
 own models (Apache-2.0 / CDLA-Permissive-2.0 — see
-[`docs/MODELS_NOTICE.md`](./docs/MODELS_NOTICE.md) for full attribution); pdfium and the
-OCR model are re-hosted, unmodified, from their own public releases — all on
+[`docs/MODELS_NOTICE.md`](./docs/MODELS_NOTICE.md) for full attribution); the
+OCR model is re-hosted, unmodified, from its own public release — all on
 one host for convenience.
 
 To point at files you exported or placed elsewhere instead, set the env vars
 directly: `DOCLING_LAYOUT_ONNX`, `DOCLING_OCR_REC_ONNX`, `DOCLING_OCR_DICT`,
 `DOCLING_OCR_DET_ONNX`,
 `DOCLING_TABLEFORMER_{ENCODER,DECODER,BBOX}`, `DOCLING_CODE_FORMULA_DIR`
-(enrichment models), `PDFIUM_DYNAMIC_LIB_PATH` — an
-env var always wins over the `./models` / `./.pdfium` default. Other
-process-wide knobs: `DOCLING_RS_RENDERER` (`auto`, the default: the
-layout/TableFormer/OCR page images come from docling-parse's own Blend2D
-renderer — the raster docling 2.123+ feeds its models, #478 — whenever the
-small plugin library `download_dependencies.sh` fetches into
-`.docling-parse/` (or `scripts/install/build_docling_parse_render.sh`
-builds) is present, and from the pure-Rust renderer otherwise;
-`docling-parse` requires the plugin and warns once when it is missing,
-`rust` never loads it, `pdfium` renders with the pdfium library — docling's
-pypdfium2 chain; `DOCLING_PARSE_RENDER_LIB` / `DOCLING_PARSE_RESOURCES`
-point at the plugin explicitly), `DOCLING_RS_FONT_DIRS` (extra font
+(enrichment models) — an env var always wins over the `./.models` default.
+Other process-wide knobs: `DOCLING_RS_RENDERER` (`auto`, the default: the
+layout/TableFormer/OCR page images come from the pure-Rust renderer;
+`docling-parse` renders them with docling-parse's own Blend2D renderer — the
+raster docling 2.123+ feeds its models, #478, the reference the baselines are
+pinned to — through the plugin library `download_dependencies.sh
+--with-docling-parse` fetches into `.docling-parse/` (or
+`scripts/install/build_docling_parse_render.sh` builds), warning once and
+falling back to the Rust renderer when it is missing; `rust` is the default
+spelled out; `pdfium` renders with the pdfium library — docling's pypdfium2
+chain — in a build with the `pdfium` cargo feature, and warns once and uses
+the Rust renderer otherwise; `DOCLING_PARSE_RENDER_LIB` /
+`DOCLING_PARSE_RESOURCES` point at the plugin explicitly), `DOCLING_RS_FONT_DIRS` (extra font
 directories for the Rust renderer's fallback faces — fonts a PDF does not
 embed; `.models/fonts` and the usual Liberation/DejaVu/URW/Noto system
 directories are scanned by default), `DOCLING_RS_SCAN_RASTER` (`rust`, the default: an image-only
 page's bitmap comes from the pure-Rust raster, pdfium's bytes exactly;
-`pdfium` renders it with the library), `DOCLING_RS_PDF_THREADS` (total thread budget;
+`pdfium` renders it with the library under the `pdfium` feature), `DOCLING_RS_PDF_THREADS` (total thread budget;
 `_WORKERS`/`_INTRA` below split it), `DOCLING_RS_TIMING=1` (per-stage
 timings on stderr), `DOCLING_RS_MAX_IMAGE_PIXELS` (image-input decompression
 cap), `DOCLING_RS_MAX_HTML_DEPTH`, `DOCLING_RS_MAX_PART_BYTES` (HTML/OOXML
@@ -1655,7 +1657,7 @@ a redirect on a `--fetch-images` download is checked against the
 private-address block-list at every hop; and a PDF page whose declared size
 would rasterize past `DOCLING_RS_MAX_RENDER_PIXELS` (15000 px/side, ~5000 pt —
 above any real page, A0 at the pipeline's 3x supersample is ~10110 px) is
-rejected before pdfium or the `image` crate tries to allocate the
+rejected before the renderer or the `image` crate tries to allocate the
 multi-gigabyte bitmap, which a few-hundred-byte crafted `MediaBox` otherwise
 forces (the `image` crate *panics* rather than erroring when that allocation
 fails).
@@ -1709,17 +1711,16 @@ cargo test -p docling-core
 cargo test outputs_match_fixtures -- --nocapture
 ```
 
-The ML formats (PDF, images, METS) need pdfium + the ONNX models, so they are
+The ML formats (PDF, images, METS) need the ONNX models, so they are
 covered by a separate **deterministic snapshot** harness rather than `cargo test`:
 
 ```bash
-bash scripts/install/pdf_setup.sh           # one-time: fetch pdfium + export the ONNX models
+bash scripts/install/pdf_setup.sh           # one-time: export the ONNX models
                                     # (layout + TableFormer; needs a torch/docling Python)
 # Updating an existing checkout after a model-format change (e.g. the cached
 # TableFormer decoder): `rm -rf .models/tableformer && bash scripts/install/pdf_setup.sh`,
 # or re-run `python scripts/install/export_tableformer.py .models/tableformer` directly.
 
-export PDFIUM_DYNAMIC_LIB_PATH="$(pwd)/.pdfium/lib"
 export DOCLING_LAYOUT_ONNX="$(pwd)/models/layout_heron.onnx"
 export DOCLING_OCR_REC_ONNX="$(pwd)/models/ocr_rec.onnx"
 export DOCLING_OCR_DICT="$(pwd)/models/ppocr_keys_v1.txt"
@@ -1805,11 +1806,11 @@ It grabs the **prebuilt CLI binary** from the latest
 building from source when no matching asset exists — in that case it checks
 for a Rust toolchain (installs one via rustup if `cargo` is missing) and runs
 `cargo build --release -p docling-cli`. Either way it installs the
-binary + all models + pdfium under `/usr/local/docling.rs`, symlinks
+binary + all models under `/usr/local/docling.rs`, symlinks
 `/usr/local/bin/docling-rs`, and writes `/etc/profile.d/docling-rs.sh` with
-the `DOCLING_*`/`PDFIUM_*` exports. The env file is a convenience for other
-consumers of the model tree — the CLI itself resolves `.models/` and
-`.pdfium/` **relative to its own (symlink-resolved) location**, so the
+the `DOCLING_*` exports. The env file is a convenience for other
+consumers of the model tree — the CLI itself resolves `.models/`
+**relative to its own (symlink-resolved) location**, so the
 command works from any directory with no environment at all. ONNX Runtime is
 statically linked; nothing else lands outside the prefix.
 
@@ -1824,7 +1825,7 @@ fetches missing model files. Uninstall:
 
 ### Container Images
 
-The following container images are available on **GitHub Container Registry (GHCR)**, with all native dependencies, pdfium, ffmpeg, and ONNX models baked in (zero Python runtime dependencies). Both are targets of the same Dockerfile and share their layers:
+The following container images are available on **GitHub Container Registry (GHCR)**, with all native dependencies, ffmpeg, and ONNX models baked in (zero Python runtime dependencies). Both are targets of the same Dockerfile and share their layers:
 
 #### 📦 Distributed Images
 
@@ -1883,10 +1884,8 @@ docker run --rm -v "$PWD:/data" docling-rs /data/input.pdf          # Markdown t
 docker run --rm -v "$PWD:/data" docling-rs /data/input.pdf --to json
 ```
 
-Both `linux/amd64` and `linux/arm64` build (#281) — the pdfium prebuilt follows
-BuildKit's `TARGETARCH`, and `scripts/install/download_dependencies.sh`
-likewise picks the pdfium for the machine it runs on (pinned x64 from the
-models release; the bblanchon `arm64` prebuilt elsewhere).
+Both `linux/amd64` and `linux/arm64` build (#281) — everything in the image
+is arch-neutral or built from source.
 
 See [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md) for full deployment documentation,
 Prometheus metrics, OpenTelemetry tracing, and production tuning.
@@ -1913,8 +1912,9 @@ the 88-page corpus the cost is almost entirely model inference: TableFormer
 structure recognition (the autoregressive OTSL decode — ~1400 decode steps
 across the corpus's tables) and the per-page layout model together account for
 ~85 % of it, with a one-time ONNX session/graph init paid on the first table
-page. Everything outside the models — both pdfium renders, the two resamples,
-text-layer parsing and assembly — is under ~6 % combined. There is no
+page. Everything outside the models — both page renders, the two resamples,
+text-layer parsing and assembly — is under ~6 % combined (measured on the
+pdfium chain; the Rust renderer's share is of the same order). There is no
 glue-code hot spot to cut here the way the JSON grid was; PDF throughput is
 bounded by the layout and TableFormer models, so the levers are the INT8
 models, the KV-cached decoder and GPU execution providers, not the Rust
@@ -1964,7 +1964,7 @@ models) the same fixture measures 5.2× less memory, a 6.2× warm speedup and
 |---|---|---|
 | `docling-core` | `DoclingDocument` model + serializers | `docling-core` |
 | `docling` | `DocumentConverter`, source loading, backends | `docling` |
-| `docling-pdf` | PDF/image ML pipeline (pdfium + ONNX layout/table/OCR) | `docling` PDF pipeline |
+| `docling-pdf` | PDF/image ML pipeline (pure-Rust text layer + renderer, ONNX layout/table/OCR) | `docling` PDF pipeline |
 | `docling-asr` | audio/ASR pipeline (symphonia + ONNX Whisper) | `docling` ASR pipeline |
 | `docling-onnx` | shared ONNX Runtime execution-provider selection (`DOCLING_RS_EP`; `cuda` / `tensorrt` / `directml` / `coreml` / `xnnpack` features) for the ML crates | — |
 | `docling-cli` | command-line interface (`docling-rs`, plus the `serve` subcommand behind `--features serve`) | `docling.cli` |

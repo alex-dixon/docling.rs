@@ -187,10 +187,10 @@ pub fn convert_vlm(
                 }
                 None => None,
             };
-            // `for_each_page`'s error type must implement From<PdfiumError>,
+            // `for_each_page`'s error type must implement From<PdfError>,
             // which ConversionError doesn't — so VLM/encode failures park
             // their message in `vlm_err` and abort the walk with a sentinel;
-            // only genuine pdfium errors surface through PdfError itself.
+            // only genuine PDF errors surface through PdfError itself.
             let mut vlm_err: Option<String> = None;
             let walk = docling_pdf::pdfium_backend::for_each_page::<docling_pdf::PdfError, _>(
                 &source.bytes,

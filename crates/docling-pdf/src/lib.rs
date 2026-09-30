@@ -136,8 +136,12 @@ pub use pdfium_backend::{render_pages, RenderedPage};
 /// Errors from the PDF backend. Detailed and surfaced (never silently skipped).
 #[derive(Debug)]
 pub enum PdfError {
-    /// pdfium failed to bind, open, or read the document.
+    /// pdfium failed to bind, open, or read the document (and, historically,
+    /// any pipeline error outside the models).
     Pdfium(String),
+    /// The document itself: an object model lopdf cannot read, a page no
+    /// renderer can draw, a page range outside it.
+    Document(String),
     /// The layout ONNX model failed to load or run.
     Layout(String),
     /// The OCR ONNX model failed to load or run.
@@ -148,6 +152,7 @@ impl fmt::Display for PdfError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PdfError::Pdfium(m) => write!(f, "pdf: pdfium error: {m}"),
+            PdfError::Document(m) => write!(f, "pdf: {m}"),
             PdfError::Layout(m) => write!(f, "pdf: {m}"),
             PdfError::Ocr(m) => write!(f, "pdf: {m}"),
         }
@@ -156,12 +161,12 @@ impl fmt::Display for PdfError {
 
 impl std::error::Error for PdfError {}
 
-#[cfg(feature = "ml")]
+#[cfg(feature = "pdfium")]
 impl From<pdfium_render::prelude::PdfiumError> for PdfError {
     fn from(e: pdfium_render::prelude::PdfiumError) -> Self {
-        // A failed dlopen means pdfium was never installed — the #1 first-run
-        // failure after a bare `cargo install` (which ships no runtime
-        // assets). Say what to do instead of leaking the raw loader error.
+        // A failed dlopen means the library this build was asked to use
+        // (`pdfium` feature) is not there. Say what to do instead of leaking
+        // the raw loader error.
         if matches!(e, pdfium_render::prelude::PdfiumError::LoadLibraryError(_)) {
             // The loader error pretty-prints over several lines; compact it.
             let detail = e
@@ -170,21 +175,19 @@ impl From<pdfium_render::prelude::PdfiumError> for PdfError {
                 .collect::<Vec<_>>()
                 .join(" ");
             return PdfError::Pdfium(format!(
-                "the pdfium library is not installed. PDF/image conversion needs \
-                 pdfium + the ONNX models: fetch both with \
-                 scripts/install/download_dependencies.sh from a docling.rs \
-                 checkout (https://github.com/docling-project/docling.rs), or \
-                 point PDFIUM_DYNAMIC_LIB_PATH at a directory containing the \
-                 pdfium library. A digital PDF's embedded text layer converts \
-                 without either in no-OCR mode (CLI: --no-ocr). Declarative \
-                 formats (DOCX, HTML, Markdown, …) never need them. [{detail}]"
+                "the pdfium library is not installed. This build's `pdfium` feature \
+                 was asked for it (DOCLING_RS_RENDERER=pdfium, or a file the pure-Rust \
+                 object model cannot read): point PDFIUM_DYNAMIC_LIB_PATH at a directory \
+                 containing the pdfium library, or unset DOCLING_RS_RENDERER — the \
+                 default renderer needs no library. Declarative formats (DOCX, HTML, \
+                 Markdown, …) never need it. [{detail}]"
             ));
         }
         PdfError::Pdfium(e.to_string())
     }
 }
 
-/// Convert a PDF's **embedded text layer only** — no pdfium, no ONNX, no
+/// Convert a PDF's **embedded text layer only** — no ONNX, no
 /// threads: the pure-Rust content-stream parser ([`textparse`]) feeds the same
 /// orphan-region assembly the `no_ocr` pipeline flag uses, so text-layer PDFs
 /// come out identical to `--no-ocr` (flat, line-grouped paragraphs in reading
@@ -2789,7 +2792,7 @@ impl Pipeline {
 /// mode prints in its per-document start line.
 #[cfg(feature = "ml")]
 pub fn page_count(bytes: &[u8], password: Option<&str>) -> Result<usize, PdfError> {
-    Ok(pdfium_backend::page_count(bytes, password)?)
+    pdfium_backend::page_count(bytes, password)
 }
 
 #[cfg(feature = "ml")]

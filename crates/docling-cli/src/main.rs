@@ -129,8 +129,8 @@
 //!                      reading order (no headings/lists/tables/pictures). The
 //!                      fastest option, but a scanned/image-only PDF (no
 //!                      embedded text layer) yields no text — convert those
-//!                      without this flag. Also works when pdfium/the models
-//!                      aren't installed at all (e.g. a bare `cargo install`):
+//!                      without this flag. Also works when the models aren't
+//!                      installed at all (e.g. a bare `cargo install`):
 //!                      a digital PDF falls back to the pure-Rust text-layer
 //!                      extraction.
 //!   --use-web-browser  pre-render HTML/MHTML/EPUB in the system Chromium (driven
@@ -846,7 +846,7 @@ fn main() -> ExitCode {
         };
     }
 
-    // `--to images` (#243): rasterization is pdfium-only — no conversion, no
+    // `--to images` (#243): rasterization only — no conversion, no
     // models, no pipeline (a `--pipeline vlm` selection has nothing to do and
     // is ignored). Files land in the CWD like `--to dclx`'s archive.
     if to == "images" {
@@ -982,7 +982,7 @@ fn main() -> ExitCode {
                 }
                 Err(e) => {
                     let _ = out.flush();
-                    // The ML pipeline binds pdfium lazily, so the missing-assets
+                    // The ML pipeline loads its models lazily, so the missing-assets
                     // error can surface here — but only fall back while nothing
                     // has been printed, to never emit a document twice.
                     if !wrote_any {
@@ -1029,9 +1029,8 @@ fn main() -> ExitCode {
     output_document(document, &to, image_mode, &path, &chunk_opts)
 }
 
-/// Launch-blocker fallback: a bare `cargo install docling-cli` ships neither
-/// pdfium nor the ONNX models, so the first PDF a new user tries dies at
-/// pipeline startup. Under `--no-ocr` the pure-Rust text-layer path needs no
+/// Launch-blocker fallback: a bare `cargo install docling-cli` ships no ONNX
+/// models, so the first PDF a new user tries dies at pipeline startup. Under `--no-ocr` the pure-Rust text-layer path needs no
 /// runtime assets at all — when the failure is exactly "assets missing"
 /// (matched on the markers docling-pdf's enriched errors carry), convert the
 /// embedded text layer instead of failing. Any other error, or a run without
@@ -1054,7 +1053,7 @@ fn pdf_no_ocr_fallback(
     match docling::pdf_text_layer_pages(&bytes, &name, pages) {
         Ok(mut doc) if !doc.nodes.is_empty() => {
             eprintln!(
-                "warning: pdfium/models unavailable — --no-ocr extracted the embedded text \
+                "warning: models unavailable — --no-ocr extracted the embedded text \
                  layer only (run scripts/install/download_dependencies.sh for the full pipeline)"
             );
             doc.strict_markdown = strict;
@@ -1455,11 +1454,12 @@ fn batch_convert_one(
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "document".into());
-        // pdfium is not thread-safe: the shared pipeline mutex is this
-        // process's "who owns pdfium" lock, held here even though no models
-        // run — a render must not race a concurrent PDF conversion.
+        // The shared pipeline mutex serializes PDF work in this process
+        // (pdfium, when the `pdfium` feature renders with it, is not
+        // thread-safe), held here even though no models run — a render must
+        // not race a concurrent PDF conversion.
         let pages_written = {
-            let _pdfium_owner = pipe.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _pdf_owner = pipe.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             write_page_images(&source.bytes, cfg.pages, cfg.scale, &dir, &stem)?
         };
         written.push(pages_written.first().cloned().unwrap_or(out));
@@ -1654,7 +1654,7 @@ fn run_batch(
                                      DOCLING_RS_EP runtime libraries or unset it)"
                                 );
                             }
-                            // Missing pdfium/models fails every PDF/image the
+                            // Missing models fail every PDF/image the
                             // same way — one report is enough (the error above
                             // already says how to install the assets).
                             if e.contains("pdfium library is not installed")

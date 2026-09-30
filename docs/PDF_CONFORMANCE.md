@@ -208,14 +208,13 @@ still has a job:
 |---|---|---|
 | page count, size, `/Rotate`, links | `pdf_meta` (lopdf) | lopdf cannot read the file at all |
 | text layer | `textparse` (lopdf) — the only text source since phase 4 below | never |
-| layout / TableFormer page images | the docling-parse renderer plugin, else the Rust renderer (phase 3 below) | `DOCLING_RS_RENDERER=pdfium` |
-| a scanned page's OCR bitmap | the Rust raster (phase 2 below — pdfium's bitmap byte for byte), else the Rust renderer | `DOCLING_RS_RENDERER=pdfium` on a page the raster declines |
-| `render_pages` (the `pages` / VLM raster) | the plugin, else the Rust raster of an image-only page, else the Rust renderer | `DOCLING_RS_RENDERER=pdfium`, or a file lopdf cannot read |
+| layout / TableFormer page images | the Rust renderer (phase 3 below; the docling-parse plugin under `DOCLING_RS_RENDERER=docling-parse`) | `DOCLING_RS_RENDERER=pdfium` in a build with the `pdfium` feature (phase 5 below) |
+| a scanned page's OCR bitmap | the Rust raster (phase 2 below — pdfium's bitmap byte for byte), else the Rust renderer | `DOCLING_RS_RENDERER=pdfium` (the `pdfium` feature) on a page the raster declines |
+| `render_pages` (the `pages` / VLM raster) | the Rust raster of an image-only page, else the Rust renderer (the plugin on request) | `DOCLING_RS_RENDERER=pdfium`, or a file lopdf cannot read — both need the `pdfium` feature |
 
-So a checkout with `.models/` and no `libpdfium` converts the corpus end to
-end (`bind_or_skip` notes the missing library under `DOCLING_RS_DEBUG`), with
-or without the plugin; only a file whose object model lopdf cannot read
-still needs a native library for its raster. Text-only conversion (`--no-ocr` on a
+So a checkout with `.models/` alone converts the corpus end to end, with or
+without the plugin; only a file whose object model lopdf cannot read still
+needs a native library for its raster (the `pdfium` feature). Text-only conversion (`--no-ocr` on a
 born-digital file with `extract_text` and no images) never touches pdfium
 either way (pdfium, when installed, is still opened for the text-layer
 fallback). Outputs are unchanged by construction — snapshots 98/98,
@@ -299,7 +298,7 @@ pipeline — decode, one axis-aligned stretch, composite — that
   is the one-line switch when the reference moves).
 
 **Oracle** (`raster::tests::matches_pdfium_on_the_scanned_fixtures` and
-`synthesized_pages_match_pdfium`, run when `.pdfium/lib` is present): the
+`synthesized_pages_match_pdfium`, run with `--features pdfium` when `.pdfium/lib` is present): the
 eleven image-only fixture pages —
 `ocr_test` and its three `/Rotate` variants (cairo: a Form XObject with a
 4960 × 7016 `/Interpolate` gray Flate image), the four `ocr_test_raster*`
@@ -331,8 +330,9 @@ example: its image is `ICCBased` with a 344-byte profile.
 ### Retiring pdfium — phase 3 landed: the pure-Rust page renderer
 
 `crates/docling-pdf/src/render/` (≈9,000 lines) renders a page's vector
-content, text and images for the models when the docling-parse plugin is not
-installed — what pdfium's chain used to do — in docling-parse's frame:
+content, text and images for the models — what pdfium's chain used to do, and
+since phase 5 the default renderer (the docling-parse plugin renders only when
+asked for by name) — in docling-parse's frame:
 
 * **Canvas and frame** (`render/mod.rs`): `ceil(extent − 1e-6)` pixels per
   side, the crop box (`textparse::page_box`) stretched onto the whole canvas
@@ -467,6 +467,54 @@ snapshots 98/98 (with the two phase 3 refreshed above), groundtruth 374 lines /
 things only: its render under
 `DOCLING_RS_RENDERER=pdfium`, and a file lopdf cannot read.
 
+### Retiring pdfium — phase 5 landed: one PDF stack
+
+The default build links, fetches and loads no native PDF library:
+
+* `pdfium-render` left docling-pdf's `ml` feature for an opt-in `pdfium`
+  feature (forwarded by `docling`, `docling-cli` and `docling-serve`). With
+  it, `DOCLING_RS_RENDERER=pdfium` renders the model inputs with the library
+  (docling's pypdfium2 chain), a file lopdf cannot read still converts
+  through pdfium's page tree and render, and the raster / object-model
+  oracle tests (`raster::tests::matches_pdfium_on_the_scanned_fixtures`,
+  `synthesized_pages_match_pdfium`,
+  `pdfium_backend::tests::pdf_meta_matches_pdfium_on_the_corpus`) run.
+  Without it — the default — `pdfium_backend::native` is an uninhabited
+  stub, `bind_or_skip` never opens anything, `DOCLING_RS_RENDERER=pdfium`
+  warns once and renders in Rust, and an unreadable object model fails with
+  the install hint (`PdfError::Document`). Every pipeline error type is
+  `PdfError` now; `PdfiumError` appears only inside the feature.
+* pdfium is opened only when it has a job: `bind_or_skip` binds it for the
+  `pdfium` renderer choice or for a file the object model cannot read, and
+  otherwise never (the earlier phases still loaded it whenever installed).
+* `DOCLING_RS_RENDERER=auto` is the Rust renderer. The docling-parse shim is
+  loaded only under `docling-parse` — what `pdf_conformance.sh` and
+  `pdf_groundtruth.sh` set, because the baselines are its renders — and
+  `download_dependencies.sh` fetches it only with `--with-docling-parse`
+  (`DOCLING_RS_WITH_DOCLING_PARSE=1`). A default install's model inputs are
+  the Rust renderer's, and score as the phase 3 table says (71/98 snapshots
+  exact, 454 groundtruth diff lines) against baselines pinned to the shim.
+* Encrypted PDFs open through lopdf: the empty user password most
+  "protected" files carry is tried silently, the document's password
+  (`--password`, `PdfMeta::open_with_password`) decrypts at load, and a
+  missing or wrong one is the error docling raises
+  (`pdf: the PDF is encrypted: a password is required`) — where pdfium used
+  to answer `PasswordError` (the `pdf_password` snapshot records the new
+  text).
+* `.pdfium/` is gone from `download_dependencies.sh`, `.bat`,
+  `pdf_setup.sh`, `install.sh`, both Dockerfiles, the Python
+  `download_models()` / `ensure_env()` and the Node `checkDependencies()`
+  (`ready` is the layout model; the `pdfium` field is gone); the test gates
+  that skipped without `libpdfium` (`pages`, `skip_ocr`, `vlm`, the serve
+  raster test, `text_layer`) now run everywhere, and the ML ones gate on the
+  models alone. `publish-models.yml` keeps re-hosting `libpdfium.so` for the
+  oracle.
+
+Outputs are unchanged: snapshots 98/98 and groundtruth 374 lines / 9 of 18
+strict with `DOCLING_RS_RENDERER=docling-parse`, the scanned suite
+byte-identical. What remains outside Rust is the ONNX runtime — and the
+shim, as the oracle of the renderer it measures.
+
 **The roadmap.** The aim is everything in Rust except the ONNX models; the
 shim stays as long as it is the byte-exact oracle for what replaces it.
 
@@ -487,11 +535,11 @@ shim stays as long as it is the byte-exact oracle for what replaces it.
    `DOCLING_PDFIUM_TEXT` / `DOCLING_PDFIUM_WORDS` / `DOCLING_LEGACY_LINES`
    knobs are deleted and the heading-hierarchy style signal reads the
    parser's glyphs.
-5. *Remove pdfium and the shim.* Once 2–4 hold on the corpus and on the
-   2,000-page manuals of #478, `pdfium-render` leaves `Cargo.toml`, the
-   `.pdfium/` asset goes out of `download_dependencies.sh`, the shim becomes a
-   development-only oracle (kept in `ffi/` for the conformance scripts), and
-   the `pdf-text` (wasm) build and the default one share one PDF stack.
+5. *Remove pdfium and the shim from the default stack* — landed above:
+   `pdfium-render` is behind the opt-in `pdfium` feature, `.pdfium/` is out
+   of every installer, Dockerfile and binding, the shim is a development
+   oracle the conformance scripts ask for by name, and the `pdf-text` (wasm)
+   build and the default one share one PDF stack.
 
 Each phase is one branch and lands only with the conformance runs of this
 document unchanged (`pdf_conformance.sh`, `pdf_groundtruth.sh`, the scanned

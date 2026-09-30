@@ -826,24 +826,66 @@ pub fn xref_repair_status(bytes: &[u8]) -> String {
 /// has to prove itself — the padded bytes are used only if they load — so a
 /// mis-repair degrades to today's behaviour rather than to silent garbage.
 pub(crate) fn load_document(bytes: &[u8]) -> Option<Document> {
+    open_document(bytes, None).ok()
+}
+
+/// Why [`open_document`] could not hand back a readable document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenError {
+    /// lopdf cannot read the file even after the repairs.
+    Unreadable,
+    /// The file is encrypted and the password given (or none) does not open it.
+    Password,
+}
+
+/// Load `bytes` with the document's password. lopdf decrypts while reading —
+/// with `password`, or the empty user password most "protected" PDFs carry
+/// (what every viewer opens silently) — so every reader downstream sees plain
+/// streams; a file the password does not open loads with its streams still
+/// encrypted, which is reported as [`OpenError::Password`] rather than handed
+/// on as a document whose every stream decodes to nothing.
+pub(crate) fn open_document(bytes: &[u8], password: Option<&str>) -> Result<Document, OpenError> {
+    let Some(doc) = load_document_raw(bytes, password) else {
+        // lopdf refuses to load at all under a *wrong* password (a missing
+        // one loads the file with its streams still encrypted); tell the two
+        // apart by loading without it.
+        if password.is_some() && load_document_raw(bytes, None).is_some_and(|d| d.is_encrypted()) {
+            return Err(OpenError::Password);
+        }
+        return Err(OpenError::Unreadable);
+    };
+    if doc.is_encrypted() {
+        return Err(OpenError::Password);
+    }
+    Ok(doc)
+}
+
+fn load_options(password: Option<&str>) -> lopdf::LoadOptions {
+    lopdf::LoadOptions {
+        password: password.map(str::to_string),
+        ..lopdf::LoadOptions::default()
+    }
+}
+
+fn load_document_raw(bytes: &[u8], password: Option<&str>) -> Option<Document> {
     // Try progressively more repair, and accept a candidate only once the pages
     // actually carry content — a document whose streams were dropped still
     // "loads", so loading alone is not evidence the repair helped. A
     // well-formed file returns on the first attempt and pays for nothing.
     let mut fallback = None;
-    if let Some(doc) = best_effort_load(bytes, &mut fallback) {
+    if let Some(doc) = best_effort_load(bytes, password, &mut fallback) {
         return Some(doc);
     }
     let xref_fixed = pad_short_xref_entries(bytes).ok();
     if let Some(fixed) = &xref_fixed {
-        if let Some(doc) = best_effort_load(fixed, &mut fallback) {
+        if let Some(doc) = best_effort_load(fixed, password, &mut fallback) {
             return Some(doc);
         }
     }
     // Both defects can coexist, and the second only becomes visible once the
     // first is repaired, so build on whatever the previous step produced.
     let lengths_fixed = fix_stream_lengths(xref_fixed.as_deref().unwrap_or(bytes));
-    if let Some(doc) = best_effort_load(&lengths_fixed, &mut fallback) {
+    if let Some(doc) = best_effort_load(&lengths_fixed, password, &mut fallback) {
         return Some(doc);
     }
     fallback
@@ -851,8 +893,12 @@ pub(crate) fn load_document(bytes: &[u8]) -> Option<Document> {
 
 /// Load `data`, returning it only when its pages carry content; a document that
 /// merely parses is remembered as the fallback for when nothing does better.
-fn best_effort_load(data: &[u8], fallback: &mut Option<Document>) -> Option<Document> {
-    match Document::load_mem(data) {
+fn best_effort_load(
+    data: &[u8],
+    password: Option<&str>,
+    fallback: &mut Option<Document>,
+) -> Option<Document> {
+    match Document::load_mem_with_options(data, load_options(password)) {
         Ok(doc) if has_page_content(&doc) => Some(doc),
         Ok(doc) => {
             fallback.get_or_insert(doc);
@@ -1105,10 +1151,16 @@ pub struct PageTextParser {
 }
 
 impl PageTextParser {
-    /// Load the document; `None` when it has no parseable text layer at all
-    /// (the caller then keeps pdfium's cells, as before).
+    /// Load the document; `None` when lopdf cannot read it at all.
     pub fn open(bytes: &[u8]) -> Option<Self> {
-        let doc = load_document(bytes)?;
+        Self::open_with_password(bytes, None)
+    }
+
+    /// [`open`](Self::open) with the document's password (an encrypted file
+    /// the password does not open reads as `None` here; the pipeline reports
+    /// it through [`crate::pdf_meta::PdfMeta::open_with_password`] first).
+    pub fn open_with_password(bytes: &[u8], password: Option<&str>) -> Option<Self> {
+        let doc = open_document(bytes, password).ok()?;
         let mut pages: Vec<_> = doc.get_pages().into_iter().collect();
         pages.sort_by_key(|(n, _)| *n);
         Some(Self {

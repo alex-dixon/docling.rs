@@ -16,11 +16,11 @@
 #   docker run --rm -v "$PWD:/data" docling-rs report.pdf --to md
 #   docker run --rm -v "$PWD:/data" docling-rs --input in --output out --to latex
 #
-# Run. The ML assets (ONNX models + pdfium) are fetched into the image by
+# Run. The ML assets (the ONNX models) are fetched into the image by
 # `download_dependencies.sh` at build time; to keep the image slim instead,
 # build with `--build-arg FETCH_ASSETS=0` and mount them:
 #   docker run -p 5001:5001 docling-rs-serve
-#   docker run -p 5001:5001 -v ./models:/app/.models -v ./.pdfium:/app/.pdfium docling-rs-serve
+#   docker run -p 5001:5001 -v ./models:/app/.models docling-rs-serve
 #
 # GPU run: pass --gpus all to expose the host NVIDIA GPU:
 #   docker run --gpus all -p 5001:5001 docling-rs-serve-cuda
@@ -95,7 +95,7 @@ RUN cargo build --release -p docling-serve -p docling-cli --features cuda --lock
     && test $(find target/release -maxdepth 1 -name "libonnxruntime_providers_*.so" | wc -l) -ge 2 \
     && find target/release -maxdepth 1 -name "libonnxruntime_providers_*.so" -exec cp -av {} /src/cuda-dylibs/ \;
 # ------------------------------------------------------------------------------
-# Stage: assets (models + pdfium, shared across CPU and CUDA)
+# Stage: assets (the ONNX models, shared across CPU and CUDA)
 # ------------------------------------------------------------------------------
 FROM debian:trixie-slim AS assets
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -104,7 +104,7 @@ WORKDIR /src
 COPY scripts/install/download_dependencies.sh scripts/install/download_dependencies.sh
 ARG FETCH_ASSETS=1
 RUN if [ "$FETCH_ASSETS" = "1" ]; then sh scripts/install/download_dependencies.sh; \
-    else mkdir -p .models .pdfium; fi
+    else mkdir -p .models; fi
 
 # ------------------------------------------------------------------------------
 # Stage: runtime (CPU base, Debian Trixie slim)
@@ -114,8 +114,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=assets /src/.models ./.models
-COPY --from=assets /src/.pdfium ./.pdfium
-ENV PDFIUM_DYNAMIC_LIB_PATH=/app/.pdfium/lib
 
 # ------------------------------------------------------------------------------
 # Stage: runtime-cuda (CUDA 12 + cuDNN 9 base on Ubuntu 24.04)
@@ -125,10 +123,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=assets /src/.models ./.models
-COPY --from=assets /src/.pdfium ./.pdfium
 COPY --from=build-cuda /src/cuda-dylibs/ /usr/local/lib/
-ENV PDFIUM_DYNAMIC_LIB_PATH=/app/.pdfium/lib \
-    LD_LIBRARY_PATH=/usr/local/lib:/app/.pdfium/lib:${LD_LIBRARY_PATH:-} \
+ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-} \
     DOCLING_RS_EP=auto
 
 # ==============================================================================
@@ -147,7 +143,7 @@ ENTRYPOINT ["docling-rs"]
 # --- ghcr.io/docling-project/docling-rs-serve: the HTTP API (CPU) -------------
 FROM runtime AS serve
 COPY --from=build /src/target/release/docling-serve /usr/local/bin/docling-serve
-# Assets resolve relative to the working directory (`.models/`, `.pdfium/lib`).
+# Assets resolve relative to the working directory (`.models/`).
 EXPOSE 5001
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=3 \
     CMD curl -f http://localhost:5001/ready || exit 1

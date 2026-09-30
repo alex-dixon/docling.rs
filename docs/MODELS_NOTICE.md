@@ -19,16 +19,18 @@ tokenizer). All are licensed separately from docling.rs's own MIT code (see
 | Whisper tiny (`asr/{encoder_model,decoder_model}.onnx`, `vocab.json`) | [`onnx-community/whisper-tiny`](https://huggingface.co/onnx-community/whisper-tiny), the community ONNX export of [`openai/whisper-tiny`](https://huggingface.co/openai/whisper-tiny) (re-hosted unmodified as `asr_*`; Hugging Face stays the fallback host) | Apache-2.0 |
 | Hybrid-chunker tokenizer (`chunk/tokenizer.json`) | [`sentence-transformers/all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)'s `tokenizer.json` (a tokenizer definition, no weights) | Apache-2.0 |
 
-(The `pdfium` shared library re-hosted alongside the models is not a model but
-carries its own terms: [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)
+(The `pdfium` shared library re-hosted alongside the models — used only by a
+build with docling-pdf's opt-in `pdfium` feature and its oracle tests; the
+default pipeline renders in pure Rust — is not a model but carries its own
+terms: [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)
 builds of Google's PDFium, BSD-3-Clause / Apache-2.0.)
 
 `scripts/install/export_layout.py`, `scripts/install/export_tableformer.py` and
 `scripts/install/export_code_formula.py` do the conversion (PyTorch → ONNX via
 `torch.onnx.export`); no weights are retrained, fine-tuned, or otherwise
 altered. `.github/workflows/publish-models.yml` runs
-that conversion (and re-hosts pdfium plus the third-party models a default
-install needs — both OCR pairs, Whisper tiny, the chunk tokenizer, the picture
+that conversion (and re-hosts the third-party models a default install needs,
+plus pdfium for the opt-in feature — both OCR pairs, Whisper tiny, the chunk tokenizer, the picture
 classifier — alongside it) and
 publishes everything as GitHub Release assets on this repo (tag `models-v1`),
 fetched by `scripts/install/download_dependencies.sh` — see that script and

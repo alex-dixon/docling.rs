@@ -1,6 +1,6 @@
 [package]
 name = "docling-pdf"
-description = "PDF/image backend for docling.rs: pdfium text extraction + ONNX layout/table/OCR pipeline."
+description = "PDF/image backend for docling.rs: pure-Rust text layer and page renderer + ONNX layout/table/OCR pipeline."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,8 +13,8 @@ rust-version.workspace = true
 
 [features]
 default = ["ml"]
-# The full pipeline: pdfium page rendering + ONNX layout/OCR/TableFormer/
-# enrichment. Without it only the pure-Rust text-layer path remains
+# The full pipeline: the pure-Rust page renderer/raster + ONNX
+# layout/OCR/TableFormer/enrichment. Without it only the pure-Rust text-layer path remains
 # (`convert_text_layer` — lopdf content-stream parsing + the docling-parse
 # line sanitizer, the same extraction `--no-ocr` uses), which compiles for
 # wasm32-unknown-unknown.
@@ -26,9 +26,15 @@ ocr-prep = ["dep:image"]
 # stay pure Rust. Without it a .heic input fails with a targeted
 # "rebuild with --features heif" message.
 heif = ["dep:libheif-rs"]
+# pdfium (phase 5 of "Retiring pdfium", docs/PDF_CONFORMANCE.md): off by
+# default — the pipeline renders in pure Rust. On, `DOCLING_RS_RENDERER=pdfium`
+# renders with the library (docling's pypdfium2 chain), a file lopdf cannot
+# read still converts through it, and the raster / object-model oracle tests
+# run against it. Needs `libpdfium` at runtime (`PDFIUM_DYNAMIC_LIB_PATH`,
+# `.pdfium/lib`).
+pdfium = ["ml", "dep:pdfium-render"]
 ml = [
     "ocr-prep",
-    "dep:pdfium-render",
     "dep:ort",
     "dep:image",
     "dep:fast_image_resize",

@@ -6,7 +6,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # docling.rs/
 
-export PDFIUM_DYNAMIC_LIB_PATH="${PDFIUM_DYNAMIC_LIB_PATH:-$(pwd)/.pdfium/lib}"
 # Pin the snapshot-baseline pixel path: the scalar image-crate resize (the
 # committed snapshots were generated with it; the SIMD default differs by
 # ±1/255 per pixel, enough to flip borderline table cells).
@@ -25,7 +24,7 @@ export DOCLING_TABLEFORMER_ENCODER="${DOCLING_TABLEFORMER_ENCODER:-$(pwd)/.model
 export DOCLING_TABLEFORMER_DECODER="${DOCLING_TABLEFORMER_DECODER:-$(pwd)/.models/tableformer/decoder.onnx}"
 export DOCLING_TABLEFORMER_BBOX="${DOCLING_TABLEFORMER_BBOX:-$(pwd)/.models/tableformer/bbox.onnx}"
 
-for f in "$PDFIUM_DYNAMIC_LIB_PATH/libpdfium.so" "$DOCLING_LAYOUT_ONNX" \
+for f in "$DOCLING_LAYOUT_ONNX" \
          "$DOCLING_OCR_REC_ONNX" "$DOCLING_OCR_DICT" "$DOCLING_OCR_DET_ONNX"; do
   [ -e "$f" ] || { echo "MISSING: $f  (run scripts/install/pdf_setup.sh)"; exit 1; }
 done

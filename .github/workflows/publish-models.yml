@@ -1,5 +1,6 @@
-# Export the RT-DETR layout model + TableFormer to ONNX, re-host pdfium + the
-# OCR model, and publish everything as GitHub Release assets, so
+# Export the RT-DETR layout model + TableFormer to ONNX, re-host the OCR model
+# (and pdfium, for the opt-in `pdfium` feature's oracle tests), and publish
+# everything as GitHub Release assets, so
 # `scripts/install/download_dependencies.sh` can fetch the whole PDF/image ML stack
 # from a single host (this repo's releases) with zero configuration.
 #

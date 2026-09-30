@@ -153,10 +153,9 @@ PY
 | `docling_rs.download_models()` | `docling-tools models download` | idempotent; `~/.cache/docling.rs` or `$DOCLING_RS_CACHE_DIR`; INT8 models fetched when hosted and preferred automatically (`DOCLING_RS_FP32=1` opts out); `force=True` re-downloads a stale cache after a model re-publish |
 
 Model/env resolution order: explicit `DOCLING_*` env vars → the process CWD
-(`models/`, `.pdfium/`, matching the CLI — so a repo checkout uses its own
-exports) → the cache dir set by `ensure_env()` (called by the constructor).
-pdfium is Linux x64 from the release; on other platforms set
-`PDFIUM_DYNAMIC_LIB_PATH` to a local build.
+(`models/`, matching the CLI — so a repo checkout uses its own exports) →
+the cache dir set by `ensure_env()` (called by the constructor). PDF pages
+are parsed and rendered in pure Rust — no native PDF library is fetched.
 
 ## Configuration (docling-shaped)
 
@@ -315,7 +314,7 @@ docling-core — no API token is stored or rotated (the trusted publisher is
 registered on PyPI; manage it at *Project → Manage → Publishing*). Re-runs are
 idempotent (`skip-existing`). macOS wheels are omitted (no hosted runners here);
 macOS users install the sdist, which compiles from source. The ONNX runtime is
-bundled in the wheel; pdfium is fetched at runtime by `download_models()`.
+bundled in the wheel; the ONNX models are fetched at runtime by `download_models()`.
 
 ### GPU wheel: `docling-rs-cuda`
 

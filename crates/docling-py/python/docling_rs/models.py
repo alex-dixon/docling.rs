@@ -3,7 +3,7 @@
 Mirrors how Python docling manages its artifacts: models are fetched once
 into a per-user cache directory (default ``~/.cache/docling.rs``, override
 with ``$DOCLING_RS_CACHE_DIR``) and the pipeline is pointed at them via the
-same ``DOCLING_*`` / ``PDFIUM_*`` environment variables the Rust CLI uses.
+same ``DOCLING_*`` environment variables the Rust CLI uses.
 Assets come from this repo's GitHub model release
 (https://github.com/docling-project/docling.rs/releases/tag/models-v1 — override the
 base URL with ``$DOCLING_RS_MODELS_URL``).
@@ -15,7 +15,7 @@ Usage::
 
 ``DocumentConverter`` calls :func:`ensure_env` automatically, so after the
 one-time download no configuration is needed at all. Local assets outrank the
-cache: when a matching ``.models/`` / ``.pdfium/`` asset exists in the
+cache: when a matching ``.models/`` asset exists in the
 working directory (e.g. a repo checkout with its own exports), the env var is
 left unset and the native pipeline resolves the local path itself, exactly
 like the Rust CLI. Re-published release assets are picked up with
@@ -111,44 +111,6 @@ _FALLBACK_URLS = {
         "https://huggingface.co/docling-project/DocumentFigureClassifier-v2.5/resolve/main/model.onnx"
     ),
 }
-# pdfium rasterizer, selected by host platform (#299 — the mirror of the
-# shell installers' #298 fix): Linux x64 takes the release's pinned
-# conformance build; Linux arm64 and macOS arm64/x64 take the matching
-# bblanchon prebuilt (the source the pinned build comes from), whose tarball
-# ships `lib/libpdfium.so` / `lib/libpdfium.dylib`. Anything else skips with
-# a note — a wrong-platform binary that "installs fine" and fails at dlopen
-# time is exactly the failure mode this exists to avoid.
-_PDFIUM_TGZ_BASE = "https://github.com/bblanchon/pdfium-binaries/releases/latest/download"
-
-
-def _pdfium_plan(system: "str | None" = None, machine: "str | None" = None):
-    """The pdfium install plan for a host: ``("release", lib)`` (pinned asset
-    from the models release), ``("tarball", url, lib)`` (bblanchon prebuilt),
-    or ``None`` (unsupported — skip). Parameters exist for tests; they default
-    to the running host."""
-    import platform as _platform
-
-    system = system if system is not None else _platform.system()
-    machine = (machine if machine is not None else _platform.machine()).lower()
-    arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(machine)
-    if arch is None:
-        return None
-    if system == "Darwin":
-        return ("tarball", f"{_PDFIUM_TGZ_BASE}/pdfium-mac-{arch}.tgz", "libpdfium.dylib")
-    if system == "Linux" and arch == "x64":
-        return ("release", "libpdfium.so")
-    if system == "Linux":
-        return ("tarball", f"{_PDFIUM_TGZ_BASE}/pdfium-linux-{arch}.tgz", "libpdfium.so")
-    return None
-
-
-def _pdfium_lib_name() -> str:
-    """The platform pdfium library filename (what pdfium-render dlopens);
-    ``libpdfium.so`` for unsupported hosts so path displays stay sensible."""
-    plan = _pdfium_plan()
-    return plan[-1] if plan else "libpdfium.so"
-
-
 def cache_dir() -> Path:
     """The asset cache root (``$DOCLING_RS_CACHE_DIR`` or ``~/.cache/docling.rs``)."""
     if env := os.environ.get("DOCLING_RS_CACHE_DIR"):
@@ -179,7 +141,7 @@ def _fetch(url: str, dest: Path, optional: bool, progress: bool, force: bool = F
 def download_models(
     dest: "str | Path | None" = None, progress: bool = True, force: bool = False
 ) -> Path:
-    """Fetch the PDF/image pipeline's models + pdfium into the cache (idempotent).
+    """Fetch the PDF/image pipeline's models into the cache (idempotent).
 
     Returns the cache root. Pass ``dest`` to use a custom directory (also set
     it as ``$DOCLING_RS_CACHE_DIR`` at runtime, or pass the same value as
@@ -194,7 +156,6 @@ def download_models(
         print(f"docling.rs: fetching models to {root}", file=sys.stderr, flush=True)
     for name, rel in _REQUIRED.items():
         _fetch(f"{BASE_URL}/{name}", root / rel, optional=False, progress=progress, force=force)
-    _fetch_pdfium(root, progress=progress, force=force)
     for name, rel in {**_OPTIONAL, **_ENRICH}.items():
         if not _fetch(
             f"{BASE_URL}/{name}", root / rel, optional=True, progress=progress, force=force
@@ -207,56 +168,6 @@ def download_models(
     if not (root / _ENRICH["cf_decoder_kv_int8.onnx"]).exists():
         _fetch(f"{BASE_URL}/{name}", root / rel, optional=True, progress=progress, force=force)
     return root
-
-
-def _fetch_pdfium(root: Path, progress: bool, force: bool) -> None:
-    """Install the *platform's* pdfium into ``<root>/.pdfium/lib`` (#299).
-
-    Linux x64 downloads the pinned release ``libpdfium.so`` like any other
-    required asset; the tarball platforms extract just their ``lib/<name>``
-    member (stdlib ``tarfile``). Idempotent like ``_fetch``; an unsupported
-    host prints a note and skips instead of installing a binary that could
-    never load."""
-    plan = _pdfium_plan()
-    if plan is None:
-        import platform as _platform
-
-        print(
-            f"docling.rs: skipping pdfium ({_platform.system()}/{_platform.machine()} has no "
-            "prebuilt); PDF/image rasterization needs PDFIUM_DYNAMIC_LIB_PATH",
-            file=sys.stderr,
-            flush=True,
-        )
-        return
-    if plan[0] == "release":
-        _fetch(
-            f"{BASE_URL}/{plan[1]}",
-            root / ".pdfium/lib" / plan[1],
-            optional=False,
-            progress=progress,
-            force=force,
-        )
-        return
-    _, url, lib = plan
-    dest = root / ".pdfium/lib" / lib
-    if dest.exists() and not force:
-        return
-    import io
-    import tarfile
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if progress:
-        print(f"  > {dest}", file=sys.stderr, flush=True)
-    with urllib.request.urlopen(url) as r:
-        data = r.read()
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        member = tar.extractfile(f"lib/{lib}")
-        if member is None:
-            raise RuntimeError(f"{url}: tarball has no lib/{lib}")
-        tmp = dest.with_suffix(dest.suffix + ".download")
-        with open(tmp, "wb") as f:
-            f.write(member.read())
-        tmp.rename(dest)
 
 
 def _point_at(var: str, local: "list[str]", cached: Path) -> None:
@@ -284,10 +195,10 @@ def _local(rels: "list[str]") -> "list[str]":
 
 
 def ensure_env(dest: "str | Path | None" = None) -> Path:
-    """Point the native pipeline at the cached assets via the ``DOCLING_*`` /
-    ``PDFIUM_*`` env vars. Local assets win: a variable is only filled when it
-    is not already set AND no matching ``.models/`` / ``.pdfium/`` asset
-    exists in the working directory (the native code resolves those itself, so a repo
+    """Point the native pipeline at the cached assets via the ``DOCLING_*``
+    env vars. Local assets win: a variable is only filled when it is not
+    already set AND no matching ``.models/`` asset exists in the working
+    directory (the native code resolves those itself, so a repo
     checkout keeps using its own exports). Prefers the INT8 models when
     present, matching the Rust pipeline's default; ``DOCLING_RS_FP32=1`` opts
     out. OCR is handed over as ``DOCLING_RS_MODELS_DIR`` (the cache's models
@@ -358,14 +269,4 @@ def ensure_env(dest: "str | Path | None" = None) -> Path:
         _local(["models/code_formula"]),
         m / "code_formula",
     )
-    # The env var names the *directory*, but what must exist in it is the
-    # *platform's* library (#299 — `libpdfium.dylib` on macOS): checking the
-    # bare directory kept pointing macOS at a cache holding only a stale
-    # Linux `.so`, which pdfium-render then never found.
-    if (
-        "PDFIUM_DYNAMIC_LIB_PATH" not in os.environ
-        and not Path(".pdfium/lib").exists()
-        and (root / ".pdfium/lib" / _pdfium_lib_name()).exists()
-    ):
-        os.environ["PDFIUM_DYNAMIC_LIB_PATH"] = str(root / ".pdfium/lib")
     return root

@@ -1651,7 +1651,8 @@ mod tests {
 
     /// Compare this module with pdfium on page `index` of `pdf` at `sizes`,
     /// appending a line per mismatch to `failures`; `false` when pdfium is
-    /// not installed.
+    /// not installed. The oracle needs the `pdfium` feature.
+    #[cfg(feature = "pdfium")]
     fn oracle(
         label: &str,
         pdf: &[u8],
@@ -1718,6 +1719,7 @@ mod tests {
     /// image-only fixture page at both pipeline sizes. Skipped without
     /// `libpdfium`.
     #[test]
+    #[cfg(feature = "pdfium")]
     fn matches_pdfium_on_the_scanned_fixtures() {
         let mut failures = Vec::new();
         let mut pages = 0;
@@ -2103,6 +2105,7 @@ mod tests {
     /// 1/2/4/8-bit, 2/4-bit gray, `/Decode` ranges on gray and RGB. Skipped
     /// without `libpdfium`.
     #[test]
+    #[cfg(feature = "pdfium")]
     fn synthesized_pages_match_pdfium() {
         let mut failures = Vec::new();
         let mut compared = 0;

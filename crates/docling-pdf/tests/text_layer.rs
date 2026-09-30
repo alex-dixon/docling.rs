@@ -1,7 +1,7 @@
 //! `convert_text_layer` (the `pdf-text` / wasm32 path) must produce the same
 //! extraction as the full pipeline's `no_ocr` flag: both run the pure-Rust
-//! text parser through the orphan-region assembly, differing only in how the
-//! page is opened (lopdf vs pdfium). Runs under the default (ml) feature so
+//! text parser through the orphan-region assembly, differing only in the
+//! entry point. Runs under the default (ml) feature so
 //! both entries exist to compare. (The scanned-table e2e below shares this
 //! binary rather than its own: every docling-pdf test target statically links
 //! onnxruntime, so one target carries all the pipeline e2es.)
@@ -16,18 +16,9 @@ fn text_layer_matches_no_ocr() {
     ))
     .expect("corpus pdf");
 
-    // Tests run with CWD = the crate dir; point the pdfium loader at the
-    // checkout's `.pdfium/lib` (the no_ocr side still opens pages via pdfium).
-    if std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_err() {
-        std::env::set_var(
-            "PDFIUM_DYNAMIC_LIB_PATH",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../.pdfium/lib"),
-        );
-    }
-
     let text_layer = docling_pdf::convert_text_layer(&bytes, "code_and_formula.pdf")
         .expect("text-layer conversion");
-    let no_ocr = match docling_pdf::convert_with_options(
+    let no_ocr = docling_pdf::convert_with_options(
         &bytes,
         None,
         "code_and_formula.pdf",
@@ -38,17 +29,8 @@ fn text_layer_matches_no_ocr() {
         docling_pdf::EnrichmentOptions::default(),
         None,
         None,
-    ) {
-        Ok(doc) => doc,
-        // The comparison baseline needs the pdfium shared library, which CI's
-        // model-free test job doesn't have — the equivalence claim is only
-        // checkable where a full local setup exists (scripts/dev/pdfium.sh).
-        Err(docling_pdf::PdfError::Pdfium(e)) if e.contains("LoadLibraryError") => {
-            eprintln!("skipping equivalence check: pdfium unavailable ({e})");
-            return;
-        }
-        Err(e) => panic!("no_ocr conversion: {e:?}"),
-    };
+    )
+    .expect("no_ocr conversion");
 
     let a = text_layer.export_to_markdown();
     assert!(!a.trim().is_empty(), "text layer should extract");
@@ -60,8 +42,8 @@ fn text_layer_matches_no_ocr() {
 /// gate) and the table must extract with its OCR'd cell text — region-scoped
 /// OCR skips table interiors, so the words come from the dedicated
 /// `ocr_table_words` pass; without it the cell matcher saw no words and the
-/// table dissolved. Needs pdfium + the layout/OCR/TableFormer models, so it
-/// skips (like the pdfium skip above) on a model-free CI checkout.
+/// table dissolved. Needs the layout/OCR/TableFormer models, so it skips on a
+/// model-free CI checkout.
 #[test]
 fn scanned_page_extracts_table_and_keeps_chart() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

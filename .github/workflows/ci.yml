@@ -111,7 +111,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-v2-test-
 
       # Pure-Rust unit tests + the output-regression suite. The PDF/image/METS
-      # snapshot tests need pdfium + the ONNX models, so they are NOT run here —
+      # snapshot tests need the ONNX models, so they are NOT run here —
       # this job downloads no ML models and stays fast. --locked doubles as the
       # guard that keeps the committed Cargo.lock in sync with the manifests
       # (a Cargo.toml change without its lock update fails here).

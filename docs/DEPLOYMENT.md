@@ -181,7 +181,6 @@ docker compose -f docker-compose.cuda.yml up -d
 | `DOCLING_RS_OCR_MODE` | `default` | OCR region selection (`default`, `full_page`, `layout_regions`) |
 | `DOCLING_RS_FP32` | `0` | Force FP32 model precision instead of INT8 |
 | `DOCLING_RS_MODELS_DIR` | `.models` | Directory override for ONNX model weights |
-| `PDFIUM_DYNAMIC_LIB_PATH` | `/app/.pdfium/lib` | Path to dynamic `libpdfium.so` / `libpdfium.dylib` |
 | `DOCLING_FFMPEG` | `ffmpeg` | Path to `ffmpeg` binary for video frame extraction |
 | `RUST_LOG` | `info` | Logging verbosity (`error`, `warn`, `info`, `debug`, `trace`) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP/gRPC endpoint for distributed trace export (#297) |
@@ -219,7 +218,6 @@ docker build -f crates/docling-serve/Dockerfile --build-arg FETCH_ASSETS=0 -t do
 docker run -d \
   -p 5001:5001 \
   -v /host/path/.models:/app/.models:ro \
-  -v /host/path/.pdfium:/app/.pdfium:ro \
   docling-serve-slim
 ```
 

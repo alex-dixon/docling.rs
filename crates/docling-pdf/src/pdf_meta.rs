@@ -56,15 +56,40 @@ pub struct PdfMeta {
 
 impl PdfMeta {
     /// Load `bytes` (with the parser's xref/stream repairs); `None` when lopdf
-    /// cannot read the file at all — the caller then asks pdfium, as before.
+    /// cannot read the file at all, or when it is encrypted beyond the empty
+    /// user password.
     pub fn open(bytes: &[u8]) -> Option<Self> {
-        let doc = crate::textparse::load_document(bytes)?;
-        let mut pages: Vec<_> = doc.get_pages().into_iter().collect();
-        pages.sort_by_key(|(n, _)| *n);
-        Some(Self {
-            doc,
-            pages: pages.into_iter().map(|(_, pid)| pid).collect(),
-        })
+        Self::open_with_password(bytes, None).ok().flatten()
+    }
+
+    /// [`open`](Self::open) with the document's password. `Ok(None)`: lopdf
+    /// cannot read the file (pdfium's turn, when compiled in); `Err`: the file
+    /// is encrypted and the password is missing or wrong — the error docling
+    /// raises too, instead of a document whose every stream decodes to nothing.
+    pub fn open_with_password(
+        bytes: &[u8],
+        password: Option<&str>,
+    ) -> Result<Option<Self>, crate::PdfError> {
+        use crate::textparse::OpenError;
+        match crate::textparse::open_document(bytes, password) {
+            Ok(doc) => {
+                let mut pages: Vec<_> = doc.get_pages().into_iter().collect();
+                pages.sort_by_key(|(n, _)| *n);
+                Ok(Some(Self {
+                    doc,
+                    pages: pages.into_iter().map(|(_, pid)| pid).collect(),
+                }))
+            }
+            Err(OpenError::Unreadable) => Ok(None),
+            Err(OpenError::Password) => Err(crate::PdfError::Document(
+                if password.is_some() {
+                    "the PDF is encrypted and the password is wrong"
+                } else {
+                    "the PDF is encrypted: a password is required"
+                }
+                .into(),
+            )),
+        }
     }
 
     /// Number of pages (`FPDF_GetPageCount`).
@@ -240,6 +265,29 @@ mod tests {
     fn fixture(rel: &str) -> Vec<u8> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         std::fs::read(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+    }
+
+    /// A password-protected fixture: no password is the error docling raises,
+    /// the right one opens the object model and the text layer.
+    #[test]
+    fn password_protected_files_need_their_password() {
+        let bytes = fixture("tests/data/pdf_password/sources/2206.01062_pg3.pdf");
+        assert!(PdfMeta::open(&bytes).is_none());
+        let err = PdfMeta::open_with_password(&bytes, None)
+            .err()
+            .expect("no password");
+        assert!(err.to_string().contains("password is required"), "{err}");
+        let err = PdfMeta::open_with_password(&bytes, Some("nope"))
+            .err()
+            .expect("wrong password");
+        assert!(err.to_string().contains("password is wrong"), "{err}");
+        let meta = PdfMeta::open_with_password(&bytes, Some("1234"))
+            .unwrap()
+            .expect("readable");
+        assert_eq!(meta.page_count(), 1);
+        let mut parser =
+            crate::textparse::PageTextParser::open_with_password(&bytes, Some("1234")).unwrap();
+        assert!(!parser.cells(0).prose.is_empty());
     }
 
     #[test]

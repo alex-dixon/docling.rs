@@ -20,6 +20,9 @@ cloud = ["dep:object_store"]
 # GPU execution providers for the PDF/image ML pipeline (#74) — pass-through
 # to docling → docling-pdf; select at runtime with DOCLING_RS_EP.
 cuda = ["docling/cuda"]
+# pdfium as an opt-in PDF renderer (`DOCLING_RS_RENDERER=pdfium`) — off by
+# default, the pipeline renders in pure Rust; pass-through to docling-pdf.
+pdfium = ["docling/pdfium"]
 # HEIC/HEIF image input (#211) — links the system libheif.
 heif = ["docling/heif"]
 tensorrt = ["docling/tensorrt"]

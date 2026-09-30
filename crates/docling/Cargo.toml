@@ -23,18 +23,23 @@ heif = ["pdf", "docling-pdf/heif"]
 # declarative converters (DOCX/HTML/MD/XLSX/PPTX/… → md/json) — a set that
 # compiles for wasm32-unknown-unknown (issue #79, see crates/docling-wasm).
 default = ["pdf", "asr", "fetch-images", "vlm"]
-# PDF/image/METS-GBS ML pipeline (pdfium + ONNX Runtime via docling-pdf).
-# resvg rides along so SVG input (#212) can rasterize into the same image
-# pipeline; the non-ML SVG path (direct <text> extraction) needs no deps.
+# PDF/image/METS-GBS ML pipeline (the pure-Rust renderer + ONNX Runtime via
+# docling-pdf). resvg rides along so SVG input (#212) can rasterize into the
+# same image pipeline; the non-ML SVG path (direct <text> extraction) needs
+# no deps.
 pdf = ["dep:docling-pdf", "docling-pdf/ml", "dep:resvg"]
-# Text-layer-only PDF conversion (docling-pdf's pure-Rust parser, no pdfium/
-# ONNX) — the wasm32 PDF path. Subsumed by `pdf`, which converts everything.
+# pdfium as an opt-in renderer (`DOCLING_RS_RENDERER=pdfium`, docling's
+# pypdfium2 chain) and the last resort for a file lopdf cannot read — off by
+# default; forwards to docling-pdf's `pdfium` feature.
+pdfium = ["pdf", "docling-pdf/pdfium"]
+# Text-layer-only PDF conversion (docling-pdf's pure-Rust parser, no ONNX) —
+# the wasm32 PDF path. Subsumed by `pdf`, which converts everything.
 pdf-text = ["dep:docling-pdf"]
 # Audio → Whisper ASR (symphonia + ONNX Runtime via docling-asr).
 asr = ["dep:docling-asr"]
 # Blocking HTTP fetch of remote <img src> images (DocumentConverter::fetch_images).
 fetch-images = ["dep:ureq", "dep:url"]
-# Remote VLM pipeline (#77): render PDF pages via pdfium and convert them
+# Remote VLM pipeline (#77): render PDF pages (the Rust renderer) and convert them
 # through an OpenAI-compatible vision endpoint (LM Studio / Ollama / vLLM /
 # hosted), parsing the returned DocLang with the existing reader. Rides on the
 # crate's existing blocking HTTP client; no model code compiled in.
