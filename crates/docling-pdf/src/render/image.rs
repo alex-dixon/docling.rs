@@ -219,7 +219,7 @@ pub fn rasterize(
                             n += 1;
                         }
                     }
-                    let a = if n == 0 { 0 } else { (cov * 255 / n) as u8 };
+                    let a = (cov * 255).checked_div(n).unwrap_or(0) as u8;
                     px[oy * out_w + ox] = premul(fill, a);
                 }
             }

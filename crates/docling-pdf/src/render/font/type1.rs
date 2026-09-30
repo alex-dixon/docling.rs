@@ -266,11 +266,8 @@ fn parse_charstrings(private: &[u8], len_iv: usize) -> Option<HashMap<String, Ve
         + find(&private[p + 12..], b"begin")
             .map(|b| b + 5)
             .unwrap_or(0);
-    loop {
-        // Next `/name`.
-        let Some(slash) = private[pos..].iter().position(|&b| b == b'/') else {
-            break;
-        };
+    // Each iteration consumes one `/name <len> RD <bytes> ND` entry.
+    while let Some(slash) = private[pos..].iter().position(|&b| b == b'/') {
         let name_start = pos + slash + 1;
         let name_end = name_start
             + private[name_start..]
