@@ -201,14 +201,15 @@ for await (const c of streamFileChunks('report.docx', {
 ### PDF / images: getting the ML models
 
 Declarative formats (Markdown, HTML, DOCX, XLSX, …) are pure Rust and need
-nothing. The **PDF/image** path needs native assets that are *not* bundled in the
-addon — pdfium plus the ONNX models (layout, OCR, TableFormer). Converting a
-PDF/image/METS input **throws** until they're on disk. Fetch them with a
+nothing. The **PDF/image** path needs the ONNX models (layout, OCR,
+TableFormer), which are *not* bundled in the addon — the PDF pages themselves
+are parsed and rendered in pure Rust. Converting a PDF/image/METS input
+**throws** until the models are on disk. Fetch them with a
 one-liner from your app's directory (where you'll `npm install docling.rs`):
 
 > The exception is [`pipeline: 'vlm'`](#vlm-pipeline-remote-endpoint), which
-> replaces the ONNX stack with a remote endpoint: it needs **pdfium only** (to
-> rasterize PDF pages), and nothing at all for image input.
+> replaces the ONNX stack with a remote endpoint: it needs **nothing on disk**
+> (PDF pages are rendered in pure Rust).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/docling-project/docling.rs/master/scripts/install/download_dependencies.sh | sh
@@ -222,13 +223,12 @@ const res = await convertFileAsync('paper.pdf', { to: 'markdown' }) // ✅ works
 
 `scripts/install/download_dependencies.sh` fetches everything from this repo's
 [GitHub Releases](https://github.com/docling-project/docling.rs/releases) straight into
-`./models` and `./.pdfium` — which this package (and the Rust CLI) look for by
+`./.models` — which this package (and the Rust CLI) look for by
 default, relative to the process's current directory, so no env vars or setup
 call are needed afterwards:
 
 | Asset | Destination |
 | --- | --- |
-| **pdfium** | `.pdfium/lib/libpdfium.so` (`libpdfium.dylib` on macOS) |
 | **layout** (`layout_heron.onnx`) | `models/layout_heron.onnx` |
 | **OCR** rec model + dictionary | `models/ocr_rec.onnx`, `models/ppocr_keys_v1.txt` |
 | **OCR** text detector (optional, #429 — lines outside layout regions on scans/images) | `models/ocr_det.onnx` |
@@ -240,25 +240,25 @@ call are needed afterwards:
 > [`docs/MODELS_NOTICE.md`](../../docs/MODELS_NOTICE.md) for full attribution), not
 > docling.rs's own weights — docling.rs hosts the converted `.onnx` as a
 > GitHub Release purely so you don't need a local Python/torch toolchain.
-> pdfium and the OCR model are re-hosted, unmodified, from their own public
-> releases, on the same host for convenience.
+> The OCR model is re-hosted, unmodified, from its own public release, on
+> the same host for convenience.
 >
-> Run it from wherever your app lives — the script only writes to `./models`
-> and `./.pdfium` under the current directory, e.g. in a container build step:
+> Run it from wherever your app lives — the script only writes to `./.models`
+> under the current directory, e.g. in a container build step:
 > ```bash
 > cd /path/to/your/app && curl -fsSL https://raw.githubusercontent.com/docling-project/docling.rs/master/scripts/install/download_dependencies.sh | sh
 > ```
 >
 > To use your own export/host instead, point the env vars at it directly:
 > `DOCLING_LAYOUT_ONNX`, `DOCLING_OCR_REC_ONNX`, `DOCLING_OCR_DICT`,
-> `DOCLING_TABLEFORMER_{ENCODER,DECODER,BBOX}`, `PDFIUM_DYNAMIC_LIB_PATH` — an
-> env var always wins over the `./models` / `./.pdfium` default.
+> `DOCLING_TABLEFORMER_{ENCODER,DECODER,BBOX}` — an env var always wins over
+> the `./.models` default.
 
 ```js
-checkDependencies() // { home, pdfium, layout, ocr, tableformer, chunkTokenizer, ready, missing }
+checkDependencies() // { home, layout, ocr, ocrDet, tableformer, chunkTokenizer, ready, missing }
 ```
 
-`ready` describes the **standard** pipeline (`pdfium && layout`); a VLM-only
+`ready` describes the **standard** pipeline (the layout model); a VLM-only
 install has `ready: false` and still converts.
 
 ### Reusing a warm `Pipeline` (many PDFs)
@@ -304,12 +304,11 @@ is nothing to keep warm — use `convertFileAsync` or `DocumentConverter`.
 ### VLM pipeline (remote endpoint)
 
 `pipeline: 'vlm'` (issue #77) replaces the whole ONNX stack — layout, OCR,
-TableFormer — with a **Vision Language Model**. Each PDF page is rendered with
-pdfium and sent to any OpenAI-compatible vision endpoint (LM Studio, Ollama,
+TableFormer — with a **Vision Language Model**. Each PDF page is rendered (in
+pure Rust) and sent to any OpenAI-compatible vision endpoint (LM Studio, Ollama,
 vLLM, or a hosted service) with docling's page-conversion prompt; the returned
 DocLang/DocTags markup is parsed by the same reader the CLI uses. No ONNX model
-is loaded, so a VLM-only install needs pdfium alone — and nothing at all for
-image input.
+is loaded, so a VLM-only install needs nothing on disk.
 
 ```js
 import { convertFileAsync } from 'docling.rs'

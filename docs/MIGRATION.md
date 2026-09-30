@@ -39,7 +39,7 @@ bulk of the porting under review).
 > OPC archive), **image extraction**, and **MHTML** (docling#4184's
 > `InputFormat.MHTML`). The declarative formats are pure-Rust and checked byte-for-byte
 > against *live* docling; the PDF/image/METS ML path lives in `docling-pdf`
-> (a pure-Rust PDF text parser + pdfium rasterization + ONNX
+> (a pure-Rust PDF text/metadata parser and page renderer — no native PDF library; the docling-parse renderer plugin is a development oracle — + ONNX
 > layout/TableFormer/OCR + a port of docling-parse's line sanitizer) and is also
 > measured byte-for-byte against live docling — **6 / 14 PDF fixtures exact, 7 / 14
 > whitespace-normalized** (see `PDF_CONFORMANCE.md`), with a snapshot baseline
@@ -68,7 +68,7 @@ The layers mirror docling's:
 | **Data model + serializers** | `docling-core` | `docling-core` — `DoclingDocument`, the `Node` tree, Markdown + JSON serializers, base64 |
 | **Converter** | `docling/document_converter.py` | `docling.rs` — `converter.rs` (format dispatch + XML content sniffing) |
 | **Backends** | `docling/backend/*` | `docling.rs` — `backend/*` (one per format) |
-| **PDF/ML pipeline** | `docling/pipeline/*`, `docling/models/*` | `docling-pdf` — pdfium + ONNX layout/OCR + assembly |
+| **PDF/ML pipeline** | `docling/pipeline/*`, `docling/models/*` | `docling-pdf` — pure-Rust text layer + renderer, ONNX layout/OCR + assembly |
 | **Audio/ASR pipeline** | `docling/pipeline/asr_pipeline.py` | `docling-asr` — symphonia decode + log-mel + ONNX Whisper |
 | **Chunking** | `docling-core` chunkers (`HierarchicalChunker`/`HybridChunker`) | `docling-core::chunker`, re-exported as `docling::chunker` |
 | **CLI** | `docling/cli` | `docling-cli` (incl. warm batch mode: `SOURCE... --output DIR`, `--input GLOB --output DIR [--jobs N]`, `--abort-on-error`, #489; repeatable `--to`, #491) |
@@ -78,7 +78,7 @@ The layers mirror docling's:
 crates/
 ├── docling-core/   # DoclingDocument, Node model, markdown/json/doclang/doctags serializers, chunker.rs, confidence.rs
 ├── docling/        # DocumentConverter, source/format detection, backend/*.rs, ooxml.rs
-├── docling-pdf/    # pdfium_backend, layout (RT-DETR/ONNX), ocr (PP-OCRv3/ONNX), assemble, mets
+├── docling-pdf/    # pdfium_backend (the page walk), textparse, render/, raster/, layout (RT-DETR/ONNX), ocr (PP-OCRv3/ONNX), assemble, mets
 ├── docling-asr/    # audio decode (symphonia), mel.rs, whisper.rs (ONNX), tokenizer.rs
 ├── docling-onnx/   # shared ONNX Runtime EP selection (DOCLING_RS_EP, cuda/tensorrt/directml/coreml features)
 ├── docling-cli/    # `--strict`, `--to md|json|html|dclx|chunks|latex`, `--images …`, `--pages`, `--ocr-lang`, serve subcommand
@@ -200,7 +200,7 @@ close — see `PDF_CONFORMANCE.md`. A deterministic snapshot baseline
 
 | Format | How |
 |---|---|
-| PDF | **pure-Rust text parser** (`textparse.rs`, font-advance glyph boxes) + pdfium page render (the model inputs are rendered like docling's `PyPdfiumDocumentBackend`; docling 2.123+'s default docling-parse renderer differs at the glyph anti-aliasing level, which moves heron's borderline labels — #478, `PDF_CONFORMANCE.md`; that renderer is loadable as an opt-in plugin, `DOCLING_RS_RENDERER=docling-parse`, built by `scripts/install/build_docling_parse_render.sh`) → RT-DETR layout (ONNX) → **TableFormer** table structure (ONNX) → PP-OCRv3 OCR for scanned pages → **docling-parse line sanitizer** (`dp_lines.rs`) + reading-order assembly (#419: layout boxes are refitted to the cells they claim, empty ones dropped and contained orphans folded in before the reading order runs, as docling's `LayoutPostprocessor` does — a model box that cut a line in half no longer strands that line after its paragraph; 2206 82→52, 2305 20→18, normal_4pages 20→16 diff lines vs groundtruth). `--pages A-B` (docling's `page_range`, #80) converts a 1-based page window, skipping the rest before rasterization; `--images referenced` streams each page's image files to the artifacts dir as the page is emitted (memory-bounded, #80); `--ocr-lang en|ch` picks the OCR recognition model (en default — the ch_ conformance model glues Latin words); scanned pages with `/Rotate` are un-rotated to upright before layout/OCR and their geometry mapped back to display coords (all four orientations of `tests/data/scanned/` OCR to the same groundtruth text); table captions attach by reading-order adjacency (docling's `_find_to_captions`, #265) and ride on the table across all exports — Markdown above the grid, JSON `TableItem.captions` refs, DocLang `<caption>`; the JSON carries page headers/footers as body-parented `page_header`/`page_footer` texts on the furniture layer, as upstream writes them (Markdown still leaves them out); the text inside a picture reaches the JSON as that picture's children (docling's `_add_child_elements`), as upstream writes it (Markdown, like docling's, prints only the caption) |
+| PDF | **pure-Rust text parser** (`textparse.rs`, font-advance glyph boxes) + page render — the **pure-Rust renderer** by default (the docling-parse renderer plugin — the canvas docling 2.123+ feeds its models, the renders the baselines are pinned to, #478, `PDF_CONFORMANCE.md` — is a development oracle selected with `DOCLING_RS_RENDERER=docling-parse`) (`render/`: content streams, clips, transparency as docling-parse flattens it, TrueType/CFF/Type 1/Type 3 glyphs and host fallback faces, shadings, patterns, images, widgets; mean \|Δ\| ≈ 1/255 per channel against the shim over the corpus; on the plugin-rendered baselines 71/98 snapshots exact and 454 groundtruth diff lines where the plugin itself is 98 / 374 and the pdfium chain 72 / 458, `DOCLING_RS_RENDERER=rust`), pdfium's chain only in a build with the opt-in `pdfium` feature under `DOCLING_RS_RENDERER=pdfium` → RT-DETR layout (ONNX) → **TableFormer** table structure (ONNX) → PP-OCRv3 OCR for scanned pages → **docling-parse line sanitizer** (`dp_lines.rs`) + reading-order assembly (#419: layout boxes are refitted to the cells they claim, empty ones dropped and contained orphans folded in before the reading order runs, as docling's `LayoutPostprocessor` does — a model box that cut a line in half no longer strands that line after its paragraph; 2206 82→52, 2305 20→18, normal_4pages 20→16 diff lines vs groundtruth). `--pages A-B` (docling's `page_range`, #80) converts a 1-based page window, skipping the rest before rasterization; `--images referenced` streams each page's image files to the artifacts dir as the page is emitted (memory-bounded, #80); `--ocr-lang en|ch` picks the OCR recognition model (en default — the ch_ conformance model glues Latin words); scanned pages with `/Rotate` are un-rotated to upright before layout/OCR and their geometry mapped back to display coords (all four orientations of `tests/data/scanned/` OCR to the same groundtruth text); table captions attach by reading-order adjacency (docling's `_find_to_captions`, #265) and ride on the table across all exports — Markdown above the grid, JSON `TableItem.captions` refs, DocLang `<caption>`; the JSON carries page headers/footers as body-parented `page_header`/`page_footer` texts on the furniture layer, as upstream writes them (Markdown still leaves them out); the text inside a picture reaches the JSON as that picture's children (docling's `_add_child_elements`), as upstream writes it (Markdown, like docling's, prints only the caption) |
 | Images (tiff/webp/png/jpeg/gif/bmp) | the same pipeline, image as a single page; docling#4247 (2.128): the EXIF orientation tag is applied when the frame is loaded (`ImageOps.exif_transpose`), so a portrait photo no longer reaches layout and OCR on its side |
 | METS / Google Books | `.tar.gz` of per-page hOCR + TIFF → cells from hOCR → the same layout+assembly path (no OCR needed) |
 | Audio (wav/mp3/flac/ogg/aac/m4a) and video audio tracks (mp4/mov/mkv/webm — docling's `InputFormat.VIDEO`, Phase 1 of #138) | `docling-asr`: **symphonia** decode (no ffmpeg) → 16 kHz mono → ported log-mel front-end → **Whisper tiny** encoder/decoder (ONNX, greedy with OpenAI's timestamp rules — docling's ASR defaults) → `[time: start-end] text` paragraphs. Frames (Phase 2 of #138): when the `ffmpeg` binary is present at runtime, up to `--video-frames N` (default 8) scene-change frames (evenly spaced fallback) interleave with the transcript as `[time: <ts>]`-captioned pictures with embedded PNGs; no ffmpeg → transcript only, no audio track → frames only. Codecs symphonia can't decode in-process — Ogg Opus, AVI containers — go through the same optional ffmpeg binary when present (#190); without it they fail with a targeted install hint. Transcription language: auto-detected per file from the first 30-second window (Whisper's `language=None` / docling 2.116 default, #180); pin with `asr_lang` (all surfaces) or `DOCLING_RS_ASR_LANG`; English-only presets skip detection. |
@@ -448,7 +448,7 @@ These are deliberate or unavoidable divergences, not bugs.
      page frame — the CropBox ∩ MediaBox box with its lower-left corner as
      the origin, inherited through the page tree — so a trimmed or offset
      page lines up with the rendered bitmap and docling's `prov` boxes. It is
-     the default text layer (`DOCLING_PDFIUM_TEXT=1` falls back to pdfium). Its cells feed a port of
+     the only text layer (pdfium's text page is gone — phase 4 of "Retiring pdfium"). Its cells feed a port of
      docling-parse's line sanitizer (`dp_lines.rs`): 3-pass corner-distance
      contraction with gap-proportional space insertion, `enforce_same_font`,
      ligature recomposition, loose-box geometry. Plus docling's markdown escaping,
@@ -457,7 +457,14 @@ These are deliberate or unavoidable divergences, not bugs.
      reading-order predictor (2.127's same-row links included, #424) with
      cluster cells joined in docling-parse index order, and false-picture /
      page-number layout fixes. The parser is now the **sole** text
-     source — pdfium does only page rasterisation + link annotations. Its per-word
+     source, and page count / geometry / `/Rotate` / link annotations are read
+     from the same lopdf document (`pdf_meta.rs`), and an image-only page is
+     rasterized in pure Rust byte-for-byte like pdfium (`raster/`: pdfium's
+     stretch engine + a libjpeg-exact JPEG decoder), every other page by the
+     pure-Rust renderer (`render/`) — pdfium itself is an opt-in cargo
+     feature (`pdfium`: `DOCLING_RS_RENDERER=pdfium`, a file lopdf cannot
+     read) and the default build links no native PDF library.
+     Its per-word
      cells reproduce docling-parse's `word_cells` byte-for-byte (377/377 on
      `2305-pg9`), which is what TableFormer matches against; a char-frequency
      validator (`scripts/test/parser_completeness.py`) confirms nothing is silently
@@ -497,8 +504,8 @@ These are deliberate or unavoidable divergences, not bugs.
    `NaN`.
 
 10. **Page rasterization over HTTP** (#243). `to=images` on docling-serve's
-    `/v1/convert` (sync, async, batch) renders a PDF's pages to PNG through
-    pdfium without running any conversion — the per-page base64 JSON covers
+    `/v1/convert` (sync, async, batch) renders a PDF's pages to PNG
+    without running any conversion — the per-page base64 JSON covers
     the PDF-to-image use case Python docling-serve served; `pages=A-B`
     windows and `scale` (pixels per PDF point, default 2.0 = 144 dpi) apply,
     capped at `DOCLING_RS_MAX_RASTER_PAGES` (100) pages per request. The CLI
@@ -642,7 +649,7 @@ deliberate scope boundary or a cosmetic, single-fixture polish gap.
 - **Local VLM full-page inference** (SmolDocling-class models in-process).
   Model-bound; out of scope for the discriminative port. The **remote** VLM
   pipeline (#77) *is* implemented: `--pipeline vlm --vlm-endpoint URL
-  --vlm-model NAME` renders pages via pdfium, converts them through any
+  --vlm-model NAME` renders pages (pure Rust), converts them through any
   OpenAI-compatible vision endpoint (LM Studio / Ollama / vLLM / hosted) and
   parses the returned DocLang with the existing reader — see the README's
   "VLM pipeline" section. Also on the Node bindings as `pipeline: 'vlm'`
@@ -739,7 +746,7 @@ deliberate scope boundary or a cosmetic, single-fixture polish gap.
   `Pipeline` for many PDFs, and the remote VLM pipeline (`pipeline: 'vlm'`).
 - **`docling-wasm`** — WebAssembly bindings: the declarative converters (and
   digital PDFs via the opt-in `pdf-text` text-layer feature — the same
-  extraction as `--no-ocr`, no pdfium/ONNX) run fully client-side in the
+  extraction as `--no-ocr`, no ONNX) run fully client-side in the
   browser, ~1.9 MB gzipped; scanned PDFs return a "needs OCR" error. Python
   docling has no equivalent. See the crate README.
 - **`docling-py`** — PyO3 bindings (PyPI package `docling-rs`): a strangler-fig
@@ -757,7 +764,7 @@ deliberate scope boundary or a cosmetic, single-fixture polish gap.
   committed fixtures (159 sources × 3). `DOCLING_RS_REGEN=1` refreshes them.
   The JSON fixtures double as a docling-core load check.
 - **Snapshot harness** — `scripts/conformance/pdf_conformance.sh` regenerates and diffs the
-  PDF/image/METS baseline (needs pdfium + the ONNX models; **94 outputs, all
+  PDF/image/METS baseline (needs the ONNX models + the docling-parse plugin; **94 outputs, all
   matching the committed baseline**).
 - **Conformance** — `scripts/conformance/conformance.sh <fmt>` scores a format against the
   latest published docling (installed from PyPI; how-to in §9).
@@ -1011,7 +1018,7 @@ documented divergences rather than drift.
 The port followed roughly: **Phase 0** skeleton & API → **Phase 2** text/markup
 (Markdown, CSV, HTML, AsciiDoc, DeepSeek) → **Phase 3** Office & e-book (DOCX,
 PPTX, XLSX, EPUB, ODF) → **Phase 4** long tail (XML families, LaTeX, Email,
-WebVTT, JSON) → **Phase 5–6** the PDF/image ML pipeline (pdfium + ONNX layout/OCR
+WebVTT, JSON) → **Phase 5–6** the PDF/image ML pipeline (ONNX layout/OCR
 + geometric tables) → output formats (strict Markdown, JSON, image extraction) →
 **Phase 7** audio/ASR (symphonia + ONNX Whisper). The Node.js/Bun (`docling-node`)
 and Python (`docling-py`, PyO3) interop bindings followed.

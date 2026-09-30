@@ -31,7 +31,7 @@ export type StreamCallback = (err: Error | null, chunk: string | undefined | nul
 /**
  * Convert a file on disk (format detected from the extension). Throws for
  * PDF/image/METS if deps aren't installed — except under `pipeline: 'vlm'`,
- * which loads no ONNX models and needs only pdfium (nothing for image input).
+ * which loads no ONNX models and needs nothing on disk.
  */
 export declare function convertFile(path: string, options?: ConvertOptions | null): ConvertResult
 /** Convert in-memory bytes. Throws for PDF/image/METS if deps aren't installed (see {@link convertFile}). */
@@ -122,8 +122,6 @@ export declare class Pipeline {
 export interface DependencyStatus {
   /** Install home directory. */
   home: string
-  /** libpdfium present. */
-  pdfium: boolean
   /** Layout model (layout_heron.onnx) present. */
   layout: boolean
   /** OCR model + dictionary present. */
@@ -135,9 +133,9 @@ export interface DependencyStatus {
   /** Hybrid-chunker tokenizer (.models/chunk/tokenizer.json) present. */
   chunkTokenizer: boolean
   /**
-   * True when the minimum for PDF (pdfium + layout) is present — that is, for
-   * the *standard* pipeline. `pipeline: 'vlm'` needs `pdfium` alone (and
-   * nothing at all for image input), so it can convert with `ready: false`.
+   * True when the minimum for PDF and image input (the layout model) is
+   * present — that is, for the *standard* pipeline. `pipeline: 'vlm'` needs
+   * nothing on disk, so it can convert with `ready: false`.
    */
   ready: boolean
   /** Human-readable list of the missing required assets. */

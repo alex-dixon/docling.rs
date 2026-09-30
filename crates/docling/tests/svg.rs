@@ -113,7 +113,7 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// The rasterize route needs the layout + OCR models (no pdfium — the PNG
+/// The rasterize route needs the layout + OCR models (the PNG
 /// decodes through the `image` crate). Model resolution is CWD-relative, so
 /// this also moves the process to the repo root, like `scanned.rs`.
 fn models_ready() -> bool {

@@ -4,29 +4,33 @@
 //! docling 2.123+ renders every page image its model stages consume — the
 //! scale-1.0 layout input, the scale-2.0 TableFormer input, the OCR and
 //! enrichment crops — with docling-parse's own renderer (FreeType glyph
-//! outlines filled by Blend2D), while this pipeline renders them with pdfium
-//! exactly like docling's `PyPdfiumDocumentBackend`. The two rasters differ at
-//! every glyph edge (10 % of the corpus pixels by > 8/255), and heron's
+//! outlines filled by Blend2D), while this pipeline renders them with its own
+//! pure-Rust renderer (`crate::render`, tiny-skia) — close to, not identical
+//! with, that canvas (mean |Δ| ≈ 1/255 over the corpus), and heron's
 //! borderline labels follow the pixels. This module lets the pipeline consume
-//! docling's raster instead: a small C shim over `renderer<BLEND2D>`
+//! docling's raster itself: a small C shim over `renderer<BLEND2D>`
 //! (`crates/docling-pdf/ffi/docling-parse-render/dparse_render.cpp`, built by
-//! `scripts/install/build_docling_parse_render.sh`) is `dlopen`ed the way
-//! pdfium is, and [`Doc::render`] hands back the RGBA canvas docling's
-//! `get_page_image(scale)` would.
+//! `scripts/install/build_docling_parse_render.sh`) is `dlopen`ed, and
+//! [`Doc::render`] hands back the RGBA canvas docling's `get_page_image(scale)`
+//! would. Since phase 5 of "Retiring pdfium" it is a development oracle: the
+//! conformance scripts ask for it by name, the default pipeline never loads
+//! it.
 //!
 //! Selection is an environment knob, never a build feature: nothing links the
 //! C++ side, CI and wasm are untouched, and a missing library degrades to
-//! pdfium.
+//! the Rust renderer.
 //!
-//! * `DOCLING_RS_RENDERER` — `auto` (default: docling-parse when the shim
-//!   library resolves, pdfium otherwise, silently — the baselines in
-//!   `tests/snapshots` and `docs/PDF_CONFORMANCE.md` are docling-parse's, so a
-//!   checkout with the library converts like the baselines and one without
-//!   still converts), `docling-parse` (required: a missing library warns
-//!   once and falls back to pdfium) or `pdfium` (never load the plugin).
+//! * `DOCLING_RS_RENDERER` — `auto` (default: the pure-Rust renderer,
+//!   `crate::render`; the shim is never opened), `docling-parse` (the shim —
+//!   what the conformance scripts run, because the baselines in
+//!   `tests/snapshots` and `docs/PDF_CONFORMANCE.md` are its renders; a
+//!   missing library warns once and falls back to the Rust renderer), `rust`
+//!   (the default, spelled out) or `pdfium` (the library's render, docling's
+//!   pypdfium2 chain — only in a build with docling-pdf's `pdfium` feature,
+//!   otherwise a one-time warning and the Rust renderer).
 //! * `DOCLING_PARSE_RENDER_LIB` — the shim library (a file, or the directory
 //!   holding `libdparse_render.so`/`.dylib`); default `.docling-parse/lib`
-//!   resolved like `.pdfium/lib` ([`crate::resolve_asset`]).
+//!   resolved like `.models` ([`crate::resolve_asset`]).
 //! * `DOCLING_PARSE_RESOURCES` — docling-parse's `pdf_resources` directory
 //!   (fallback fonts, encodings, cmaps); default `<lib dir>/../pdf_resources`,
 //!   where the build script installs it.
@@ -100,11 +104,18 @@ fn err_string(buf: &[c_char]) -> String {
 /// What `DOCLING_RS_RENDERER` asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Choice {
-    /// docling-parse when its library resolves, pdfium otherwise (the default).
+    /// The pure-Rust renderer ([`crate::render`]) — the default. The shim is
+    /// a development oracle since phase 5 of "Retiring pdfium": it is loaded
+    /// only when asked for by name.
     Auto,
-    /// docling-parse, warning when it is unavailable.
+    /// docling-parse's renderer (the shim), warning when it is unavailable —
+    /// what the conformance scripts run, the renderer the baselines are
+    /// pinned to.
     DoclingParse,
-    /// pdfium only.
+    /// The pure-Rust renderer, spelled out.
+    Rust,
+    /// pdfium (the renderer of docling's pypdfium2 backend); only offered by
+    /// a build with the `pdfium` feature.
     Pdfium,
 }
 
@@ -116,10 +127,23 @@ pub fn choice() -> Choice {
         Some(v) => match v.trim().to_ascii_lowercase().as_str() {
             "auto" | "" => Choice::Auto,
             "docling-parse" | "docling_parse" | "dparse" => Choice::DoclingParse,
+            "rust" => Choice::Rust,
+            #[cfg(feature = "pdfium")]
             "pdfium" => Choice::Pdfium,
+            #[cfg(not(feature = "pdfium"))]
+            "pdfium" => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    eprintln!(
+                        "docling-pdf: DOCLING_RS_RENDERER=pdfium but pdfium support is not compiled in \
+                         (docling-pdf feature `pdfium`); rendering with the Rust renderer"
+                    );
+                });
+                Choice::Auto
+            }
             other => {
                 eprintln!(
-                    "docling-pdf: unknown DOCLING_RS_RENDERER={other:?} (auto | docling-parse | pdfium); using auto"
+                    "docling-pdf: unknown DOCLING_RS_RENDERER={other:?} (auto | docling-parse | rust | pdfium); using auto"
                 );
                 Choice::Auto
             }
@@ -220,16 +244,17 @@ fn load() -> Result<Plugin, String> {
     }
 }
 
-/// The plugin when the shim loads and [`choice`] allows it; `None` otherwise.
-/// Under `auto` an unavailable library is a quiet (`DOCLING_RS_DEBUG`) note
-/// and the pipeline renders with pdfium; under `docling-parse` it warns once
-/// first (degradation over failure either way).
+/// The plugin when `DOCLING_RS_RENDERER=docling-parse` asks for it and the
+/// shim loads; `None` otherwise — under `auto` the shim is never opened
+/// (the Rust renderer is the default), and an unavailable library under
+/// `docling-parse` warns once and falls back to the Rust renderer
+/// (degradation over failure).
 pub fn plugin() -> Option<&'static Plugin> {
     static PLUGIN: OnceLock<Option<Plugin>> = OnceLock::new();
     PLUGIN
         .get_or_init(|| {
             let choice = choice();
-            if choice == Choice::Pdfium {
+            if choice != Choice::DoclingParse {
                 return None;
             }
             match load() {
@@ -244,13 +269,15 @@ pub fn plugin() -> Option<&'static Plugin> {
                 Err(e) if choice == Choice::DoclingParse => {
                     eprintln!(
                         "docling-pdf: DOCLING_RS_RENDERER=docling-parse but the renderer plugin \
-                         is unavailable ({e}); rendering with pdfium"
+                         is unavailable ({e}); rendering with the Rust renderer"
                     );
                     None
                 }
                 Err(e) => {
+                    // Unreachable while only `docling-parse` opens the shim;
+                    // kept for the day `auto` asks again.
                     docling_core::debug_log!(
-                        "docling-pdf: docling-parse renderer plugin not loaded ({e}); rendering with pdfium"
+                        "docling-pdf: docling-parse renderer plugin not loaded ({e}); rendering with the Rust renderer"
                     );
                     None
                 }
@@ -259,13 +286,16 @@ pub fn plugin() -> Option<&'static Plugin> {
         .as_ref()
 }
 
-/// Which renderer produces the model inputs in this process: `"docling-parse"`
-/// or `"pdfium"` — for diagnostics (`--version`-style banners, serve health).
+/// Which renderer produces the model inputs in this process:
+/// `"docling-parse"`, `"rust"` or `"pdfium"` — for diagnostics
+/// (`--version`-style banners, serve health).
 pub fn active_name() -> &'static str {
     if plugin().is_some() {
         "docling-parse"
-    } else {
+    } else if choice() == Choice::Pdfium {
         "pdfium"
+    } else {
+        "rust"
     }
 }
 
@@ -288,7 +318,7 @@ impl Doc {
         match Doc::open(plugin, bytes, password) {
             Ok(doc) => Some(doc),
             Err(e) => {
-                eprintln!("docling-pdf: docling-parse could not open the document ({e}); rendering with pdfium");
+                eprintln!("docling-pdf: docling-parse could not open the document ({e}); rendering with the Rust renderer");
                 None
             }
         }

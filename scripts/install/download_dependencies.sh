@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
-# Fetch the PDF/image ML pipeline's native dependencies — pdfium + the ONNX
-# models (layout, OCR, TableFormer) — from this repo's GitHub Releases,
-# straight into the current directory. No npm, no Python, no env vars needed
-# afterwards: both the Rust CLI and the Node.js/Bun bindings look for
-# `.models/` and `.pdfium/lib` relative to the process's current directory by
-# default.
+# Fetch the PDF/image ML pipeline's dependencies — the ONNX models (layout,
+# OCR, TableFormer) — from this repo's GitHub Releases, straight into the
+# current directory. No npm, no Python, no env vars needed afterwards: both
+# the Rust CLI and the Node.js/Bun bindings look for `.models/` relative to
+# the process's current directory by default. The PDF pages themselves are
+# rendered in pure Rust — no native PDF library is fetched.
 #
 # Run from your app's directory (or a checkout of this repo):
 #   scripts/install/download_dependencies.sh
@@ -19,7 +19,6 @@
 #
 # Downloads (from https://github.com/docling-project/docling.rs/releases, tag
 # models-v1 by default — override the base with $DOCLING_RS_MODELS_URL):
-#   .pdfium/lib/libpdfium.so (libpdfium.dylib on macOS)
 #   .models/layout_heron.onnx
 #   .models/ocr_rec_en.onnx + .models/en_dict.txt   (English PP-OCRv3
 #     recognition — the runtime default; from the release when the tag mirrors
@@ -62,11 +61,19 @@
 # doesn't host the int8 assets (older tag), a note explains how to produce
 # them locally with scripts/install/quantize_models.py.
 #
-# pdfium: the models release hosts the pinned Linux x64 libpdfium.so
-# (the conformance build); every other supported platform — Linux arm64 and
-# macOS arm64/x64 — takes the bblanchon prebuilt of the same release line
-# instead (#281). Building the models from source: see
+# --with-docling-parse fetches docling-parse's renderer plugin
+# (.docling-parse/lib + pdf_resources) — the development oracle the PDF
+# conformance scripts run with DOCLING_RS_RENDERER=docling-parse; the pipeline
+# itself never loads it. Building the models from source: see
 # scripts/install/pdf_setup.sh.
+#
+# --with-fonts drops the Liberation and DejaVu families into .models/fonts —
+# the faces the pure-Rust page renderer substitutes for fonts a PDF does not
+# embed (the base-14 Helvetica/Times/Courier of most office exports). Only
+# needed where the host has no fonts of its own: a slim container, a bare
+# CI runner. Linux desktops, macOS and Windows already carry fonts the
+# renderer scans (`fonts-liberation`/`fonts-dejavu-core` packages, Arial /
+# Times / Courier); DOCLING_RS_FONT_DIRS adds more directories at runtime.
 #
 # Idempotent: skips files already on disk. Pass --force to re-fetch everything.
 set -eu
@@ -93,6 +100,8 @@ WITH_INT8=true
 WITH_CHUNK=true
 WITH_ENRICH=false
 WITH_EMBED=false
+WITH_DPARSE="${DOCLING_RS_WITH_DOCLING_PARSE:-false}"
+WITH_FONTS="${DOCLING_RS_WITH_FONTS:-false}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -104,9 +113,11 @@ for arg in "$@"; do
     --no-chunk) WITH_CHUNK=false ;;
     --enrich) WITH_ENRICH=true ;;
     --embed) WITH_EMBED=true ;;
+    --with-docling-parse) WITH_DPARSE=true ;;
+    --with-fonts) WITH_FONTS=true ;;
 
     *)
-      echo "usage: download_dependencies.sh [--force] [--no-asr] [--asr-model=<preset>] [--no-int8] [--no-chunk] [--enrich] [--embed]" >&2
+      echo "usage: download_dependencies.sh [--force] [--no-asr] [--asr-model=<preset>] [--no-int8] [--no-chunk] [--enrich] [--embed] [--with-docling-parse] [--with-fonts]" >&2
       echo "  ASR presets: whisper_tiny_en whisper_base_en whisper_small_en whisper_distil_small_en" >&2
       exit 2
       ;;
@@ -118,7 +129,7 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p .pdfium/lib .models/tableformer
+mkdir -p .models/tableformer
 if [ "$WITH_ASR" = true ]; then
   mkdir -p .models/asr
 fi
@@ -189,64 +200,91 @@ fetch_mirrored() { # <dest> <url>... — first URL that lands wins
 }
 
 echo "fetching docling.rs ML dependencies from $BASE_URL"
-# pdfium by host platform (#281): Linux x64 takes the release's pinned
-# conformance build; every other platform falls back to the matching bblanchon
-# prebuilt (the same source the pinned x64 lib was built from). Selecting on
-# `uname -m` alone sent macOS down the arm64 branch and installed a *Linux*
-# ELF .so, which dlopen then never found — pdfium-render asks for the
-# platform library name, `libpdfium.dylib` on Darwin — so both the guard and
-# the tar member track $PDFIUM_LIB rather than a hardcoded .so.
-case "$(uname -s)" in
-  Darwin) PDFIUM_OS=mac; PDFIUM_LIB=libpdfium.dylib ;;
-  *) PDFIUM_OS=linux; PDFIUM_LIB=libpdfium.so ;;
-esac
-case "$(uname -m)" in
-  x86_64 | amd64) PDFIUM_ARCH=x64 ;;
-  aarch64 | arm64) PDFIUM_ARCH=arm64 ;;
-  *) PDFIUM_ARCH= ;;
-esac
-
-if [ -z "$PDFIUM_ARCH" ]; then
-  echo "  (skipping pdfium: unsupported arch $(uname -m) — see scripts/install/pdf_setup.sh)"
-elif [ "$PDFIUM_OS" = linux ] && [ "$PDFIUM_ARCH" = x64 ]; then
-  fetch "$BASE_URL/libpdfium.so" .pdfium/lib/libpdfium.so
-elif [ "$FORCE" = false ] && [ -f ".pdfium/lib/$PDFIUM_LIB" ]; then
-  echo "  = .pdfium/lib/$PDFIUM_LIB (already present)"
-else
-  echo "  ($PDFIUM_OS-$PDFIUM_ARCH: pdfium from the bblanchon prebuilt — the pinned Linux x64 build doesn't apply)"
-  # shellcheck disable=SC2086
-  if curl -fsSL $CURL_TIMEOUTS -o .pdfium/pdfium.tgz \
-      "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-$PDFIUM_OS-$PDFIUM_ARCH.tgz" 2>/dev/null; then
-    tar xzf .pdfium/pdfium.tgz -C .pdfium "lib/$PDFIUM_LIB"
-    rm -f .pdfium/pdfium.tgz
-    echo "  > .pdfium/lib/$PDFIUM_LIB"
-  else
-    rm -f .pdfium/pdfium.tgz
-    echo "  ! pdfium-$PDFIUM_OS-$PDFIUM_ARCH.tgz not fetched (offline?) — PDF rasterization stays unavailable"
-  fi
-fi
-# docling-parse's page renderer as a runtime plugin (#478): the raster docling
-# 2.123+ feeds its models, which the pipeline prefers over pdfium whenever the
-# library is present (DOCLING_RS_RENDERER=auto). Built by
+# docling-parse's page renderer as a runtime plugin (#478) — opt-in
+# (--with-docling-parse / DOCLING_RS_WITH_DOCLING_PARSE=1): the raster docling
+# 2.123+ feeds its models, the reference the PDF baselines are pinned to and
+# what scripts/conformance/*.sh run with DOCLING_RS_RENDERER=docling-parse.
+# The pipeline renders in pure Rust and never loads it by default. Built by
 # .github/workflows/docling-parse-render.yml into the models release as
 # docling-parse-render-<os>-<arch>.tar.gz (lib/ + pdf_resources/); a tag that
-# does not host it yet, or a platform without a build, keeps pdfium — build it
-# locally with scripts/install/build_docling_parse_render.sh.
-if [ -n "$PDFIUM_ARCH" ]; then
-  DPR_ASSET="docling-parse-render-$PDFIUM_OS-$PDFIUM_ARCH.tar.gz"
-  if [ "$FORCE" = false ] && ls .docling-parse/lib/libdparse_render.* >/dev/null 2>&1; then
-    echo "  = .docling-parse/lib/libdparse_render (already present)"
+# does not host it, or a platform without a build, can build it locally with
+# scripts/install/build_docling_parse_render.sh.
+if [ "$WITH_DPARSE" = true ]; then
+  case "$(uname -s)" in
+    Darwin) HOST_OS=mac ;;
+    *) HOST_OS=linux ;;
+  esac
+  case "$(uname -m)" in
+    x86_64 | amd64) HOST_ARCH=x64 ;;
+    aarch64 | arm64) HOST_ARCH=arm64 ;;
+    *) HOST_ARCH= ;;
+  esac
+  if [ -z "$HOST_ARCH" ]; then
+    echo "  (skipping the docling-parse plugin: unsupported arch $(uname -m) — scripts/install/build_docling_parse_render.sh builds it)"
   else
-    mkdir -p .docling-parse
-    # shellcheck disable=SC2086
-    if curl -fsSL $CURL_TIMEOUTS -o .docling-parse/plugin.tgz "$BASE_URL/$DPR_ASSET" 2>/dev/null; then
-      tar xzf .docling-parse/plugin.tgz -C .docling-parse
-      rm -f .docling-parse/plugin.tgz
-      echo "  > .docling-parse/lib + pdf_resources ($DPR_ASSET)"
+    DPR_ASSET="docling-parse-render-$HOST_OS-$HOST_ARCH.tar.gz"
+    if [ "$FORCE" = false ] && ls .docling-parse/lib/libdparse_render.* >/dev/null 2>&1; then
+      echo "  = .docling-parse/lib/libdparse_render (already present)"
     else
-      rm -f .docling-parse/plugin.tgz
-      echo "  ($DPR_ASSET not hosted for this tag/platform — the model inputs render with pdfium; scripts/install/build_docling_parse_render.sh builds the plugin locally)"
+      mkdir -p .docling-parse
+      # shellcheck disable=SC2086
+      if curl -fsSL $CURL_TIMEOUTS -o .docling-parse/plugin.tgz "$BASE_URL/$DPR_ASSET" 2>/dev/null; then
+        tar xzf .docling-parse/plugin.tgz -C .docling-parse
+        rm -f .docling-parse/plugin.tgz
+        echo "  > .docling-parse/lib + pdf_resources ($DPR_ASSET)"
+      else
+        rm -f .docling-parse/plugin.tgz
+        echo "  ($DPR_ASSET not hosted for this tag/platform — scripts/install/build_docling_parse_render.sh builds the plugin locally)"
+      fi
     fi
+  fi
+fi
+# Fallback fonts for the Rust renderer (--with-fonts / DOCLING_RS_WITH_FONTS=1):
+# Liberation (metric-compatible with Arial / Times New Roman / Courier New,
+# SIL OFL 1.1) from Debian's binary package — upstream publishes 2.x only as
+# FontForge sources — and DejaVu (Bitstream Vera licence) from its GitHub
+# release. Fetched straight from those hosts, not re-hosted: they are stable
+# and the files are not ours to redistribute under the models release's
+# notice. The licence texts land next to the faces.
+if [ "$WITH_FONTS" = true ]; then
+  FONTS_DIR=.models/fonts
+  LIBERATION_DEB="https://deb.debian.org/debian/pool/main/f/fonts-liberation/fonts-liberation_2.1.5-3_all.deb"
+  DEJAVU_TBZ="https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2"
+  if [ "$FORCE" = false ] && [ -f "$FONTS_DIR/liberation/LiberationSans-Regular.ttf" ]; then
+    echo "  = $FONTS_DIR/liberation (already present)"
+  elif ! command -v ar >/dev/null 2>&1; then
+    echo "  (skipping Liberation: unpacking the Debian package needs \`ar\` (binutils); install fonts-liberation from your distribution instead)"
+  else
+    FONTS_TMP="$(mktemp -d)"
+    # shellcheck disable=SC2086
+    if curl -fsSL $CURL_TIMEOUTS -o "$FONTS_TMP/liberation.deb" "$LIBERATION_DEB"; then
+      (cd "$FONTS_TMP" && ar x liberation.deb data.tar.xz && tar xJf data.tar.xz)
+      rm -rf "$FONTS_DIR/liberation"
+      mkdir -p "$FONTS_DIR/liberation"
+      cp "$FONTS_TMP"/usr/share/fonts/truetype/liberation/*.ttf "$FONTS_DIR/liberation/"
+      cp "$FONTS_TMP"/usr/share/doc/fonts-liberation/copyright "$FONTS_DIR/liberation/LICENSE"
+      echo "  > $FONTS_DIR/liberation (12 faces)"
+    else
+      echo "  ! Liberation unavailable from $LIBERATION_DEB" >&2
+    fi
+    rm -rf "$FONTS_TMP"
+  fi
+  if [ "$FORCE" = false ] && [ -f "$FONTS_DIR/dejavu/DejaVuSans.ttf" ]; then
+    echo "  = $FONTS_DIR/dejavu (already present)"
+  else
+    FONTS_TMP="$(mktemp -d)"
+    # shellcheck disable=SC2086
+    if curl -fsSL $CURL_TIMEOUTS -o "$FONTS_TMP/dejavu.tar.bz2" "$DEJAVU_TBZ"; then
+      tar xjf "$FONTS_TMP/dejavu.tar.bz2" -C "$FONTS_TMP"
+      rm -rf "$FONTS_DIR/dejavu"
+      mkdir -p "$FONTS_DIR/dejavu"
+      cp "$FONTS_TMP"/dejavu-fonts-ttf-*/ttf/*.ttf "$FONTS_DIR/dejavu/"
+      cp "$FONTS_TMP"/dejavu-fonts-ttf-*/LICENSE "$FONTS_DIR/dejavu/LICENSE"
+      echo "  > $FONTS_DIR/dejavu ($(ls "$FONTS_DIR/dejavu"/*.ttf | wc -l | tr -d ' ') faces)"
+    else
+      echo "  ! DejaVu unavailable from $DEJAVU_TBZ" >&2
+    fi
+    rm -rf "$FONTS_TMP"
   fi
 fi
 fetch "$BASE_URL/layout_heron.onnx" .models/layout_heron.onnx
@@ -404,4 +442,4 @@ if [ "$WITH_INT8" = true ]; then
   fi
 fi
 
-echo "done — .models/ and .pdfium/lib populated in $(pwd)"
+echo "done — .models/ populated in $(pwd)"

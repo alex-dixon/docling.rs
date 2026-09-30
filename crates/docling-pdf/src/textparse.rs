@@ -97,6 +97,9 @@ struct Font {
     ascent: f64,
     descent: f64,
     hash: u64,
+    /// Weight and slant read from the `/BaseFont` name (the heading
+    /// hierarchy's style signal, #302).
+    style: crate::font_style::FontStyle,
 }
 
 impl Font {
@@ -257,6 +260,9 @@ fn parse_font(doc: &Document, name: &[u8], fdict: &Dictionary) -> Font {
         ascent,
         descent,
         hash: hash_name(name),
+        style: crate::font_style::parse_font_style(&String::from_utf8_lossy(
+            &base_font_name(fdict).unwrap_or_else(|| name.to_vec()),
+        )),
     }
 }
 
@@ -505,7 +511,7 @@ fn num(o: &Object) -> Option<f64> {
 }
 
 /// Parse a ToUnicode CMap's `bfchar` / `bfrange` sections into code→string.
-fn parse_tounicode(data: &[u8]) -> HashMap<u32, String> {
+pub(crate) fn parse_tounicode(data: &[u8]) -> HashMap<u32, String> {
     let text = String::from_utf8_lossy(data);
     let mut map = HashMap::new();
     let hex = |s: &str| -> Option<Vec<u16>> {
@@ -819,25 +825,67 @@ pub fn xref_repair_status(bytes: &[u8]) -> String {
 /// a single `xref` section that begins after the last object. The repair then
 /// has to prove itself — the padded bytes are used only if they load — so a
 /// mis-repair degrades to today's behaviour rather than to silent garbage.
-fn load_document(bytes: &[u8]) -> Option<Document> {
+pub(crate) fn load_document(bytes: &[u8]) -> Option<Document> {
+    open_document(bytes, None).ok()
+}
+
+/// Why [`open_document`] could not hand back a readable document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenError {
+    /// lopdf cannot read the file even after the repairs.
+    Unreadable,
+    /// The file is encrypted and the password given (or none) does not open it.
+    Password,
+}
+
+/// Load `bytes` with the document's password. lopdf decrypts while reading —
+/// with `password`, or the empty user password most "protected" PDFs carry
+/// (what every viewer opens silently) — so every reader downstream sees plain
+/// streams; a file the password does not open loads with its streams still
+/// encrypted, which is reported as [`OpenError::Password`] rather than handed
+/// on as a document whose every stream decodes to nothing.
+pub(crate) fn open_document(bytes: &[u8], password: Option<&str>) -> Result<Document, OpenError> {
+    let Some(doc) = load_document_raw(bytes, password) else {
+        // lopdf refuses to load at all under a *wrong* password (a missing
+        // one loads the file with its streams still encrypted); tell the two
+        // apart by loading without it.
+        if password.is_some() && load_document_raw(bytes, None).is_some_and(|d| d.is_encrypted()) {
+            return Err(OpenError::Password);
+        }
+        return Err(OpenError::Unreadable);
+    };
+    if doc.is_encrypted() {
+        return Err(OpenError::Password);
+    }
+    Ok(doc)
+}
+
+fn load_options(password: Option<&str>) -> lopdf::LoadOptions {
+    lopdf::LoadOptions {
+        password: password.map(str::to_string),
+        ..lopdf::LoadOptions::default()
+    }
+}
+
+fn load_document_raw(bytes: &[u8], password: Option<&str>) -> Option<Document> {
     // Try progressively more repair, and accept a candidate only once the pages
     // actually carry content — a document whose streams were dropped still
     // "loads", so loading alone is not evidence the repair helped. A
     // well-formed file returns on the first attempt and pays for nothing.
     let mut fallback = None;
-    if let Some(doc) = best_effort_load(bytes, &mut fallback) {
+    if let Some(doc) = best_effort_load(bytes, password, &mut fallback) {
         return Some(doc);
     }
     let xref_fixed = pad_short_xref_entries(bytes).ok();
     if let Some(fixed) = &xref_fixed {
-        if let Some(doc) = best_effort_load(fixed, &mut fallback) {
+        if let Some(doc) = best_effort_load(fixed, password, &mut fallback) {
             return Some(doc);
         }
     }
     // Both defects can coexist, and the second only becomes visible once the
     // first is repaired, so build on whatever the previous step produced.
     let lengths_fixed = fix_stream_lengths(xref_fixed.as_deref().unwrap_or(bytes));
-    if let Some(doc) = best_effort_load(&lengths_fixed, &mut fallback) {
+    if let Some(doc) = best_effort_load(&lengths_fixed, password, &mut fallback) {
         return Some(doc);
     }
     fallback
@@ -845,8 +893,12 @@ fn load_document(bytes: &[u8]) -> Option<Document> {
 
 /// Load `data`, returning it only when its pages carry content; a document that
 /// merely parses is remembered as the fallback for when nothing does better.
-fn best_effort_load(data: &[u8], fallback: &mut Option<Document>) -> Option<Document> {
-    match Document::load_mem(data) {
+fn best_effort_load(
+    data: &[u8],
+    password: Option<&str>,
+    fallback: &mut Option<Document>,
+) -> Option<Document> {
+    match Document::load_mem_with_options(data, load_options(password)) {
         Ok(doc) if has_page_content(&doc) => Some(doc),
         Ok(doc) => {
             fallback.get_or_insert(doc);
@@ -1099,10 +1151,16 @@ pub struct PageTextParser {
 }
 
 impl PageTextParser {
-    /// Load the document; `None` when it has no parseable text layer at all
-    /// (the caller then keeps pdfium's cells, as before).
+    /// Load the document; `None` when lopdf cannot read it at all.
     pub fn open(bytes: &[u8]) -> Option<Self> {
-        let doc = load_document(bytes)?;
+        Self::open_with_password(bytes, None)
+    }
+
+    /// [`open`](Self::open) with the document's password (an encrypted file
+    /// the password does not open reads as `None` here; the pipeline reports
+    /// it through [`crate::pdf_meta::PdfMeta::open_with_password`] first).
+    pub fn open_with_password(bytes: &[u8], password: Option<&str>) -> Option<Self> {
+        let doc = open_document(bytes, password).ok()?;
         let mut pages: Vec<_> = doc.get_pages().into_iter().collect();
         pages.sort_by_key(|(n, _)| *n);
         Some(Self {
@@ -1112,9 +1170,52 @@ impl PageTextParser {
         })
     }
 
+    /// The glyph boxes and font styles of the 0-based page `index` — the
+    /// heading-hierarchy stage's style signal (#302): every non-space glyph's
+    /// box (font ascent + descent at its size — the font-size proxy pdfium's
+    /// loose char box also gave) in top-left coordinates, with the weight
+    /// class and slant its `/BaseFont` name declares. Empty for a page
+    /// without a text layer (a scan), and the stage falls back to its other
+    /// signals.
+    pub(crate) fn glyph_styles(
+        &mut self,
+        index: usize,
+    ) -> Vec<crate::heading_hierarchy::GlyphStyle> {
+        let Some(&pid) = self.pages.get(index) else {
+            return Vec::new();
+        };
+        let (_w, h) = page_size(&self.doc, pid);
+        let glyphs = page_glyphs_cached(&self.doc, pid, &mut self.caches);
+        // Font hash → style, over the fonts the walk just parsed (an inline,
+        // uncached font dictionary reads as unstyled).
+        let styles: HashMap<u64, crate::font_style::FontStyle> = self
+            .caches
+            .fonts
+            .values()
+            .map(|f| (f.hash, f.style))
+            .collect();
+        glyphs
+            .iter()
+            .filter(|g| !g.ch.is_whitespace() && g.ll.is_finite())
+            .map(|g| {
+                let st = styles.get(&g.font).copied().unwrap_or_default();
+                crate::heading_hierarchy::GlyphStyle {
+                    l: g.ll,
+                    t: h - g.lt,
+                    r: g.lr,
+                    b: h - g.lb,
+                    height: g.lt - g.lb,
+                    weight_cls: crate::font_style::weight_class(st.weight),
+                    italic: st.italic,
+                    styled: st.known,
+                }
+            })
+            .collect()
+    }
+
     /// Prose, word and code cells of the 0-based page `index` — empty for an
-    /// index the parser's page tree doesn't have (pdfium and lopdf can
-    /// disagree on a damaged file; the caller falls back to pdfium's text).
+    /// index the parser's page tree doesn't have (a damaged file whose page
+    /// tree disagrees with the object model's count).
     pub fn cells(&mut self, index: usize) -> PageParserCells {
         let Some(&pid) = self.pages.get(index) else {
             return PageParserCells::default();
@@ -1302,6 +1403,30 @@ fn fonts_from_res(
 }
 
 /// Extract every glyph on a page as a native-coordinate [`Glyph`].
+/// [`PageTextParser::glyph_styles`] for the given **1-based** pages of a
+/// document, keyed by page number — a separate, on-demand pass (no
+/// rendering), so the extraction pipeline stays byte-identical whether or not
+/// the heading-hierarchy stage runs. Empty when lopdf cannot open the file.
+pub(crate) fn glyph_styles(
+    bytes: &[u8],
+    pages: &[usize],
+) -> HashMap<usize, Vec<crate::heading_hierarchy::GlyphStyle>> {
+    let mut out = HashMap::new();
+    let Some(mut parser) = PageTextParser::open(bytes) else {
+        return out;
+    };
+    for &page_no in pages {
+        if page_no == 0 {
+            continue;
+        }
+        let styles = parser.glyph_styles(page_no - 1);
+        if !styles.is_empty() {
+            out.insert(page_no, styles);
+        }
+    }
+    out
+}
+
 pub(crate) fn page_glyphs(doc: &Document, page_id: lopdf::ObjectId) -> Vec<Glyph> {
     page_glyphs_cached(doc, page_id, &mut DocCaches::default())
 }
@@ -1785,7 +1910,7 @@ fn tex_math_builtin(fdict: &Dictionary) -> Option<HashMap<u8, char>> {
 /// digit/punctuation names from the Adobe Glyph List, and common typographic
 /// names. A `.suffix` (`one.taboldstyle`, `a.sc`) is stripped and the base name
 /// retried — docling renders these as the base character.
-fn glyph_name_to_char(name: &[u8]) -> Option<char> {
+pub(crate) fn glyph_name_to_char(name: &[u8]) -> Option<char> {
     let s = std::str::from_utf8(name).ok()?;
     if let Some(hex) = s.strip_prefix("uni") {
         if let Ok(cp) = u32::from_str_radix(hex.get(0..4)?, 16) {

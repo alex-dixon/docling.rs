@@ -26,7 +26,7 @@
 //! parameters (body wins over query):
 //!
 //! - `to` — `md` (default) | `json` | `html` (#492) | `dclx` | `chunks` | `latex` (#317) | `images` (#243:
-//!   rasterize a PDF's pages to PNG through pdfium — no conversion, no models;
+//!   rasterize a PDF's pages to PNG — no conversion, no models;
 //!   the JSON response is `{"pages": [{"page", "width", "height",
 //!   "png_base64"}]}`, combines with `pages` for a window, capped at
 //!   `DOCLING_RS_MAX_RASTER_PAGES` pages per request, default 100)
@@ -1576,8 +1576,7 @@ fn max_raster_pages() -> usize {
     docling_core::env::parse("DOCLING_RS_MAX_RASTER_PAGES").unwrap_or(100)
 }
 
-/// `to=images` (#243): rasterize a PDF's pages to PNG through pdfium — no
-/// models, no OCR — honoring the request's `pages` window and `scale`. Returns
+/// `to=images` (#243): rasterize a PDF's pages to PNG — no models, no OCR — honoring the request's `pages` window and `scale`. Returns
 /// the response's `pages` array; base64 in JSON mirrors the batch `dclx_base64`
 /// precedent (and survives async job storage unchanged).
 fn rasterize_pages(
@@ -1621,11 +1620,11 @@ fn rasterize_pages(
              with pages=A-B (or raise DOCLING_RS_MAX_RASTER_PAGES on the server)"
         )));
     }
-    // pdfium is not thread-safe, and the warm pipeline's mutex is this
-    // process's "who owns pdfium" lock — hold it for the render even though no
-    // models run here, so a rasterization can't race a concurrent PDF/image
-    // conversion inside pdfium.
-    let _pdfium_owner = state
+    // The warm pipeline's mutex serializes this process's PDF work (pdfium,
+    // when the `pdfium` feature renders with it, is not thread-safe) — hold
+    // it for the render even though no models run here, so a rasterization
+    // can't race a concurrent PDF/image conversion.
+    let _pdf_owner = state
         .pipeline
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

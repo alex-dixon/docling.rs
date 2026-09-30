@@ -16,18 +16,6 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn pdfium_ready() -> bool {
-    let lib = repo_root().join(".pdfium/lib");
-    if lib.join("libpdfium.so").exists()
-        || lib.join("libpdfium.dylib").exists()
-        || lib.join("pdfium.dll").exists()
-    {
-        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &lib);
-        return true;
-    }
-    std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_ok()
-}
-
 /// Layout (+ TableFormer) models, with the OCR recognition model deliberately
 /// pointed into the void — every test in this binary must work without it.
 fn layout_ready_ocr_sabotaged() -> bool {
@@ -64,8 +52,8 @@ fn layout_ready_ocr_sabotaged() -> bool {
 /// also proves `skip_ocr` never touches it.
 #[test]
 fn skip_ocr_keeps_layout_and_tables() {
-    if !pdfium_ready() || !layout_ready_ocr_sabotaged() {
-        eprintln!("skipping: pdfium or the layout model is not present");
+    if !layout_ready_ocr_sabotaged() {
+        eprintln!("skipping: the layout model is not present");
         return;
     }
     let path = repo_root().join("tests/data/pdf/sources/2305.03393v1-pg9.pdf");
@@ -90,8 +78,8 @@ fn skip_ocr_keeps_layout_and_tables() {
 /// document whose regions are empty of text — not an error.
 #[test]
 fn skip_ocr_scanned_page_converts_empty() {
-    if !pdfium_ready() || !layout_ready_ocr_sabotaged() {
-        eprintln!("skipping: pdfium or the layout model is not present");
+    if !layout_ready_ocr_sabotaged() {
+        eprintln!("skipping: the layout model is not present");
         return;
     }
     let path = repo_root().join("tests/data/scanned/sources/ocr_test_raster.pdf");
@@ -110,8 +98,8 @@ fn skip_ocr_scanned_page_converts_empty() {
 /// pre-#244 behavior surfaced as a 422 through docling-serve).
 #[test]
 fn missing_ocr_model_degrades_instead_of_erroring() {
-    if !pdfium_ready() || !layout_ready_ocr_sabotaged() {
-        eprintln!("skipping: pdfium or the layout model is not present");
+    if !layout_ready_ocr_sabotaged() {
+        eprintln!("skipping: the layout model is not present");
         return;
     }
     let path = repo_root().join("tests/data/scanned/sources/ocr_test_raster.pdf");

@@ -1,8 +1,8 @@
 //! e2e for issue #77: the remote-VLM pipeline against a local mock of an
 //! OpenAI-compatible `chat/completions` endpoint.
 //!
-//! The PDF test renders real pages (pdfium, no ONNX models) and skips cleanly
-//! when the pdfium library isn't around, like `tests/pages.rs`. The mock
+//! The PDF test renders real pages (the pure-Rust renderer, no ONNX models),
+//! so it runs everywhere. The mock
 //! asserts the wire shape (model name, data-URI page image) and returns
 //! DocLang wrapped the way real models wrap answers (fences, full roots),
 //! exercising the normalization path end to end.
@@ -19,18 +19,6 @@ use docling::{InputFormat, SourceDocument};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn pdfium_ready() -> bool {
-    let lib = repo_root().join(".pdfium/lib");
-    if lib.join("libpdfium.so").exists()
-        || lib.join("libpdfium.dylib").exists()
-        || lib.join("pdfium.dll").exists()
-    {
-        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &lib);
-        return true;
-    }
-    std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_ok()
 }
 
 /// Minimal HTTP/1.1 server: for each expected request, read head + body,
@@ -113,10 +101,6 @@ fn opts(endpoint: String) -> VlmOptions {
 
 #[test]
 fn vlm_converts_pdf_pages_through_the_endpoint() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium library not found");
-        return;
-    }
     // Two pages, two differently-wrapped answers — fenced and full-root — so
     // normalization is exercised on real responses, then stitched in order.
     let (endpoint, served, handle) = mock_openai(vec![
@@ -176,7 +160,7 @@ fn vlm_parses_unlimited_ocr_grounding() {
 }
 
 #[test]
-fn vlm_converts_an_image_without_pdfium() {
+fn vlm_converts_an_image_without_a_pdf_stack() {
     // An image input goes straight to the endpoint — no pdfium, no models —
     // so this leg runs everywhere, keeping the wire format pinned in CI.
     let (endpoint, served, handle) = mock_openai(vec!["<text>From an image.</text>".into()]);

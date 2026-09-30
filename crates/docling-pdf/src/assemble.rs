@@ -1540,15 +1540,10 @@ fn clean_text(text: &str) -> String {
         .replace('\u{2044}', "/") // ⁄ fraction slash → /
         .replace('\u{2022}', "\u{b7}") // • → · (docling never emits •; inline CCS-concept separators)
         .replace('\u{2026}', "..."); // … → ...
-    let out = if crate::pdfium_backend::use_dp_lines() {
-        // The docling-parse sanitizer already placed the correct spacing (e.g.
-        // justified double spaces); preserve internal runs of spaces, only
-        // normalizing line breaks/tabs and trimming the ends.
-        replaced.replace(['\n', '\r', '\t'], " ").trim().to_string()
-    } else {
-        // Legacy: collapse all whitespace runs to single spaces.
-        replaced.split_whitespace().collect::<Vec<_>>().join(" ")
-    };
+                                     // The docling-parse sanitizer already placed the correct spacing (e.g.
+                                     // justified double spaces); preserve internal runs of spaces, only
+                                     // normalizing line breaks/tabs and trimming the ends.
+    let out = replaced.replace(['\n', '\r', '\t'], " ").trim().to_string();
     fix_arabic_lam_alef(&out)
 }
 
@@ -1947,47 +1942,18 @@ pub fn fit_regions_to_cells(regions: &mut Vec<Region>, cells: &[TextCell]) {
 }
 
 /// Join a prefiltered cell list into the region's text (docling's
-/// `sanitize_text` on the docling-parse path, gap-aware band join on legacy).
-fn cells_text(mut inside: Vec<&TextCell>) -> String {
-    // Quantize the top coordinate into ~line bands so cells on the same line
-    // sort in reading order; this is a strict total order (a raw fuzzy comparator
-    // is not transitive and makes Rust's sort panic). For a right-to-left
-    // (Arabic-majority) region, cells on a line read right→left, so sort the band
-    // by descending left edge.
-    let band = inside
-        .iter()
-        .map(|c| (c.b - c.t).abs())
-        .fold(0.0f32, f32::max)
-        .max(1.0);
-    let arabic = inside
-        .iter()
-        .flat_map(|c| c.text.chars())
-        .filter(|&c| ('\u{0600}'..='\u{06FF}').contains(&c))
-        .count();
-    let latin = inside
-        .iter()
-        .flat_map(|c| c.text.chars())
-        .filter(|c| c.is_ascii_alphabetic())
-        .count();
-    let rtl = arabic > latin;
-    let dp = crate::pdfium_backend::use_dp_lines();
-    if dp {
-        // docling orders a cluster's cells by their docling-parse cell index
-        // alone (`LayoutPostprocessor._sort_cells`: `sorted(cells, key=c.index)`)
-        // — the sanitizer's output order, which our `cells` slice already is.
-        // No geometric re-sort: normal_4pages' big section numerals paint
-        // *after* their heading text, and docling's `## 들어가며 1` (numeral
-        // last) only falls out of pure index order — a band sort dragged the
-        // numeral to the front. The overlap-grouped line restore this replaced
-        // measured strictly worse on the corpus (it fixed nothing the index
-        // order broke, and broke the numerals).
-    } else {
-        inside.sort_by_key(|c| {
-            let x = (c.l * 10.0) as i64;
-            ((c.t / band).round() as i64, if rtl { -x } else { x })
-        });
-    }
-    let joined = if dp {
+/// `sanitize_text` over the sanitizer's cell order).
+fn cells_text(inside: Vec<&TextCell>) -> String {
+    // docling orders a cluster's cells by their docling-parse cell index
+    // alone (`LayoutPostprocessor._sort_cells`: `sorted(cells, key=c.index)`)
+    // — the sanitizer's output order, which our `cells` slice already is.
+    // No geometric re-sort: normal_4pages' big section numerals paint
+    // *after* their heading text, and docling's `## 들어가며 1` (numeral
+    // last) only falls out of pure index order — a band sort dragged the
+    // numeral to the front. The overlap-grouped line restore this replaced
+    // measured strictly worse on the corpus (it fixed nothing the index
+    // order broke, and broke the numerals).
+    let joined = {
         // docling's `PageAssembleModel.sanitize_text`, ported verbatim over the
         // parse-index-ordered lines: append a separating space to a line —
         // unless it ends with `-`. A dash-ending line whose last word and the
@@ -2052,29 +2018,6 @@ fn cells_text(mut inside: Vec<&TextCell>) -> String {
                 }
             }
             out.push_str(t);
-        }
-        out
-    } else {
-        // Legacy reconstruction: join same-band cells with a space only across a
-        // real gap, because it can split a word into abutting segments
-        // (`الت`|`ي` → `التي`).
-        let mut out = String::new();
-        let mut prev: Option<&&TextCell> = None;
-        for c in &inside {
-            let t = c.text.trim();
-            if t.is_empty() {
-                continue;
-            }
-            if let Some(p) = prev {
-                let same_band = ((p.t / band).round() as i64) == ((c.t / band).round() as i64);
-                let h = (c.b - c.t).abs().max((p.b - p.t).abs()).max(1.0);
-                let gap = if rtl { p.l - c.r } else { c.l - p.r };
-                if !same_band || gap > h * 0.25 {
-                    out.push(' ');
-                }
-            }
-            out.push_str(t);
-            prev = Some(c);
         }
         out
     };
@@ -4540,8 +4483,8 @@ mod tests {
             "Graph's 'x' \"y\""
         );
         assert_eq!(clean_text("a\u{2026}"), "a...");
-        // The dp default (the docling-parse sanitizer) preserves internal spacing
-        // it placed deliberately; line breaks/tabs normalize to a space, ends trim.
+        // The docling-parse sanitizer's internal spacing is preserved as
+        // placed; line breaks/tabs normalize to a space, ends trim.
         assert_eq!(clean_text("a   b\nc"), "a   b c");
     }
 

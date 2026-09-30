@@ -46,7 +46,7 @@ validated for byte-for-byte conformance against upstream Python docling.
 | --- | --- |
 | `crates/docling-core` | `DoclingDocument` model, Markdown/JSON/DCLX serializers, `MarkdownStreamer`, chunkers; `tree::ItemTree` — docling's item tree a backend can hand the JSON export when the flat nodes cannot express upstream's structure (HTML via `html_tree.rs`, DOCX via `docx_tree.rs`) |
 | `crates/docling` | `DocumentConverter` (format routing), declarative backends (`src/backend/`), streaming (`src/stream.rs`), video (`src/video.rs`) |
-| `crates/docling-pdf` | ML pipeline: pdfium + RT-DETR layout + TableFormer + PP-OCRv3 + enrichment (`ml` feature); pure-Rust text-layer path compiles for wasm without it |
+| `crates/docling-pdf` | ML pipeline: lopdf object model + pure-Rust page renderer (`render/`) / raster (`raster/`) + RT-DETR layout + TableFormer + PP-OCRv3 + enrichment (`ml` feature; pdfium only behind the opt-in `pdfium` feature); pure-Rust text-layer path compiles for wasm without it |
 | `crates/docling-onnx` | Shared ONNX Runtime execution-provider selection (`DOCLING_RS_EP`, `cuda`/`tensorrt`/`directml`/`coreml`/`xnnpack` features) for docling-pdf/docling-asr/docling-rag |
 | `crates/docling-asr` | Whisper ASR: symphonia decode (audio + video containers) → log-mel → ONNX encoder/decoder |
 | `crates/docling-cli` | `docling-rs` binary (also `serve` subcommand behind `--features serve`) |
@@ -64,6 +64,7 @@ cargo fmt --all
 cargo check -p docling --no-default-features --features pdf-text \
   --target wasm32-unknown-unknown --locked           # the wasm CI gate
 (cd crates/docling-py && cargo check)               # pyo3 binding (outside the workspace)
+cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # the pdfium oracle tests (need .pdfium/lib)
 ```
 
 - Prefer `--lib --tests` over bare `cargo test`: it skips example binaries,
@@ -76,21 +77,33 @@ cargo check -p docling --no-default-features --features pdf-text \
 - Tests run with CWD = the crate dir, but shared fixtures and runtime assets
   live at the **repo root**. Resolve fixtures via
   `Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")` and gate asset-needing
-  tests with a skip (see `crates/docling/tests/pages.rs::pdfium_ready`,
-  `crates/docling/src/video.rs::asr_models_ready`) — CI without models/pdfium
+  tests with a skip (see `crates/docling/tests/scanned.rs::ml_stack_ready`,
+  `crates/docling/src/video.rs::asr_models_ready`) — CI without models
   must stay green.
 
 ## Runtime assets & env
 
 - `.models/` (repo root): layout, TableFormer, OCR (rec pairs + the optional
   `ocr_det.onnx` text detector, #429), ASR (`.models/asr/`,
-  presets in subdirs), enrichment, embedder. `.pdfium/lib/libpdfium.so`
-  (`libpdfium.dylib` on macOS, #298/#299) for page rendering. Fetch:
-  `scripts/install/download_dependencies.sh`.
+  presets in subdirs), enrichment, embedder. No native PDF library: page
+  count, geometry, `/Rotate` and links come from lopdf (`pdf_meta.rs`), the
+  text layer from `textparse`, the model images from the pure-Rust page
+  renderer (`render/` — tiny-skia paths, embedded/host fonts, shadings,
+  patterns, images; measured against the shim) and, for image-only pages
+  (scans), from `raster/` byte-identical to pdfium
+  (`DOCLING_RS_SCAN_RASTER=pdfium` disables it), so `.models/` alone converts
+  every PDF. Development oracles: the docling-parse shim
+  `.docling-parse/lib/libdparse_render.so` (`download_dependencies.sh
+  --with-docling-parse`; `DOCLING_RS_RENDERER=docling-parse` — what the
+  conformance scripts run) and pdfium `.pdfium/lib/libpdfium.so`
+  (`libpdfium.dylib` on macOS, #298/#299; only a build with docling-pdf's
+  opt-in `pdfium` feature loads it — `DOCLING_RS_RENDERER=pdfium`, a file
+  lopdf cannot read, the raster/object-model oracle tests).
+  Fetch: `scripts/install/download_dependencies.sh`.
 - Resolution is CWD-relative, then `$DOCLING_RS_MODELS_DIR` for `.models/…`
   paths (#285 — whole-dir override keeping the engine's own selection logic,
   e.g. the OCR en/ch pair; the py bindings point it at their cache), then
-  exe-dir fallback; env overrides: `PDFIUM_DYNAMIC_LIB_PATH`,
+  exe-dir fallback; env overrides: `PDFIUM_DYNAMIC_LIB_PATH` (`pdfium` feature),
   `DOCLING_OCR_DET_ONNX` (text detector; missing → recognition-only OCR),
   `DOCLING_RS_OCR_DET_MAX_SIDE` (cap on the detector input's longer side;
   default 960 = PaddleOCR's, ~⅓ the uncapped detection time; `0` = RapidOCR's
@@ -130,13 +143,22 @@ cargo check -p docling --no-default-features --features pdf-text \
   parallels the standalone-image `DOCLING_RS_MAX_IMAGE_PIXELS` cap of 30000),
   `DOCLING_RS_DJVU_RENDER_PX` (2500; long-side box a scan-only DjVu page is
   rendered into for the OCR fallback, #434 — DjVu decodes in pure Rust via
-  `djvu-rs`, no binary), `DOCLING_RS_RENDERER` (#478; `auto` default =
-  docling-parse's Blend2D renderer for the model inputs whenever the
-  `dlopen`ed shim `.docling-parse/lib/libdparse_render.so` resolves
-  (`download_dependencies.sh` fetches it from the models release,
-  `scripts/install/build_docling_parse_render.sh` builds it), else pdfium
-  quietly; `docling-parse` = require it, missing → one warning + pdfium;
-  `pdfium` = never load it. `DOCLING_PARSE_RENDER_LIB` /
+  `djvu-rs`, no binary), `DOCLING_RS_RENDERER` (#478; `auto` default = the
+  pure-Rust renderer for the model inputs; `docling-parse` = docling-parse's
+  Blend2D renderer through the `dlopen`ed shim
+  `.docling-parse/lib/libdparse_render.so` (`download_dependencies.sh
+  --with-docling-parse` fetches it from the models release,
+  `scripts/install/build_docling_parse_render.sh` builds it), missing → one
+  warning + the Rust renderer — the conformance scripts set it, the baselines
+  are its renders; `rust` = the default spelled out; `pdfium` = the library's
+  render, docling's pypdfium2 chain, only with the `pdfium` cargo feature.
+  `DOCLING_RS_FONT_DIRS`
+  adds host font directories for fonts without a program (`.models/fonts`,
+  Liberation/DejaVu/URW/Noto system dirs are scanned by default; a font-less
+  host — slim container, bare runner — gets them from
+  `download_dependencies.sh --with-fonts` or the `fonts-liberation` +
+  `fonts-dejavu-core` packages, which the Dockerfiles install).
+  `DOCLING_PARSE_RENDER_LIB` /
   `DOCLING_PARSE_RESOURCES` override the library and `pdf_resources`
   locations. The PDF baselines — `tests/snapshots`, the groundtruth table —
   are docling-parse-rendered, and `tests/data/pdf/groundtruth` mirrors
@@ -161,7 +183,7 @@ cargo check -p docling --no-default-features --features pdf-text \
 - When touching serializers, keep the streaming and buffered paths
   byte-identical — `MarkdownStreamer` tests assert exactly that.
 - A `docling-core` serializer change reaches the **PDF** baselines too, and
-  neither runs in CI (both need pdfium + models): re-run
+  neither runs in CI (both need the models + the docling-parse shim): re-run
   `scripts/conformance/pdf_conformance.sh` (snapshots) and
   `scripts/conformance/pdf_groundtruth.sh` in the same PR, or the next person
   reads the stale baseline as a pipeline regression. The groundtruth `.md` is a

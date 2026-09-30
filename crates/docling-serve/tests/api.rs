@@ -53,22 +53,6 @@ fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Skip-gate for tests that render PDFs: point pdfium resolution at the
-/// repo-root `.pdfium/lib` when present (same pattern as
-/// `crates/docling/tests/pages.rs`) — CI without the runtime assets stays
-/// green.
-fn pdfium_ready() -> bool {
-    let lib = repo_root().join(".pdfium/lib");
-    if lib.join("libpdfium.so").exists()
-        || lib.join("libpdfium.dylib").exists()
-        || lib.join("pdfium.dll").exists()
-    {
-        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &lib);
-        return true;
-    }
-    std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_ok()
-}
-
 /// The layout/OCR/TableFormer model files, resolved from the repo-root
 /// `.models` into the env overrides (tests run with CWD = the crate dir, so
 /// CWD-relative resolution can't find them) — same pattern as
@@ -304,7 +288,7 @@ async fn bad_to_value_is_400() {
 }
 
 /// `to=images` (#243) is PDF-only — a non-PDF upload answers 422 before any
-/// pdfium work, so this runs in plain CI.
+/// render work, so this runs in plain CI.
 #[tokio::test]
 async fn images_output_requires_a_pdf_input() {
     let (ct, body) = multipart("x.md", b"# hi", &[("to", "images")]);
@@ -372,7 +356,7 @@ async fn ocr_mode_and_scale_are_validated() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
-/// A `scale` outside 0.1–4.0 is rejected before pdfium is touched.
+/// A `scale` outside 0.1–4.0 is rejected before any page is rendered.
 #[tokio::test]
 async fn images_scale_is_validated() {
     let (ct, body) = multipart("x.pdf", b"%PDF-1.4", &[("to", "images"), ("scale", "9")]);
@@ -381,14 +365,10 @@ async fn images_scale_is_validated() {
     assert!(body_string(response).await.contains("scale"));
 }
 
-/// End-to-end rasterization over a real one-page fixture — runs only where
-/// `.pdfium/lib` is installed (`pdfium_ready` gate).
+/// End-to-end rasterization over a real one-page fixture — the pure-Rust
+/// renderer, so it runs in plain CI.
 #[tokio::test]
 async fn rasterizes_pdf_pages_to_png() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium not installed");
-        return;
-    }
     let pdf = std::fs::read(repo_root().join("tests/data/pdf/sources/base14_fonts.pdf")).unwrap();
     let (ct, body) = multipart(
         "base14_fonts.pdf",
@@ -412,12 +392,12 @@ async fn rasterizes_pdf_pages_to_png() {
 /// #246 end-to-end: a `no_ocr=true` request must not degrade the shared warm
 /// pipeline for later default requests. The table fixture makes the difference
 /// decisive — the full pipeline emits a Markdown table (pipes), the no-OCR
-/// text-layer path emits flat paragraphs. Needs pdfium + the layout/OCR/
-/// TableFormer models, so it gates like the rasterization test.
+/// text-layer path emits flat paragraphs. Needs the layout/OCR/TableFormer
+/// models, so it skips on a model-free checkout.
 #[tokio::test]
 async fn no_ocr_request_does_not_stick_to_the_warm_pipeline() {
-    if !pdfium_ready() || !ml_models_ready() {
-        eprintln!("skipping: pdfium or the ML models are not present");
+    if !ml_models_ready() {
+        eprintln!("skipping: the ML models are not present");
         return;
     }
     let pdf =
@@ -1107,7 +1087,7 @@ async fn requests_and_conversions_are_counted() {
 // --- #304: remote VLM pipeline ---------------------------------------------
 
 /// 1×1 red PNG (the same bytes as the fetch_images test) — the VLM image leg
-/// needs no pdfium and no models, so these tests run in plain CI.
+/// needs no models, so these tests run in plain CI.
 const VLM_PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,

@@ -1,8 +1,8 @@
-BF16V.s.FP8on16BDeepSeek-V2
+BF16v.s.FP8on16BDeepSeek-V2
 
-BF16V.s.FP8on230BDeepSeek-V2
+BF16v.s.FP8on230BDeepSeek-V2
 
-1.8.
+.8.
 
 200
 
@@ -10,26 +10,22 @@ BF16V.s.FP8on230BDeepSeek-V2
 
 00
 
-800
+1000
 
-000
-
-1200
+200
 
 Tokens/B
 
 100
 
-.
+000
 
 500
 
-500
+700
 
-000
-
-000
+00
 
 Tokens/B
 
-1.70
+1.7

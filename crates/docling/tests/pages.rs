@@ -1,9 +1,10 @@
 //! e2e for issue #80: the `--pages A-B` window and memory-bounded
 //! referenced-image streaming.
 //!
-//! The PDF tests use the `no_ocr` path (text layer only), so they need pdfium
-//! but no ONNX models; they skip cleanly when the pdfium library isn't around
-//! (e.g. a contributor checkout before `download_dependencies.sh`).
+//! The PDF tests use the `no_ocr` path (text layer only), so they need no
+//! native library and no ONNX models; the OCR/TableFormer ones skip cleanly
+//! when the models aren't around (e.g. a contributor checkout before
+//! `download_dependencies.sh`).
 
 use std::path::{Path, PathBuf};
 
@@ -12,21 +13,6 @@ use docling::{parse_page_range, DocumentConverter, ImageMode, SourceDocument};
 /// Workspace root (this crate lives at `crates/docling`).
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Point pdfium resolution at the workspace-root `.pdfium/lib` (the backend's
-/// default is CWD-relative, and tests run from the crate dir). Returns whether
-/// the library is actually present.
-fn pdfium_ready() -> bool {
-    let lib = repo_root().join(".pdfium/lib");
-    if lib.join("libpdfium.so").exists()
-        || lib.join("libpdfium.dylib").exists()
-        || lib.join("pdfium.dll").exists()
-    {
-        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", &lib);
-        return true;
-    }
-    std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_ok()
 }
 
 fn pdf_source() -> SourceDocument {
@@ -47,10 +33,6 @@ fn parse_page_range_accepts_ranges_and_single_pages() {
 
 #[test]
 fn pdf_page_window_converts_only_that_window() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium library not found");
-        return;
-    }
     let full = DocumentConverter::new()
         .no_ocr(true)
         .convert(pdf_source())
@@ -82,10 +64,6 @@ fn pdf_page_window_converts_only_that_window() {
 
 #[test]
 fn pdf_page_window_outside_document_is_an_error() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium library not found");
-        return;
-    }
     let err = DocumentConverter::new()
         .no_ocr(true)
         .page_range(50, 60)
@@ -141,10 +119,10 @@ fn referenced_images_stream_to_the_artifacts_dir() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The layout + OCR models the force-OCR test needs, beyond pdfium. Model
+/// The layout + OCR models the force-OCR test needs. Model
 /// resolution is CWD-relative (tests run from the crate dir) so, when the
 /// repo-root copies exist, point the env overrides at them; skips cleanly on
-/// a model-free checkout, same as the pdfium gate.
+/// a model-free checkout.
 fn ocr_models_ready() -> bool {
     let m = repo_root().join(".models");
     let layout = ["layout_heron_int8.onnx", "layout_heron.onnx"]
@@ -213,8 +191,8 @@ fn text_detector_reads_labels_outside_layout_regions() {
 /// not the text-layer path: the two outputs must differ.
 #[test]
 fn force_full_page_ocr_discards_the_text_layer() {
-    if !pdfium_ready() || !ocr_models_ready() {
-        eprintln!("skipping: pdfium or the OCR models are not present");
+    if !ocr_models_ready() {
+        eprintln!("skipping: the OCR models are not present");
         return;
     }
     let src = || {
@@ -251,8 +229,8 @@ fn force_full_page_ocr_discards_the_text_layer() {
 /// and table_score is always unset (docling never assigns it either).
 #[test]
 fn pdf_pipeline_reports_confidence() {
-    if !pdfium_ready() || !ocr_models_ready() {
-        eprintln!("skipping: pdfium or the OCR models are not present");
+    if !ocr_models_ready() {
+        eprintln!("skipping: the OCR models are not present");
         return;
     }
     let src =
@@ -289,13 +267,9 @@ fn pdf_pipeline_reports_confidence() {
 
 /// #183 on the no-OCR text-layer path: parse quality still scores (the cells
 /// are the same extraction the pipeline sees), layout is the orphan-rescue
-/// set (cell confidence 1.0), and OCR never ran. Needs pdfium only.
+/// set (cell confidence 1.0), and OCR never ran. Needs no models.
 #[test]
 fn no_ocr_conversion_reports_parse_confidence() {
-    if !pdfium_ready() {
-        eprintln!("skipping: pdfium library not found");
-        return;
-    }
     let doc = DocumentConverter::new()
         .no_ocr(true)
         .page_range(1, 2)
@@ -337,8 +311,8 @@ fn tableformer_ready() -> bool {
 /// into the re-export.
 #[test]
 fn table_cells_are_first_class_and_support_bbox_repair() {
-    if !pdfium_ready() || !ocr_models_ready() || !tableformer_ready() {
-        eprintln!("skipping: pdfium or the ML models are not present");
+    if !ocr_models_ready() || !tableformer_ready() {
+        eprintln!("skipping: the ML models are not present");
         return;
     }
     let src =
@@ -397,11 +371,11 @@ fn table_cells_are_first_class_and_support_bbox_repair() {
 /// PDF outline, so its major sections take bookmark level 1 (rendered `##`)
 /// while unbookmarked front-matter headings fall to the style signal and land
 /// deeper. The fixture pages are digital (no OCR runs), so the test needs
-/// pdfium + the layout model.
+/// the layout model.
 #[test]
 fn heading_hierarchy_differentiates_levels_when_enabled() {
-    if !pdfium_ready() || !ocr_models_ready() {
-        eprintln!("skipping: pdfium/layout assets not found");
+    if !ocr_models_ready() {
+        eprintln!("skipping: the layout/OCR assets are not present");
         return;
     }
     let base = DocumentConverter::new()

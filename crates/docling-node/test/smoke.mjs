@@ -194,7 +194,7 @@ async function main() {
       const { join: joinPath } = await import('node:path')
       const home = mktemp(joinPath(osTmp(), 'fw-chunk-'))
       // `.models`, not `models`: deps.js's homeDir() only adopts the cwd as the
-      // install home when it holds `.models/` (or `.pdfium/`). The plain
+      // install home when it holds `.models/`. The plain
       // `models/` layout is the one internal to ~/.cache/docling.rs, reachable
       // through DOCLING_RS_HOME — never by chdir alone, which is what this
       // check does. (Long-standing failure; unrelated to the VLM work.)
@@ -224,7 +224,6 @@ async function main() {
   await check('checkDependencies reports status without downloading', () => {
     const status = checkDependencies()
     assert.equal(typeof status.ready, 'boolean')
-    assert.equal(typeof status.pdfium, 'boolean')
     assert.ok(Array.isArray(status.missing))
   })
 
@@ -269,9 +268,8 @@ async function main() {
   // `pipeline: 'vlm'` replaces the ONNX stack with a remote OpenAI-compatible
   // endpoint, so every check here runs with no models on disk. They all use
   // image input on purpose: an image is already its own page, so this leg needs
-  // neither the layout model nor pdfium and runs in any environment — the same
-  // reasoning as `vlm_converts_an_image_without_pdfium` in
-  // crates/docling/tests/vlm.rs.
+  // no layout model and runs in any environment — the same reasoning as
+  // `vlm_converts_an_image_without_a_pdf_stack` in crates/docling/tests/vlm.rs.
 
   // A 1x1 PNG. `convert_vlm` forwards image bytes untouched, but a real file
   // keeps the fixture honest if that ever changes.
@@ -404,8 +402,8 @@ async function main() {
     )
   })
 
-  await check('mets_gbs under vlm says what is wrong instead of asking for pdfium', () => {
-    // METS-GBS is an ML format with no VLM path; fetching pdfium can't help.
+  await check('mets_gbs under vlm says what is wrong instead of asking for models', () => {
+    // METS-GBS is an ML format with no VLM path; fetching models can't help.
     assert.throws(
       () =>
         convert(
@@ -433,25 +431,6 @@ async function main() {
       /vlmMaxTokens must be greater than 0/,
     )
   })
-
-  if (!checkDependencies().pdfium) {
-    await check("pipeline: 'vlm' still requires pdfium for PDF input", () => {
-      // The other half of the relaxed guard: the layout model must NOT be
-      // demanded, but pdfium must — VLM rasterizes PDF pages locally before
-      // sending them. Skipped when pdfium is installed (nothing to assert, and
-      // the call would then spend the endpoint's retry backoff failing).
-      assert.throws(
-        () =>
-          convert(
-            { name: 'doc.pdf', data: Buffer.from('%PDF-1.4') },
-            { pipeline: 'vlm', vlmEndpoint: 'http://127.0.0.1:1/v1', vlmModel: 'm' },
-          ),
-        (e) => /pdfium/.test(e.message) && !/layout_heron/.test(e.message),
-      )
-    })
-  } else {
-    console.log('  --  pdfium installed; skipping the VLM pdfium-requirement check')
-  }
 
   if (!process.env.DOCLING_RS_VLM_ENDPOINT) {
     await check("pipeline: 'vlm' skips the ML guard and fails on the missing endpoint", () => {

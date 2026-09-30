@@ -10,7 +10,6 @@
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.."
 
-export PDFIUM_DYNAMIC_LIB_PATH="${PDFIUM_DYNAMIC_LIB_PATH:-$(pwd)/.pdfium/lib}"
 # Pin the snapshot-baseline pixel path: the scalar image-crate resize (the
 # committed snapshots were generated with it; the SIMD default differs by
 # ±1/255 per pixel, enough to flip borderline table cells).
@@ -29,13 +28,14 @@ export DOCLING_TABLEFORMER_BBOX="${DOCLING_TABLEFORMER_BBOX:-$(pwd)/.models/tabl
 # The model inputs are rendered by docling-parse's renderer (#478), like the
 # docling that wrote the groundtruth (its default backend since 2.123). The
 # baselines are that renderer's, so its absence is an error here, not the
-# quiet pdfium fallback the `auto` default gives a plain checkout; run with
-# DOCLING_RS_RENDERER=pdfium to score the pdfium path against the same files.
+# quiet Rust-renderer fallback the `auto` default gives a plain checkout; run
+# with DOCLING_RS_RENDERER=rust (or pdfium) to score that path against the
+# same files.
 export DOCLING_RS_RENDERER="${DOCLING_RS_RENDERER:-docling-parse}"
 export DOCLING_PARSE_RENDER_LIB="${DOCLING_PARSE_RENDER_LIB:-$(pwd)/.docling-parse/lib}"
 if [ "$DOCLING_RS_RENDERER" = docling-parse ]; then
   for f in "$DOCLING_PARSE_RENDER_LIB"/libdparse_render.*; do
-    [ -e "$f" ] || { echo "MISSING: $DOCLING_PARSE_RENDER_LIB/libdparse_render.so  (run scripts/install/build_docling_parse_render.sh, or DOCLING_RS_RENDERER=pdfium)"; exit 1; }
+    [ -e "$f" ] || { echo "MISSING: $DOCLING_PARSE_RENDER_LIB/libdparse_render.so  (run scripts/install/build_docling_parse_render.sh, or DOCLING_RS_RENDERER=rust)"; exit 1; }
   done
 fi
 

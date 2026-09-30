@@ -19,7 +19,7 @@
 //! The expected files are keyed by the source's file name, whichever place it
 //! came from.
 //!
-//! The ML formats (PDF, images, METS) need pdfium + the ONNX models, so they are
+//! The ML formats (PDF, images, METS) need the ONNX models, so they are
 //! covered by the deterministic snapshot harness (`scripts/conformance/pdf_conformance.sh`)
 //! instead of this pure-Rust test.
 //!

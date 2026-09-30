@@ -31,12 +31,10 @@ BIN="$(pwd)/target/release/docling-rs"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# The binary resolves .models/.pdfium relative to its CWD (then next to the exe);
-# we run it inside $tmp so the .dclx lands there, so make the assets reachable
+# The binary resolves .models relative to its CWD (then next to the exe); we
+# run it inside $tmp so the .dclx lands there, so make the assets reachable
 # from $tmp. Harmless for declarative formats that load no models.
-export PDFIUM_DYNAMIC_LIB_PATH="$(pwd)/.pdfium/lib"
 [ -d models ]  && ln -sfn "$(pwd)/models"  "$tmp/models"
-[ -d .pdfium ] && ln -sfn "$(pwd)/.pdfium" "$tmp/.pdfium"
 
 declare -a fmts=()
 if [ $# -gt 0 ]; then fmts=("$@"); else
