@@ -46,10 +46,23 @@ pub struct Renderer<'a> {
 }
 
 impl<'a> Renderer<'a> {
+    /// A renderer decoding its JPEGs for docling's bitmap hint (1.0 pixel per
+    /// PDF unit — the model-input renders).
     pub fn new(meta: &'a PdfMeta) -> Renderer<'a> {
         Renderer {
             meta,
             shared: Rc::new(content::Shared::default()),
+        }
+    }
+
+    /// A renderer with an explicit `bitmap_target_pixels_per_unit`: `0.0`
+    /// decodes every image at full size (the page rasters a caller keeps —
+    /// `render_pages`, the VLM input — where docling-parse is asked with 0.0
+    /// too).
+    pub fn with_bitmap_hint(meta: &'a PdfMeta, bitmap_hint: f64) -> Renderer<'a> {
+        Renderer {
+            meta,
+            shared: Rc::new(content::Shared::with_bitmap_hint(bitmap_hint)),
         }
     }
 
@@ -66,6 +79,22 @@ impl<'a> Renderer<'a> {
     /// pixels (the crop box stretched onto the canvas, as every renderer
     /// here does).
     pub fn render(&self, index: usize, width: u32, height: u32) -> Option<RgbImage> {
+        self.render_with_hint(index, width, height, self.shared.bitmap_hint())
+    }
+
+    /// [`Renderer::render`] with an explicit `bitmap_target_pixels_per_unit`
+    /// for this one render: `1.0` decodes JPEGs the way docling's model
+    /// inputs are decoded, `0.0` at full size — what a bitmap kept for OCR
+    /// wants (the recognizer reads a scan's 300 dpi, not a quarter of it
+    /// blitted up; docling's own OCR runs on its hint-1.0 decode, the
+    /// deliberate deviation the pdfium raster of a scan already makes).
+    pub fn render_with_hint(
+        &self,
+        index: usize,
+        width: u32,
+        height: u32,
+        bitmap_hint: f64,
+    ) -> Option<RgbImage> {
         if width == 0 || height == 0 || width > 1 << 15 || height > 1 << 15 {
             return None;
         }
@@ -95,7 +124,7 @@ impl<'a> Renderer<'a> {
 
         let content = doc.get_page_content(pid);
         let resources = page_resources(doc, pid);
-        let mut interp = content::Interp::new(doc, cw, ch, self.shared.clone())?;
+        let mut interp = content::Interp::new(doc, cw, ch, self.shared.clone(), bitmap_hint)?;
         crate::timing::timed("render.content", || {
             interp.run_page(&content, resources, base);
             interp.run_widgets(page, base);
@@ -173,13 +202,14 @@ mod tests {
     /// size, with ink on it.
     #[test]
     fn renders_the_corpus() {
-        let dir = root().join("tests/data/pdf/sources");
-        let mut files: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "pdf"))
-            .collect();
+        // Every PDF the snapshot corpus is generated from — the pdf fixtures,
+        // the scans, the LaTeX figure PDFs (matplotlib / TikZ vector art,
+        // where the renderer's biggest snapshot drifts were) and the ODF
+        // renders; `DOCLING_RS_SHIM_CORPUS=pdf` restricts it to the pdf dir.
+        let mut files = Vec::new();
+        for d in corpus_dirs() {
+            collect_pdfs(&root().join(d), &mut files);
+        }
         files.sort();
         assert!(!files.is_empty());
         for f in files {
@@ -232,24 +262,26 @@ mod tests {
             return;
         };
         let _ = plugin;
-        let dir = root().join("tests/data/pdf/sources");
-        let mut files: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "pdf"))
-            .collect();
+        // Every PDF the snapshot corpus is generated from (the walk of
+        // `renders_the_corpus`), so the gate covers what the baselines see.
+        let mut files = Vec::new();
+        for d in corpus_dirs() {
+            collect_pdfs(&root().join(d), &mut files);
+        }
         files.sort();
+        eprintln!("renderer vs shim: {} PDFs", files.len());
         let mut worst = 0.0f64;
         let mut total_mad = 0.0f64;
         let mut n = 0usize;
         for f in &files {
             let bytes = std::fs::read(f).unwrap();
             let Some(meta) = PdfMeta::open(&bytes) else {
+                eprintln!("{}: object model unreadable, skipped", f.display());
                 continue;
             };
             let renderer = Renderer::new(&meta);
             let Some(dp) = crate::dparse_render::Doc::open_if_enabled(&bytes, None) else {
+                eprintln!("{}: the shim declined the file, skipped", f.display());
                 continue;
             };
             for i in 0..meta.page_count() {
@@ -291,6 +323,35 @@ mod tests {
                 total_mad / (n as f64) < 2.0,
                 "the corpus drifted from the shim"
             );
+        }
+    }
+
+    /// The source directories of the snapshot corpus; `DOCLING_RS_SHIM_CORPUS=pdf`
+    /// restricts a run to the pdf fixtures.
+    fn corpus_dirs() -> &'static [&'static str] {
+        if std::env::var("DOCLING_RS_SHIM_CORPUS").as_deref() == Ok("pdf") {
+            &["tests/data/pdf/sources"]
+        } else {
+            &[
+                "tests/data/pdf/sources",
+                "tests/data/scanned/sources",
+                "tests/data/latex/sources",
+                "tests/data/odf/sources",
+            ]
+        }
+    }
+
+    fn collect_pdfs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_pdfs(&p, out);
+            } else if p.extension().is_some_and(|e| e == "pdf") {
+                out.push(p);
+            }
         }
     }
 

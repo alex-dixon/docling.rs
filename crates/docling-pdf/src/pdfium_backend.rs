@@ -485,7 +485,9 @@ pub fn render_pages(
         }
     };
     let renderer = match (&dparse, &meta) {
-        (None, Some(m)) => Some(crate::render::Renderer::new(m)),
+        // Page rasters a caller keeps decode every image at full size (the
+        // shim is asked with bitmap hint 0.0 below for the same reason).
+        (None, Some(m)) => Some(crate::render::Renderer::with_bitmap_hint(m, 0.0)),
         _ => None,
     };
     let mut out = Vec::with_capacity(last.saturating_sub(first) + 1);
@@ -517,6 +519,7 @@ pub fn render_pages(
                 i as i32,
                 tw as u32,
                 th as u32,
+                0.0,
             )
         };
         let bitmap = match (&dparse, &session) {
@@ -580,6 +583,7 @@ fn rust_bitmap(
     index: i32,
     width: u32,
     height: u32,
+    bitmap_hint: f64,
 ) -> Option<RgbImage> {
     let meta = meta?;
     if let Some(img) = crate::timing::timed("raster.render", || {
@@ -592,7 +596,7 @@ fn rust_bitmap(
     }
     let renderer = renderer?;
     crate::timing::timed("render.page", || {
-        renderer.render(index as usize, width, height)
+        renderer.render_with_hint(index as usize, width, height, bitmap_hint)
     })
 }
 
@@ -758,7 +762,19 @@ fn extract_page(
         // (`DOCLING_RS_RENDERER=pdfium`).
         let dw = (width * RENDER_SCALE).round().max(1.0) as u32;
         let dh = (height * RENDER_SCALE).round().max(1.0) as u32;
-        let big = match rust_bitmap(meta, renderer, page.is_some(), index, tw as u32, th as u32) {
+        // A page without a text layer takes this bitmap to OCR: decode its
+        // images at full size (hint 0.0); a digital page's TableFormer input
+        // follows docling's hint 1.0 like the layout image below.
+        let hint = if cells.is_empty() { 0.0 } else { 1.0 };
+        let big = match rust_bitmap(
+            meta,
+            renderer,
+            page.is_some(),
+            index,
+            tw as u32,
+            th as u32,
+            hint,
+        ) {
             Some(img) => Some(img),
             None if page.is_some() => {
                 let page = page.ok_or_else(|| no_raster(index))?;
@@ -788,7 +804,15 @@ fn extract_page(
     } else if render_image {
         let tw = f64::from(width * 1.5).ceil().max(1.0) as i32;
         let th = f64::from(height * 1.5).ceil().max(1.0) as i32;
-        let big = match rust_bitmap(meta, renderer, page.is_some(), index, tw as u32, th as u32) {
+        let big = match rust_bitmap(
+            meta,
+            renderer,
+            page.is_some(),
+            index,
+            tw as u32,
+            th as u32,
+            1.0,
+        ) {
             Some(img) => img,
             None => {
                 let page = page.ok_or_else(|| no_raster(index))?;

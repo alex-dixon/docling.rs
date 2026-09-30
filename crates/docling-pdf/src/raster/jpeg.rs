@@ -606,10 +606,17 @@ impl<'a> Decoder<'a> {
         let mut rd = Reader::new(self.data, start);
 
         // MCU geometry: interleaved scans walk whole MCUs, a single-component
-        // scan walks that component's own block grid (A.2.2).
+        // scan walks that component's own block grid (A.2.2) —
+        // `width_in_blocks = ceil(image_width · h / (hmax · 8))`, the
+        // *coded* size, whatever DCT scaling the output is asked for (the
+        // scaled `dw`/`dh` would walk a fraction of the blocks and leave the
+        // rest of a reduced grayscale or progressive decode black).
         let (mcus_x, mcus_y) = if ns == 1 {
             let c = &self.comps[in_scan[0]];
-            (c.dw.div_ceil(8), c.dh.div_ceil(8))
+            (
+                (self.width * c.h).div_ceil(self.hmax * 8),
+                (self.height * c.v).div_ceil(self.vmax * 8),
+            )
         } else {
             (self.mcux, self.mcuy)
         };
@@ -1492,34 +1499,47 @@ mod tests {
     }
 
     /// Reduced-scale decoding: the output is `ceil(w/N)` × `ceil(h/N)`, and
-    /// at 1/8 every block collapses to its DC — the mean of the 8×8 full
-    /// decode within a tolerance of quantization.
+    /// every reduced pixel is close to the mean of the full-size pixels it
+    /// stands for — over the *whole* image, on every fixture (grayscale,
+    /// progressive and restart-interval streams decode their scans one
+    /// component at a time, whose block grid is the coded size, not the
+    /// scaled one: a reduced grayscale scan once came back three-quarters
+    /// black).
     #[test]
-    fn reduced_scales_have_the_right_size_and_dc() {
-        let (_, jpg, _) = fixtures()
-            .into_iter()
-            .find(|(n, _, _)| n == "rgb_420_big")
-            .unwrap();
-        let full = decode(&jpg, true, 1).unwrap();
-        for denom in [2usize, 4, 8] {
-            let img = decode(&jpg, true, denom as u32).unwrap();
-            assert_eq!(img.width, full.width.div_ceil(denom));
-            assert_eq!(img.height, full.height.div_ceil(denom));
-            assert_eq!(img.channels, 3);
-        }
-        let eighth = decode(&jpg, true, 8).unwrap();
-        // Block (0,0): the mean of the full decode's first 8×8 luma-ish block,
-        // per channel, within a few levels.
-        for c in 0..3 {
-            let mut sum = 0u32;
-            for y in 0..8 {
-                for x in 0..8 {
-                    sum += u32::from(full.data[(y * full.width + x) * 3 + c]);
+    fn reduced_scales_have_the_right_size_and_content() {
+        for (name, jpg, _) in fixtures() {
+            let full = decode(&jpg, true, 1).unwrap();
+            for denom in [2usize, 4, 8] {
+                let img = decode(&jpg, true, denom as u32).unwrap();
+                assert_eq!(img.width, full.width.div_ceil(denom), "{name} 1/{denom}");
+                assert_eq!(img.height, full.height.div_ceil(denom), "{name} 1/{denom}");
+                assert_eq!(img.channels, full.channels, "{name} 1/{denom}");
+                let ch = img.channels;
+                let mut worst = 0i32;
+                for oy in 0..img.height {
+                    for ox in 0..img.width {
+                        for c in 0..ch {
+                            let (mut sum, mut n) = (0u32, 0u32);
+                            for y in oy * denom..((oy + 1) * denom).min(full.height) {
+                                for x in ox * denom..((ox + 1) * denom).min(full.width) {
+                                    sum += u32::from(full.data[(y * full.width + x) * ch + c]);
+                                    n += 1;
+                                }
+                            }
+                            let mean = (sum / n.max(1)) as i32;
+                            let got = i32::from(img.data[(oy * img.width + ox) * ch + c]);
+                            worst = worst.max((got - mean).abs());
+                        }
+                    }
                 }
+                // A reduced IDCT is a low-pass of the block, not a box mean:
+                // sharp edges may sit a few dozen levels off the mean, but a
+                // missing block (black) is 100+ off on any real image.
+                assert!(
+                    worst < 96,
+                    "{name} 1/{denom}: worst |Δ| {worst} vs the block mean"
+                );
             }
-            let mean = (sum / 64) as i32;
-            let got = i32::from(eighth.data[c]);
-            assert!((got - mean).abs() <= 6, "channel {c}: {got} vs mean {mean}");
         }
     }
 
