@@ -269,6 +269,12 @@ fn outputs_match_fixtures() {
             (".strict.md", strict.export_to_markdown()),
             (".json", legacy.export_to_json()),
             (".tex", legacy.export_to_latex()),
+            (
+                ".html",
+                legacy
+                    .export_to_html_with_images(docling::ImageMode::Embedded, "artifacts")
+                    .0,
+            ),
         ];
         for (suffix, got) in outputs {
             let path = expected_path(src, suffix);

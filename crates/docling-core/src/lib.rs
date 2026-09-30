@@ -18,6 +18,7 @@ mod doclang;
 pub mod doctags;
 mod document;
 pub mod env;
+mod html;
 mod json;
 mod labels;
 mod latex;

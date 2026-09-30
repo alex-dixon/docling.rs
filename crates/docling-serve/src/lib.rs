@@ -25,7 +25,7 @@
 //! Options ride along as multipart text parts, JSON fields, or query
 //! parameters (body wins over query):
 //!
-//! - `to` — `md` (default) | `json` | `dclx` | `chunks` | `latex` (#317) | `images` (#243:
+//! - `to` — `md` (default) | `json` | `html` (#492) | `dclx` | `chunks` | `latex` (#317) | `images` (#243:
 //!   rasterize a PDF's pages to PNG through pdfium — no conversion, no models;
 //!   the JSON response is `{"pages": [{"page", "width", "height",
 //!   "png_base64"}]}`, combines with `pages` for a window, capped at
@@ -826,10 +826,10 @@ fn validate_output(options: &ConvertOptions) -> Result<(String, ImageMode), ApiE
     let to = options.to.clone().unwrap_or_else(|| "md".into());
     if !matches!(
         to.as_str(),
-        "md" | "markdown" | "json" | "dclx" | "chunks" | "images" | "latex"
+        "md" | "markdown" | "json" | "html" | "dclx" | "chunks" | "images" | "latex"
     ) {
         return Err(ApiError::Bad(format!(
-            "unknown to='{to}' (expected: md, json, dclx, chunks, images, latex)"
+            "unknown to='{to}' (expected: md, json, html, dclx, chunks, images, latex)"
         )));
     }
     let image_mode = match options.images.as_deref().unwrap_or("placeholder") {
@@ -1308,6 +1308,7 @@ impl OutputNames {
         let ext = match to {
             "md" | "markdown" => "md",
             "json" => "json",
+            "html" => "html",
             "chunks" => "chunks.json",
             "dclx" => "dclx",
             "latex" => "tex",
@@ -1708,6 +1709,14 @@ fn render_stored(
             confidence,
             body: document.export_to_latex().into_bytes(),
         },
+        // #492: docling-core's HTML serializer; pictures follow `images`
+        // exactly as the Markdown body does.
+        "html" => StoredResponse {
+            content_type: "text/html; charset=utf-8",
+            disposition: None,
+            confidence,
+            body: html_string(document, image_mode).into_bytes(),
+        },
         _ => unreachable!("validated above"),
     })
 }
@@ -1766,6 +1775,7 @@ fn batch_item(
             )));
         }
         "latex" => item["latex"] = json!(document.export_to_latex()),
+        "html" => item["html"] = json!(html_string(document, image_mode)),
         _ => unreachable!("validated above"),
     }
     if to != "json" {
@@ -1792,6 +1802,21 @@ fn markdown_string(
         ImageMode::Placeholder => doc.export_to_markdown(),
         _ => {
             doc.export_to_markdown_with_images(image_mode, "artifacts")
+                .0
+        }
+    }
+}
+
+/// The HTML body for `to=html` (#492): the page carries its pictures per
+/// `images` the way the Markdown body does — embedded as `data:` URIs, or
+/// linked under `artifacts/` for `referenced` (the bytes are not served,
+/// exactly as for Markdown).
+fn html_string(document: &DoclingDocument, image_mode: ImageMode) -> String {
+    match image_mode {
+        ImageMode::Placeholder => document.export_to_html(),
+        _ => {
+            document
+                .export_to_html_with_images(image_mode, "artifacts")
                 .0
         }
     }

@@ -11,7 +11,7 @@
 //! optional features the binary carries (execution providers, `serve`,
 //! chunking) — both answer without models present.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--abort-on-error] <input-file> | SOURCE...
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--abort-on-error] <input-file> | SOURCE...
 //!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
 //!                      md --to json`): each document converts once and is
 //!                      written in every format named, `<stem>.md` +
@@ -209,7 +209,7 @@ const HELP: &str = "\
 Convert documents to Markdown, JSON, DocLang, LaTeX or chunks.
 
 OUTPUT
-  --to md|json|dclx|chunks|images|latex   output format (default: md); repeat it (or
+  --to md|json|html|dclx|chunks|images|latex   output format (default: md); repeat it (or
                           comma-separate) to write several — needs --output
   --strict                cleaner, more conformant Markdown (Markdown only)
   --page-break-placeholder TEXT   insert TEXT between pages (Markdown only, e.g. <!-- page break -->)
@@ -445,7 +445,9 @@ fn main() -> ExitCode {
             "--to" => match args.next() {
                 Some(v) => to.extend(v.split(',').map(|f| f.trim().to_string())),
                 None => {
-                    eprintln!("error: --to needs a format (md, json, dclx, chunks, images, latex)");
+                    eprintln!(
+                        "error: --to needs a format (md, json, html, dclx, chunks, images, latex)"
+                    );
                     return ExitCode::from(2);
                 }
             },
@@ -669,9 +671,12 @@ fn main() -> ExitCode {
     let mut formats: Vec<String> = Vec::new();
     for f in &to {
         let f = if f == "markdown" { "md" } else { f.as_str() };
-        if !matches!(f, "md" | "json" | "dclx" | "chunks" | "images" | "latex") {
+        if !matches!(
+            f,
+            "md" | "json" | "html" | "dclx" | "chunks" | "images" | "latex"
+        ) {
             eprintln!(
-                "error: unknown --to '{f}' (expected: md, json, dclx, chunks, images, latex)"
+                "error: unknown --to '{f}' (expected: md, json, html, dclx, chunks, images, latex)"
             );
             return ExitCode::from(2);
         }
@@ -1270,6 +1275,7 @@ fn batch_out_path(file: &Path, base: &Path, output: &Path, to: &str) -> std::pat
         .unwrap_or_else(|_| Path::new(file.file_name().unwrap_or_default()).to_path_buf());
     let ext = match to {
         "json" => "json",
+        "html" => "html",
         "dclx" => "dclx",
         "chunks" => "chunks.json",
         "latex" => "tex",
@@ -1503,6 +1509,29 @@ fn batch_convert_one(
             "latex" => std::fs::write(&out, document.export_to_latex())
                 .map_err(|e| format!("writing {}: {e}", out.display()))?,
             "dclx" => docling::dclx::save_as_dclx(&document, &out).map_err(|e| e.to_string())?,
+            // #492: docling-core's HTML serializer; pictures follow `--images`
+            // exactly as the Markdown branch below — `referenced` writes the
+            // same `<stem>_artifacts/` files and the page links to them.
+            "html" => {
+                let stem = out
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "document".into());
+                let art = format!("{stem}_artifacts");
+                let (html, artifacts) = document.export_to_html_with_images(cfg.image_mode, &art);
+                let parent = out.parent().unwrap_or(Path::new(""));
+                for (rel, bytes) in &artifacts {
+                    let target = parent.join(rel);
+                    if let Some(dir) = target.parent() {
+                        std::fs::create_dir_all(dir)
+                            .map_err(|e| format!("creating {}: {e}", dir.display()))?;
+                    }
+                    std::fs::write(&target, bytes)
+                        .map_err(|e| format!("writing {}: {e}", target.display()))?;
+                }
+                std::fs::write(&out, html)
+                    .map_err(|e| format!("writing {}: {e}", out.display()))?;
+            }
             _ => {
                 if cfg.image_mode == ImageMode::Placeholder {
                     std::fs::write(&out, document.export_to_markdown())
@@ -1668,6 +1697,30 @@ fn output_document(
 ) -> ExitCode {
     if to == "json" {
         println!("{}", document.export_to_json());
+        return ExitCode::SUCCESS;
+    }
+
+    // #492: a complete HTML document on stdout; `--images referenced` writes
+    // the pictures under ./artifacts/ like the Markdown path does.
+    if to == "html" {
+        let (html, artifacts) = document.export_to_html_with_images(image_mode, "artifacts");
+        for (rel, bytes) in &artifacts {
+            let target = Path::new(rel);
+            if let Some(dir) = target.parent() {
+                if let Err(e) = std::fs::create_dir_all(dir) {
+                    eprintln!("error: creating {}: {e}", dir.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+            if let Err(e) = std::fs::write(target, bytes) {
+                eprintln!("error: writing {}: {e}", target.display());
+                return ExitCode::FAILURE;
+            }
+        }
+        if !artifacts.is_empty() {
+            eprintln!("referenced images written to ./artifacts/");
+        }
+        println!("{html}");
         return ExitCode::SUCCESS;
     }
 

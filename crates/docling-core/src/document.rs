@@ -1008,6 +1008,29 @@ impl DoclingDocument {
     ) -> (String, Vec<(String, Vec<u8>)>) {
         to_markdown_images(self, self.strict_markdown, image_mode, artifacts_dir)
     }
+
+    /// A complete HTML document — docling-core's `HTMLDocSerializer` with its
+    /// defaults (#492): pictures stay out (`ImageRefMode.PLACEHOLDER`, only
+    /// their captions and meta render). See [`export_to_html_with_images`]
+    /// for the embedded / referenced modes and [`crate::html`]'s module docs
+    /// for what is reproduced.
+    ///
+    /// [`export_to_html_with_images`]: Self::export_to_html_with_images
+    pub fn export_to_html(&self) -> String {
+        crate::html::to_html(self, ImageMode::Placeholder, "artifacts").0
+    }
+
+    /// HTML with pictures per `image_mode`: `data:` URIs when embedded, and
+    /// when referenced `<img src>` paths under `artifacts_dir` whose bytes come
+    /// back as `(path, bytes)` for the caller to write — the Markdown export's
+    /// contract and file names.
+    pub fn export_to_html_with_images(
+        &self,
+        image_mode: ImageMode,
+        artifacts_dir: &str,
+    ) -> (String, Vec<(String, Vec<u8>)>) {
+        crate::html::to_html(self, image_mode, artifacts_dir)
+    }
 }
 
 #[cfg(test)]

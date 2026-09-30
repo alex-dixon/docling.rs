@@ -844,7 +844,7 @@ fn percent_quote(s: &str, safe: &str) -> String {
     out
 }
 
-fn ext_for(mimetype: &str) -> &str {
+pub(crate) fn ext_for(mimetype: &str) -> &str {
     match mimetype {
         "image/jpeg" => "jpg",
         "image/gif" => "gif",
