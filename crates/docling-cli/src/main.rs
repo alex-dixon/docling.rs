@@ -11,7 +11,17 @@
 //! optional features the binary carries (execution providers, `serve`,
 //! chunking) — both answer without models present.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] <input-file>
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--abort-on-error] <input-file> | SOURCE...
+//!   SOURCE...          one positional file converts to stdout; several
+//!                      positional sources — files, directories, quoted globs,
+//!                      like Python's `docling convert a.docx sub/b.docx
+//!                      --output out/` (#489) — are a batch and need
+//!                      `--output`. A file lands in `--output` by stem, a
+//!                      directory/glob keeps its tree; two sources that would
+//!                      write the same output file are refused up front.
+//!   --abort-on-error   stop the batch at the first failed file; by default a
+//!                      failed file is reported and skipped and the exit code
+//!                      is 1 at the end.
 //!   --input GLOB|DIR   batch mode (#205): convert every file the glob matches
 //!                      (`--input '/data/reports/**/*.pdf'` — quote it so the
 //!                      shell doesn't expand it) instead of one positional file.
@@ -185,7 +195,7 @@ fn version_line() -> String {
 }
 
 /// One-line synopsis — the `usage:` prefix an argument error prints.
-const USAGE: &str = "usage: docling-rs [OPTIONS] <input-file>\n       docling-rs --input GLOB|DIR --output DIR [OPTIONS]\n       docling-rs serve [SERVE OPTIONS]";
+const USAGE: &str = "usage: docling-rs [OPTIONS] <input-file>\n       docling-rs [OPTIONS] --output DIR SOURCE...\n       docling-rs --input GLOB|DIR --output DIR [OPTIONS]\n       docling-rs serve [SERVE OPTIONS]";
 
 /// `--help`: the synopsis plus every flag, grouped. Kept in sync with the
 /// module doc comment above, which carries the long-form rationale.
@@ -201,9 +211,12 @@ OUTPUT
   --no-stream             build the whole document before printing
 
 INPUT SELECTION
+  SOURCE...               one file converts to stdout; several files, directories
+                          or quoted globs are a batch and need --output
   --input GLOB|DIR        batch mode: convert everything the glob/directory matches
   --output DIR            where batch (or single-file) results are written
   --jobs N                batch workers (default 1)
+  --abort-on-error        stop the batch at the first failed file (default: skip it)
   --pages A-B             convert only PDF pages A..B (1-based, inclusive)
   --scale X               `--to images` render scale, px per PDF point (0.1-4.0, default 2.0)
 
@@ -341,8 +354,12 @@ fn main() -> ExitCode {
     let mut vlm_api_key: Option<String> = None;
     let mut vlm_prompt: Option<String> = None;
     let mut vlm_max_tokens: Option<usize> = None;
-    let mut path: Option<String> = None;
-    let mut input: Option<String> = None;
+    // Positional sources (#489): files, directories or quoted globs, any
+    // number of them — one is the classic single-file (stdout) mode, more
+    // than one (or a directory) is a batch and needs `--output`.
+    let mut paths: Vec<String> = Vec::new();
+    let mut inputs: Vec<String> = Vec::new();
+    let mut abort_on_error = false;
     let mut output: Option<String> = None;
     let mut jobs: usize = 1;
     let mut args = std::env::args().skip(1);
@@ -393,8 +410,9 @@ fn main() -> ExitCode {
             "--enrich-picture-classes" => enrich_picture_classes = true,
             "--enrich-code" => enrich_code = true,
             "--enrich-formula" => enrich_formula = true,
+            "--abort-on-error" => abort_on_error = true,
             "--input" => match args.next() {
-                Some(v) => input = Some(v),
+                Some(v) => inputs.push(v),
                 None => {
                     eprintln!("error: --input needs a glob pattern");
                     return ExitCode::from(2);
@@ -623,7 +641,7 @@ fn main() -> ExitCode {
                 eprintln!("run `docling-rs --help` for the full flag list");
                 return ExitCode::from(2);
             }
-            _ => path = Some(arg),
+            _ => paths.push(arg),
         }
     }
 
@@ -659,40 +677,44 @@ fn main() -> ExitCode {
         }
     };
 
-    // Batch mode (#205): `--input <glob>` fans one warm process over many
-    // files, writing results under `--output` and preserving the directory
-    // structure below the pattern's static prefix. A positional input file
-    // with `--output` routes through the same writer (a batch of one).
-    if input.is_some() || output.is_some() {
+    // Batch mode (#205, #489): `--input <glob>` and/or several positional
+    // sources fan one warm process over many files, writing results under
+    // `--output`. Each source keeps its own base — a directory or a glob's
+    // static prefix mirrors its tree, a plain file lands by stem, like
+    // Python's `docling convert a.docx sub/b.docx --output out/`. A single
+    // positional file with `--output` routes through the same writer (a
+    // batch of one).
+    if !inputs.is_empty() || output.is_some() || paths.len() > 1 {
         if bench_warm.is_some() {
             eprintln!("error: --bench-warm is a single-file mode; drop --input/--output");
             return ExitCode::from(2);
         }
         let Some(outdir) = output else {
-            eprintln!("error: --input needs --output DIR for the converted files");
+            if paths.len() > 1 {
+                eprintln!("error: converting several sources needs --output DIR");
+            } else {
+                eprintln!("error: --input needs --output DIR for the converted files");
+            }
             return ExitCode::from(2);
         };
-        let (files, base) = if let Some(pattern) = &input {
-            if path.is_some() {
-                eprintln!("error: --input and a positional input file are mutually exclusive");
-                return ExitCode::from(2);
-            }
-            match expand_glob(pattern) {
-                Ok(v) => v,
+        if inputs.is_empty() && paths.is_empty() {
+            eprintln!("error: --output needs --input GLOB or at least one input file");
+            return ExitCode::from(2);
+        }
+        let mut files: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+        for pattern in inputs.iter().chain(&paths) {
+            match expand_source(pattern) {
+                Ok((matched, base)) => files.extend(matched.into_iter().map(|f| (f, base.clone()))),
                 Err(e) => {
                     eprintln!("error: {e}");
                     return ExitCode::from(2);
                 }
             }
-        } else {
-            let Some(p) = path else {
-                eprintln!("error: --output needs --input GLOB or an input file");
-                return ExitCode::from(2);
-            };
-            let file = std::path::PathBuf::from(&p);
-            let base = file.parent().map(Path::to_path_buf).unwrap_or_default();
-            (vec![file], base)
-        };
+        }
+        if let Err(e) = check_output_collisions(&files, Path::new(&outdir), &to) {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
         let vlm = if pipeline.as_deref() == Some("vlm") {
             match resolve_vlm_flags(
                 vlm_endpoint,
@@ -745,10 +767,10 @@ fn main() -> ExitCode {
             chunk: chunk_opts.clone(),
             vlm,
         };
-        return run_batch(files, &base, Path::new(&outdir), jobs, &cfg);
+        return run_batch(files, Path::new(&outdir), jobs, abort_on_error, &cfg);
     }
 
-    let Some(path) = path else {
+    let Some(path) = paths.into_iter().next() else {
         eprintln!("error: no input file");
         eprintln!("{USAGE}");
         eprintln!("run `docling-rs --help` for the full flag list");
@@ -1076,6 +1098,53 @@ struct BatchCfg {
     /// Per-run `--to chunks` configuration (#256).
     chunk: ChunkOptions,
     vlm: Option<docling::vlm::VlmOptions>,
+}
+
+/// Expand one source argument (#489) into (files, base): an existing file is
+/// itself with its parent as base (so it lands in `--output` by stem, like
+/// Python's `docling convert a.docx sub/b.docx`), a directory or a glob goes
+/// through [`expand_glob`] and keeps its tree, and anything else is an error
+/// naming the argument — a typo must not silently convert nothing.
+fn expand_source(arg: &str) -> Result<(Vec<std::path::PathBuf>, std::path::PathBuf), String> {
+    let p = Path::new(arg);
+    if p.is_file() {
+        let base = p.parent().map(Path::to_path_buf).unwrap_or_default();
+        return Ok((vec![p.to_path_buf()], base));
+    }
+    if p.is_dir() || arg.contains(['*', '?', '[']) {
+        return expand_glob(arg);
+    }
+    Err(format!("'{arg}': no such file or directory"))
+}
+
+/// Two sources that would write the same output file (#489): `sub/b.docx`
+/// and `other/b.docx` both land as `out/b.md` when passed as files. Python
+/// docling lets the later one overwrite the earlier silently; refuse instead —
+/// a converted document vanishing is worse than a usage error, and the fix
+/// (pass a common parent directory, whose tree is mirrored, or separate
+/// `--output` dirs) is one argument away.
+fn check_output_collisions(
+    files: &[(std::path::PathBuf, std::path::PathBuf)],
+    output: &Path,
+    to: &str,
+) -> Result<(), String> {
+    let mut seen: std::collections::HashMap<std::path::PathBuf, &Path> =
+        std::collections::HashMap::new();
+    for (file, base) in files {
+        let out = batch_out_path(file, base, output, to);
+        if let Some(first) = seen.insert(out.clone(), file) {
+            if first != file {
+                return Err(format!(
+                    "'{}' and '{}' would both be written to '{}'; pass a common parent \
+                     directory (its structure is kept) or use separate --output directories",
+                    first.display(),
+                    file.display(),
+                    out.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Expand an `--input` glob into (matched files, static base directory). The
@@ -1413,10 +1482,10 @@ fn batch_convert_one(
 /// failed file is reported and skipped — the batch keeps going, and the exit
 /// code is non-zero if anything failed.
 fn run_batch(
-    files: Vec<std::path::PathBuf>,
-    base: &Path,
+    files: Vec<(std::path::PathBuf, std::path::PathBuf)>,
     output: &Path,
     jobs: usize,
+    abort_on_error: bool,
     cfg: &BatchCfg,
 ) -> ExitCode {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1441,7 +1510,9 @@ fn run_batch(
                         break;
                     }
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(file) = files.get(i) else { break };
+                    let Some((file, base)) = files.get(i) else {
+                        break;
+                    };
                     // A backend that panics on one file must not take the
                     // batch down with it (#395/#396): the documented contract
                     // here is "a failed file is reported and skipped". The
@@ -1477,6 +1548,13 @@ fn run_batch(
                         Err(e) => {
                             failed.fetch_add(1, Ordering::Relaxed);
                             eprintln!("error: {}: {e}", file.display());
+                            // Python's `--abort-on-error` (#489): the first
+                            // failure ends the batch; the default keeps
+                            // going and reports the failure in the exit code.
+                            if abort_on_error {
+                                abort.store(true, Ordering::Relaxed);
+                                eprintln!("aborting the batch (--abort-on-error)");
+                            }
                             if e.contains("execution provider") {
                                 abort.store(true, Ordering::Relaxed);
                                 eprintln!(

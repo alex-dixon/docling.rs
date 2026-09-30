@@ -1059,19 +1059,31 @@ saved page that links external stylesheets needs those fetchable (with a base
 host). Without the feature, `--use-web-browser` is a clear error rather than a
 silent no-op.
 
-## Batch conversion — `--input` / `--output`
+## Batch conversion — several sources, `--input` / `--output`
 
-One warm process converts a whole tree of documents (#205): `--input` takes a
-glob (quote it — the shell must not expand it) or a plain directory, `--output`
-a directory, and the structure below the pattern's static prefix is preserved:
+One warm process converts many documents (#205, #489). Like Python's
+`docling convert file1.docx file2.docx --output ./out/`, any number of
+positional sources — files, directories, quoted globs — go into one run;
+`--input` takes a glob (quote it — the shell must not expand it) or a plain
+directory. `--output` is a directory: a file lands in it by stem, and the
+structure below a directory or a pattern's static prefix is preserved:
 
 ```bash
+docling-rs a.docx sub/b.docx other/c.pdf --output ./converted
+# ./converted/a.md, ./converted/b.md, ./converted/c.md — models load once
 docling-rs --input '/data/reports/**/*.pdf' --output ./converted --to json
 # /data/reports/2024/q1/a.pdf  ->  ./converted/2024/q1/a.json
 docling-rs --input /data/reports --output ./converted
 # a directory sweeps recursively, taking every file with a convertible
 # extension (stray .log/.tmp files are ignored instead of failing the batch)
 ```
+
+Two sources that would write the same output file (`sub/b.docx` and
+`other/b.docx` both become `b.md`) are refused before anything converts —
+pass a common parent directory instead, whose tree is kept (`sub/b.md`,
+`other/b.md`), or separate `--output` directories. `--abort-on-error` stops the batch at the first failed file
+(Python's flag of the same name); by default the file is reported and
+skipped.
 
 The PDF/image ML pipeline loads its models **once** and every matched file
 reuses the warm sessions — the same amortization `docling-rs serve` does
@@ -1086,7 +1098,8 @@ line for scripting; progress goes to stderr — a `start: <file> (N pages)`
 line per document, a dot every 10 finished pages, and an
 `ok: … (12.8s, 800 ms/page)` line when it completes. A failing file is
 skipped rather than aborting the batch, and the exit code is non-zero if
-anything failed — with one deliberate exception: an execution-provider
+anything failed (`--abort-on-error` stops at the first failure instead) —
+with one deliberate exception: an execution-provider
 failure (an explicit `DOCLING_RS_EP` whose runtime libraries are missing)
 would fail every remaining PDF identically, so the first one aborts the
 whole batch (`fatal: …`, remaining files reported as `skipped`). `--output`
