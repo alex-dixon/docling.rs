@@ -52,12 +52,16 @@ pub struct PdfPage {
     /// cropped out of it.
     #[cfg(feature = "ocr-prep")]
     pub image: RgbImage,
-    /// The **scale-1.0** page image the layout model runs on (docling parity:
-    /// its layout stage calls `page.get_image(scale=1.0)` — pdfium at 1.5×,
-    /// PIL-BICUBIC down to point size — a *different* image from the 2×
+    /// The **scale-1.0** page image the layout model runs on (parity with
+    /// docling's `PyPdfiumDocumentBackend`: the layout stage calls
+    /// `page.get_image(scale=1.0)`, which that backend serves as pdfium at
+    /// 1.5×, PIL-BICUBIC down to point size — a *different* image from the 2×
     /// OCR/crop bitmap above, and a different resampling regime than
-    /// stretching that bitmap). `None` on paths without a pdfium renderer
-    /// (browser, METS/TIFF), which fall back to stretching [`Self::image`].
+    /// stretching that bitmap; docling 2.123+'s default docling-parse backend
+    /// renders the same request with its own Blend2D/FreeType renderer, whose
+    /// glyph anti-aliasing differs — #478). `None` on paths without a pdfium
+    /// renderer (browser, METS/TIFF), which fall back to stretching
+    /// [`Self::image`].
     #[cfg(feature = "ocr-prep")]
     pub image_layout: Option<RgbImage>,
     /// Hyperlink annotations on the page (rect in top-left page coords + target
@@ -248,11 +252,20 @@ impl PdfDocument {
         let pdfium = bind()?;
         let ffi = FfiText::load(pdfium.bindings(), bytes, password);
         let doc = pdfium.load_pdf_from_byte_slice(bytes, password)?;
+        let dparse = crate::dparse_render::Doc::open_if_enabled(bytes, password);
         let mut rust = rust_parser_cells(bytes);
         let mut pages = Vec::new();
         for (i, page) in doc.pages().iter().enumerate() {
             let rc = rust.as_mut().map(|p| p.cells_timed(i));
-            pages.push(extract_page(&page, &ffi, i as i32, rc, true, true)?);
+            pages.push(extract_page(
+                &page,
+                &ffi,
+                i as i32,
+                rc,
+                true,
+                true,
+                dparse.as_ref(),
+            )?);
         }
         Ok(PdfDocument { pages })
     }
@@ -348,6 +361,13 @@ where
     } else {
         None
     };
+    // The opt-in docling-parse renderer (#478): when active, the page images
+    // the models see come from it instead of pdfium.
+    let dparse = if render_image {
+        crate::dparse_render::Doc::open_if_enabled(bytes, password)
+    } else {
+        None
+    };
     let pages = doc.pages();
     let total = pages.len() as usize;
     let (first, last) = range.unwrap_or((0, total.saturating_sub(1)));
@@ -361,7 +381,15 @@ where
         }
         let page = pages.get(i as pdfium_render::prelude::PdfPageIndex)?;
         let rc = rust.as_mut().map(|p| p.cells_timed(i));
-        let extracted = extract_page(&page, &ffi, i as i32, rc, render_image, extract_text)?;
+        let extracted = extract_page(
+            &page,
+            &ffi,
+            i as i32,
+            rc,
+            render_image,
+            extract_text,
+            dparse.as_ref(),
+        )?;
         f(i, total, extracted)?;
     }
     // Tearing down the parsed document (hundreds of thousands of lopdf
@@ -508,6 +536,7 @@ fn extract_page(
     rust_cells: Option<crate::textparse::PageParserCells>,
     render_image: bool,
     extract_text: bool,
+    dparse: Option<&crate::dparse_render::Doc>,
 ) -> Result<PdfPage, PdfiumError> {
     // pdfium reports the page size (and renders) in the *display* frame —
     // `/Rotate` applied — while every text coordinate (its own text page, the
@@ -573,10 +602,36 @@ fn extract_page(
         }
     }
 
-    let image = if render_image {
-        // docling renders at 1.5× the target scale and downsamples "to make it
-        // sharper" (pypdfium2 → PIL BICUBIC). Replicate exactly: the TableFormer
-        // model is pixel-sensitive, so the page bitmap must match byte-for-byte.
+    // The opt-in docling-parse renderer (#478, `dparse_render.rs`): both model
+    // inputs come from docling-parse's Blend2D canvas, requested in docling's
+    // order — the scale-1.0 layout image first (docling decodes the page at its
+    // `render_scale` of 1.0, which fixes the bitmap decode resolution), then
+    // the scale-2.0 image TableFormer/OCR crop from (`_render_image_at_scale`
+    // on the same page decoder). The canvases are `ceil`-sized where pdfium's
+    // are `round`ed; every consumer maps points through `RENDER_SCALE`, not
+    // through the image size, so the extra row/column is harmless.
+    let (mut dp_image, mut dp_layout) = (None, None);
+    if let (true, Some(dp)) = (render_image, dparse) {
+        let io_err = |e: String| PdfiumError::IoError(std::io::Error::other(e));
+        let layout =
+            crate::timing::timed("dparse.render_layout", || dp.render(index as usize, 1.0))
+                .map_err(io_err)?;
+        let full = crate::timing::timed("dparse.render", || {
+            dp.render(index as usize, f64::from(RENDER_SCALE))
+        })
+        .map_err(io_err)?;
+        dp.release_page(index as usize);
+        dp_image = Some(full);
+        dp_layout = Some(layout);
+    }
+    let image = if let Some(img) = dp_image.take() {
+        img
+    } else if render_image {
+        // docling's pypdfium2 backend renders at 1.5× the target scale and
+        // downsamples "to make it sharper" (pypdfium2 → PIL BICUBIC). Replicate
+        // exactly: the TableFormer model is pixel-sensitive, so the page bitmap
+        // must match that backend's byte-for-byte (docling 2.123+'s default
+        // docling-parse backend renders it itself — #478).
         // `CatmullRom` is the same a=-0.5 cubic kernel as PIL's BICUBIC.
         const SUPERSAMPLE: f32 = 1.5;
         // The 3x supersample is the largest bitmap the pipeline renders, so the
@@ -601,13 +656,18 @@ fn extract_page(
     } else {
         RgbImage::new(1, 1)
     };
-    // The layout model's input image, built exactly like docling's
+    // The layout model's input image, built exactly like docling's pypdfium2
     // `get_page_image(scale=1.0)`: a pdfium render at 1.5× (pypdfium2 sizes
     // with `ceil`), PIL-BICUBIC down to the point-size image (PIL `resize`'s
     // default kernel; Python `round` = ties-to-even). Distinct from the 2×
     // bitmap above — resampling 1224→640 and 612→640 are different regimes,
-    // and the heron model's borderline scores follow the pixels.
-    let image_layout = if render_image {
+    // and the heron model's borderline scores follow the pixels. "Exactly" is
+    // against the pypdfium2 backend: docling 2.123+'s default docling-parse
+    // backend renders this image with its own renderer (#478, see
+    // docs/PDF_CONFORMANCE.md).
+    let image_layout = if let Some(img) = dp_layout.take() {
+        Some(img)
+    } else if render_image {
         let tw = f64::from(width * 1.5).ceil().max(1.0) as i32;
         let th = f64::from(height * 1.5).ceil().max(1.0) as i32;
         let cfg = PdfRenderConfig::new()

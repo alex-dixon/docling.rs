@@ -44,6 +44,55 @@ dehyphenation (docling#3888, ported in #250) — both sides now join a
 hard-hyphenated lowercase continuation across a column/page break without the
 `word- continuation` artifact — and the groundtruth refresh below.
 
+### The layout input is pypdfium2-exact, not docling-parse-exact (#478)
+
+Since docling 2.123.0 (docling#3764) the default PDF backend is
+`ThreadedDoclingParseDocumentBackend`, and every page image a model stage asks
+for — `get_image(scale=1.0)` for layout, `scale=2.0` for TableFormer, the OCR
+scale, the enrichment crops — comes out of docling-parse's **own renderer**
+(`src/render/blend2d_renderer.h`: glyph outlines taken from FreeType with
+`FT_LOAD_NO_SCALE`, decomposed into Blend2D paths and filled by Blend2D's
+analytic anti-aliasing; embedded font programs first, otherwise the bundled
+fallback faces through a similarity resolver; `RenderConfig.scale = 1.0`
+renders straight at 72 dpi, with no supersample). The render chain in this
+pipeline reproduces docling's *other* backend, `PyPdfiumDocumentBackend`
+(pdfium at 1.5×, PIL-BICUBIC down to point size — see "pypdfium2-exact layout
+input" below), which upstream still ships and selects with
+`PdfFormatOption(backend=PyPdfiumDocumentBackend)`, but no longer runs by
+default. Earlier revisions of this document called the pdfium path
+"docling-exact"; that was true of the pypdfium2 era and is wrong for docling
+2.129.
+
+Measured on the 88 pages of `tests/data/pdf/sources/` (docling-parse 7.22.1
+vs pypdfium2 through the same 1.5× + BICUBIC chain, both at scale 1.0): the two
+renders differ on **10.5 % of all pixels by more than 8/255** and on 0.79 % by
+more than 64/255 (mean |Δ| 3.45/255). The difference is the anti-aliasing of
+every glyph edge and hairline, not the content: docling-parse's page has more
+dark pixels (4.73 % vs 4.58 % below gray 128) but less total ink (mean 14.14
+vs 14.89 of 255) — crisper stems, lighter fringes — while bitmaps and solid
+fills match. Per fixture (mean |Δ|/255 · pixels differing by > 8): 2206
+5.31 · 17.1 %, amt 5.40 · 18.5 %, normal_4pages 5.04 · 16.2 %, 2203 4.60 ·
+15.5 %, code_and_formula 4.04 · 10.7 %, right_to_left_03 3.81 · 10.1 %,
+multi_page 3.64 · 9.7 %, 2305 3.60 · 9.9 %, picture_classification 3.07 ·
+8.3 %, redp5110 3.03 · 8.7 %, table_mislabeled 1.00 · 5.4 %, base14_fonts
+0.36 · 0.9 %, the scanned Korean pages 0.4–0.6 · 1.5–2.1 %. Heron's borderline
+scores follow those pixels: on the issue's three-column table the same INT8
+model with the same post-processing scores table 0.86 on the docling-parse
+render and 0.43 on the pdfium one (docling itself: table 0.81 on its own
+render, no table ≥ 0.3 and picture 0.88 when switched to pypdfium2), and over
+a 1,962-page manual 2 + 7 pages label a whole table the other way. INT8 vs
+fp32 does not move them — the labels follow the image.
+
+Nothing in the corpus baselines moves with this note (snapshots 97/97,
+groundtruth as in the table above); it changes what "exact" means for a model
+*input*. What would close the gap is a port of that renderer for the model
+inputs — ~4,300 lines of Blend2D drawing code, a 2,200-line font resolver
+with the bundled fallback faces, FreeType outline extraction, and a
+rasterizer whose 8-bit coverage matches Blend2D's, or the borderline scores
+still move — or linking the C++ (Blend2D generates its pipelines with a JIT;
+neither route runs in wasm). That is model-level work, item 5 of the blocker
+list below; the pdfium chain stays the reference until then.
+
 ### Region-scoped OCR reads overlapping regular regions once
 
 RT-DETR often reads a sparse scanned page twice over: a high-score `text`
@@ -442,12 +491,15 @@ containers whose children serialize in docling-parse cell order, while we
 emit the same items in geometric reading order; the full wrapper-children
 port (and the bidi run order of `-2-5`-style headings) stays on the
 model-level blocker list, together with the title-page cluster splits of
-2305/2206 (residual heron score noise — see the docling-exact layout input
+2305/2206 (residual heron score noise — see the pypdfium2-exact layout input
 below).
 
-The **docling-exact layout input** closed most of the preprocessing gap: the
-layout model now runs on the same image docling's stage feeds it — a
-dedicated `get_page_image(scale=1.0)` render (pdfium at 1.5×, sized with
+The **pypdfium2-exact layout input** closed most of the preprocessing gap
+against docling's pypdfium2 backend (its default until 2.122; docling 2.123+
+renders the model inputs with docling-parse's own renderer instead — #478, see
+"The layout input is pypdfium2-exact" above): the layout model runs on the
+same image that backend feeds docling's stage — a dedicated
+`get_page_image(scale=1.0)` render (pdfium at 1.5×, sized with
 pypdfium2's `ceil`, then PIL-BICUBIC down to point size) stretched to
 640×640 with **PIL BILINEAR**, both kernels ported byte-exactly from
 Pillow's fixed-point `Resample.c` (`resample.rs::pil_resize`, verified
@@ -873,6 +925,19 @@ model-level (or by-design) residual each issue closed with:
    `MIGRATION.md` §4. **Resolved as by-design:** our single space is the correct
    rendering, so #63 is closed without matching docling's spurious extra space —
    forcing a byte-match would degrade output and risk the RTL geometry.
+5. **The model-input renderer**
+   ([#478](https://github.com/docling-project/docling.rs/issues/478)). docling
+   2.123+ renders the page images its layout, TableFormer, OCR and enrichment
+   stages consume with docling-parse's own Blend2D/FreeType renderer; this
+   pipeline renders them the way docling's `PyPdfiumDocumentBackend` does
+   (pdfium at 1.5×, PIL-BICUBIC down). The two renders differ on ~10 % of the
+   pixels — the anti-aliasing of every glyph edge and hairline — and on
+   borderline regions heron labels a whole table the other way (measured in
+   "The layout input is pypdfium2-exact, not docling-parse-exact" above).
+   Closing it means porting or linking that renderer to the 8-bit coverage
+   value; until then the pdfium chain is the reference, and every byte-exact
+   claim about a model *input* in this document is exactness against the
+   pypdfium2 backend.
 
 ---
 

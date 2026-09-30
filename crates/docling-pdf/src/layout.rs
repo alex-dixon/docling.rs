@@ -59,7 +59,8 @@ pub struct Region {
 #[cfg(feature = "ocr-prep")]
 #[derive(Clone, Copy)]
 pub enum LayoutSrc<'a> {
-    /// The scale-1.0 page image (`PdfPage::image_layout`), docling-exact.
+    /// The scale-1.0 page image (`PdfPage::image_layout`), exact against
+    /// docling's pypdfium2 backend (#478).
     PageImage(&'a image::RgbImage),
     /// Any other page bitmap — legacy stretch.
     Raw(&'a image::RgbImage),
@@ -302,7 +303,7 @@ impl LayoutModel {
         }
         // Resize each page to 640×640 (RT-DETR ignores aspect ratio), rescale to
         // [0,1], lay out as NCHW. The kernel depends on the source (see
-        // [`LayoutSrc`]): the docling-exact page image goes through Pillow's
+        // [`LayoutSrc`]): the pypdfium2-exact page image goes through Pillow's
         // BILINEAR (the RT-DETR processor's kernel, byte-for-byte), raw
         // bitmaps keep the legacy Triangle stretch.
         let n = (SIDE * SIDE) as usize;
