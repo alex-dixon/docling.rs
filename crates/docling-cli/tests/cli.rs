@@ -218,3 +218,187 @@ fn ocr_engine_and_lang_validate_together() {
         assert!(!stderr.contains("--ocr-engine"), "args {args:?}: {stderr}");
     }
 }
+
+/// A scratch directory under the system temp dir, unique per test, removed on
+/// drop so a failed assertion doesn't leave outputs behind for the next run.
+struct Scratch(std::path::PathBuf);
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "docling-cli-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        Self(dir)
+    }
+    fn path(&self, rel: &str) -> String {
+        self.0.join(rel).to_string_lossy().into_owned()
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+const MD_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/md/sources");
+
+/// Several positional sources are one batch (#489, Python's
+/// `docling convert a.md b.md --output out/`): every file converts in the one
+/// process, lands in `--output` by stem, its path prints on stdout, and the
+/// batch summary counts them.
+#[test]
+fn several_positional_sources_convert_into_the_output_dir() {
+    let out = Scratch::new("multi");
+    let a = format!("{MD_FIXTURES}/duck.md");
+    let b = format!("{MD_FIXTURES}/blocks.md");
+    let (code, stdout, stderr) = run(&[&a, &b, "--output", &out.path("")]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    for stem in ["duck", "blocks"] {
+        let written = out.0.join(format!("{stem}.md"));
+        assert!(
+            written.is_file(),
+            "{} missing; stderr: {stderr}",
+            written.display()
+        );
+        assert!(stdout.contains(&format!("{stem}.md")), "stdout: {stdout}");
+    }
+    assert!(
+        stderr.contains("batch: 2 converted, 0 failed"),
+        "stderr: {stderr}"
+    );
+    // The single-file contract is untouched: one positional source without
+    // `--output` still prints the Markdown itself.
+    let (code, stdout, _) = run(&[&a]);
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout,
+        std::fs::read_to_string(out.0.join("duck.md")).unwrap()
+    );
+}
+
+/// A positional directory sweeps its tree like `--input DIR`, and mixes with
+/// plain files in the same batch; more than one source without `--output` is
+/// a usage error (stdout can hold only one document).
+#[test]
+fn positional_directories_and_files_mix_and_need_an_output_dir() {
+    let src = Scratch::new("tree");
+    std::fs::create_dir_all(src.0.join("deep/er")).unwrap();
+    std::fs::write(src.0.join("deep/er/x.md"), "# x\n").unwrap();
+    std::fs::write(
+        src.0.join("deep/notes.log"),
+        "ignored: not a convertible extension\n",
+    )
+    .unwrap();
+    let out = Scratch::new("tree-out");
+    let single = format!("{MD_FIXTURES}/duck.md");
+    let (code, stdout, stderr) = run(&[&src.path("deep"), &single, "--output", &out.path("")]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // The directory's structure below it is kept; the file lands by stem.
+    assert!(
+        out.0.join("er/x.md").is_file(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        out.0.join("duck.md").is_file(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("batch: 2 converted, 0 failed"),
+        "stderr: {stderr}"
+    );
+
+    let (code, _, stderr) = run(&[&single, &src.path("deep/er/x.md")]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("needs --output DIR"), "stderr: {stderr}");
+
+    let (code, _, stderr) = run(&[
+        &src.path("deep/missing.md"),
+        &single,
+        "--output",
+        &out.path(""),
+    ]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("no such file or directory"),
+        "stderr: {stderr}"
+    );
+}
+
+/// Two files with the same stem from different directories would overwrite
+/// each other in `--output`; the batch refuses up front (Python overwrites
+/// silently) and names both files and the remedy.
+#[test]
+fn same_stem_sources_are_refused_before_converting() {
+    let src = Scratch::new("collide");
+    std::fs::create_dir_all(src.0.join("a")).unwrap();
+    std::fs::create_dir_all(src.0.join("b")).unwrap();
+    std::fs::write(src.0.join("a/report.md"), "# a\n").unwrap();
+    std::fs::write(src.0.join("b/report.md"), "# b\n").unwrap();
+    let out = Scratch::new("collide-out");
+    let (code, stdout, stderr) = run(&[
+        &src.path("a/report.md"),
+        &src.path("b/report.md"),
+        "--output",
+        &out.path(""),
+    ]);
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("would both be written to"),
+        "stderr: {stderr}"
+    );
+    assert!(stdout.is_empty(), "nothing converted: {stdout}");
+    assert!(!out.0.join("report.md").exists());
+    // The remedy: the common parent directory, whose tree is kept.
+    let (code, _, stderr) = run(&[&src.path(""), "--output", &out.path("")]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(out.0.join("a/report.md").is_file(), "stderr: {stderr}");
+    assert!(out.0.join("b/report.md").is_file(), "stderr: {stderr}");
+}
+
+/// `--abort-on-error` (Python's flag): the first failed file ends the batch
+/// and the rest are reported as skipped; without it the failure is reported,
+/// the batch continues, and the exit code is 1.
+#[test]
+fn abort_on_error_stops_at_the_first_failure() {
+    let src = Scratch::new("abort");
+    // Unknown extension: `SourceDocument::from_file` rejects it at convert
+    // time, which is a per-file failure rather than an expansion error.
+    std::fs::write(src.0.join("bad.xyz"), "not a document\n").unwrap();
+    std::fs::write(src.0.join("good.md"), "# good\n").unwrap();
+    let out = Scratch::new("abort-out");
+    let (code, _, stderr) = run(&[
+        &src.path("bad.xyz"),
+        &src.path("good.md"),
+        "--output",
+        &out.path(""),
+        "--abort-on-error",
+    ]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(
+        stderr.contains("aborting the batch (--abort-on-error)"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("batch: 0 converted, 1 failed, 1 skipped"),
+        "stderr: {stderr}"
+    );
+    assert!(!out.0.join("good.md").exists(), "stderr: {stderr}");
+
+    let (code, _, stderr) = run(&[
+        &src.path("bad.xyz"),
+        &src.path("good.md"),
+        "--output",
+        &out.path(""),
+    ]);
+    assert_eq!(code, 1, "stderr: {stderr}");
+    assert!(
+        stderr.contains("batch: 1 converted, 1 failed"),
+        "stderr: {stderr}"
+    );
+    assert!(out.0.join("good.md").is_file(), "stderr: {stderr}");
+}
