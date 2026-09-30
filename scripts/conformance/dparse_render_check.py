@@ -57,6 +57,7 @@ def load_shim(lib_path: Path, resources: Path | None) -> ctypes.CDLL:
         ctypes.c_void_p,
         ctypes.c_int,
         ctypes.c_double,
+        ctypes.c_double,
         ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
@@ -74,12 +75,17 @@ def load_shim(lib_path: Path, resources: Path | None) -> ctypes.CDLL:
     return lib
 
 
-def shim_render(lib: ctypes.CDLL, doc: int, page: int, scale: float) -> np.ndarray:
+def shim_render(lib: ctypes.CDLL, doc: int, page: int, scale: float, bitmap_hint: float) -> np.ndarray:
+    """docling decodes the page at its render_scale (the first scale) and re-renders
+    it at the others, so the hint is the first scale for every render — the same
+    decoder state `PageParseResult.get_image(scale)` draws from."""
     buf = ctypes.POINTER(ctypes.c_ubyte)()
     w = ctypes.c_int()
     h = ctypes.c_int()
     err = ctypes.create_string_buffer(1024)
-    rc = lib.dpr_render(doc, page, scale, ctypes.byref(buf), ctypes.byref(w), ctypes.byref(h), err, 1024)
+    rc = lib.dpr_render(
+        doc, page, scale, bitmap_hint, ctypes.byref(buf), ctypes.byref(w), ctypes.byref(h), err, 1024
+    )
     if rc != 0:
         raise RuntimeError(err.value.decode(errors="replace"))
     n = w.value * h.value * 4
@@ -137,7 +143,7 @@ def main() -> int:
             n = lib.dpr_page_count(doc)
             for p in range(n):
                 for s in scales:
-                    got = shim_render(lib, doc, p, s)
+                    got = shim_render(lib, doc, p, s, scales[0])
                     want = ref.get((p, s))
                     pages += 1
                     if want is None:

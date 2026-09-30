@@ -602,22 +602,29 @@ fn extract_page(
         }
     }
 
-    // The opt-in docling-parse renderer (#478, `dparse_render.rs`): both model
-    // inputs come from docling-parse's Blend2D canvas, requested in docling's
-    // order — the scale-1.0 layout image first (docling decodes the page at its
-    // `render_scale` of 1.0, which fixes the bitmap decode resolution), then
-    // the scale-2.0 image TableFormer/OCR crop from (`_render_image_at_scale`
-    // on the same page decoder). The canvases are `ceil`-sized where pdfium's
-    // are `round`ed; every consumer maps points through `RENDER_SCALE`, not
-    // through the image size, so the extra row/column is harmless.
+    // The docling-parse renderer (#478, `dparse_render.rs`): both model inputs
+    // come from docling-parse's Blend2D canvas. The scale-1.0 layout image is
+    // docling's exactly — decoded with its `render_scale` hint of 1.0, which
+    // lets the JPEG/JPX decoders reduce an oversampled scan to 72 dpi. The
+    // scale-2.0 bitmap the OCR and TableFormer crops come from is decoded at
+    // full resolution instead (hint 0): docling re-renders its 1×-decoded page
+    // for those stages too, so its OCR reads a 75-dpi scan upscaled, and the
+    // `ch` conformance recognizer then misreads `JSON` as `JsON` on
+    // `scanned/ocr_test.pdf` — a quality regression this pipeline does not
+    // take over (a deliberate deviation, recorded in PDF_CONFORMANCE.md; the
+    // vector content of a born-digital page is identical either way). The
+    // canvases are `ceil`-sized where pdfium's are `round`ed; every consumer
+    // maps points through `RENDER_SCALE`, not through the image size, so the
+    // extra row/column is harmless.
     let (mut dp_image, mut dp_layout) = (None, None);
     if let (true, Some(dp)) = (render_image, dparse) {
         let io_err = |e: String| PdfiumError::IoError(std::io::Error::other(e));
-        let layout =
-            crate::timing::timed("dparse.render_layout", || dp.render(index as usize, 1.0))
-                .map_err(io_err)?;
+        let layout = crate::timing::timed("dparse.render_layout", || {
+            dp.render(index as usize, 1.0, 1.0)
+        })
+        .map_err(io_err)?;
         let full = crate::timing::timed("dparse.render", || {
-            dp.render(index as usize, f64::from(RENDER_SCALE))
+            dp.render(index as usize, f64::from(RENDER_SCALE), 0.0)
         })
         .map_err(io_err)?;
         dp.release_page(index as usize);

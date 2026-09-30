@@ -44,7 +44,8 @@ use image::RgbImage;
 use libloading::{Library, Symbol};
 
 /// The C ABI the shim exports; bump together with `DPR_ABI_VERSION` there.
-const ABI_VERSION: c_int = 1;
+/// 2: `dpr_render` takes the bitmap decode hint separately from the scale.
+const ABI_VERSION: c_int = 2;
 
 type AbiVersionFn = unsafe extern "C" fn() -> c_int;
 type VersionFn = unsafe extern "C" fn() -> *const c_char;
@@ -55,6 +56,7 @@ type PageCountFn = unsafe extern "C" fn(*mut c_void) -> c_int;
 type RenderFn = unsafe extern "C" fn(
     *mut c_void,
     c_int,
+    c_double,
     c_double,
     *mut *mut c_uchar,
     *mut c_int,
@@ -327,7 +329,12 @@ impl Doc {
     /// `get_image(scale)` canvas — `ceil(w·scale)` × `ceil(h·scale)`, display
     /// orientation — with its opaque white background, so the alpha plane is
     /// dropped and the RGB triples are returned as they are.
-    pub fn render(&self, page: usize, scale: f64) -> Result<RgbImage, String> {
+    ///
+    /// `bitmap_hint` is docling-parse's `bitmap_target_pixels_per_unit`, the
+    /// resolution the JPEG/JPX decoders may reduce an oversampled embedded
+    /// image to (docling passes its `render_scale`, 1.0; `0.0` decodes at
+    /// full resolution). A page is decoded once per distinct hint.
+    pub fn render(&self, page: usize, scale: f64, bitmap_hint: f64) -> Result<RgbImage, String> {
         let mut rgba: *mut c_uchar = std::ptr::null_mut();
         let (mut w, mut h) = (0 as c_int, 0 as c_int);
         let mut err = [0 as c_char; ERR_LEN];
@@ -338,6 +345,7 @@ impl Doc {
                 self.handle,
                 page as c_int,
                 scale,
+                bitmap_hint,
                 &mut rgba,
                 &mut w,
                 &mut h,
