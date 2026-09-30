@@ -99,6 +99,7 @@ The API is described by <a href="/openapi.yaml"><code>/openapi.yaml</code></a> (
         <option value="chunks">chunk records</option>
         <option value="dclx">DocLang archive (.dclx)</option>
         <option value="latex">LaTeX (.tex)</option>
+        <option value="html">HTML (.html)</option>
         <option value="images">page images (PDF → PNG)</option>
       </select>
     </label>
@@ -190,7 +191,7 @@ The API is described by <a href="/openapi.yaml"><code>/openapi.yaml</code></a> (
 <p>As query parameters, multipart text fields, or JSON keys (body wins over query):</p>
 <table>
   <tr><th>Option</th><th>Values</th><th>Description</th></tr>
-  <tr><td><code>to</code></td><td><code>md</code> (default) | <code>json</code> | <code>dclx</code> | <code>chunks</code> | <code>latex</code> | <code>images</code></td>
+  <tr><td><code>to</code></td><td><code>md</code> (default) | <code>json</code> | <code>html</code> | <code>dclx</code> | <code>chunks</code> | <code>latex</code> | <code>images</code></td>
       <td>Markdown (streamed) · docling <code>DoclingDocument</code> JSON · DocLang OPC archive (download) · chunker records (hierarchical + hybrid when a tokenizer is installed) · per-page PNG renders of a PDF (no conversion; combines with <code>pages</code>, capped at 100 pages per request by default).</td></tr>
   <tr><td><code>strict</code></td><td><code>true</code>/<code>false</code></td><td>Cleaner strict Markdown dialect instead of byte-for-byte docling-legacy output.</td></tr>
   <tr><td><code>images</code></td><td><code>placeholder</code> (default) | <code>embedded</code></td><td>Markdown picture handling (embedded = base64 data URIs).</td></tr>

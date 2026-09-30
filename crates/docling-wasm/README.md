@@ -52,7 +52,7 @@ limits).
 convert(
   bytes: Uint8Array,
   filename: string,
-  to?: "md" | "json" | "doclang" | "latex", // default "md"
+  to?: "md" | "json" | "doclang" | "latex" | "html", // default "md"
   images?: "placeholder" | "embedded",     // default "placeholder", Markdown only
   max_pages?: number,                      // convert only the first N PDF pages
   page_break_placeholder?: string,         // text between pages in Markdown, e.g. "<!-- page break -->"

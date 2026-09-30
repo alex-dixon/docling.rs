@@ -294,7 +294,7 @@ honoring `pages=A-B` and a `scale` of 0.1–4.0 pixels per PDF point (default
 2.0 = 144 dpi). Capped at 100 pages per request
 (`DOCLING_RS_MAX_RASTER_PAGES`); narrow big documents with `pages`.
 
-Options per request: `to=md|json|dclx|chunks|latex|images`, `strict`, `images=placeholder|embedded`,
+Options per request: `to=md|json|html|dclx|chunks|latex|images`, `strict`, `images=placeholder|embedded`,
 `skip_empty_cells`, `compact_tables`, `md_page_break_placeholder` (text between pages in Markdown),
 `no_ocr`, `skip_ocr`, `no_table_former`, `no_text_panels`, `heading_hierarchy`, `force_full_page_ocr`, `pages`,
 `do_picture_classification`, `do_code_enrichment`, `do_formula_enrichment` (#423: the
@@ -400,7 +400,7 @@ One engine, several front doors. Every surface takes the same options
 | You write… | Use | Install | Details |
 |---|---|---|---|
 | Rust | the `docling` crate: `DocumentConverter` + `SourceDocument` | `cargo add docling` | [The API](#the-api) |
-| a shell / CI job | the `docling-rs` CLI (`--to md\|json\|dclx\|chunks\|latex\|images`, `--input`/`--output` batch mode) | `cargo install docling-cli` · [release binaries](https://github.com/docling-project/docling.rs/releases) · `ghcr.io/docling-project/docling-rs` | [Batch conversion](#batch-conversion--input----output), [Install](#install-locally--in-ci-one-liner) |
+| a shell / CI job | the `docling-rs` CLI (`--to md\|json\|html\|dclx\|chunks\|latex\|images`, `--input`/`--output` batch mode) | `cargo install docling-cli` · [release binaries](https://github.com/docling-project/docling.rs/releases) · `ghcr.io/docling-project/docling-rs` | [Batch conversion](#batch-conversion--input----output), [Install](#install-locally--in-ci-one-liner) |
 | anything that speaks HTTP | `docling-serve`: `POST /v1/convert` (multipart or JSON), async jobs, OpenAPI 3.1 | `docker run -p 5001:5001 ghcr.io/docling-project/docling-rs-serve` · `cargo install docling-serve` | [HTTP conversion API](#http-conversion-api--docling-rs-serve), [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) |
 | Node.js / Bun / Electron | `docling.rs` (N-API addon): `convertFile`, `convert`, streaming, chunking, warm `Pipeline` | `npm i docling.rs` (`docling.rs-cuda` for GPU) | [Node bindings](#nodejs--bun-bindings), [crate README](./crates/docling-node/README.md) |
 | Python | `docling-rs` — a drop-in for docling's `DocumentConverter` over the Rust engine | `pip install docling-rs` (`docling-rs-cuda` for GPU) | [Python bindings](#python-bindings), [migration guide](./crates/docling-py/README.md#migrating-from-python-docling) |
@@ -603,6 +603,49 @@ text of a *formatted* list item or heading twice (inside `\item` /
 `\section{}` and again as its own paragraph —
 [docling-core#740](https://github.com/docling-project/docling-core/issues/740)),
 which docling.rs does not reproduce.
+
+### HTML (`.html`) output
+
+`export_to_html()` renders a complete HTML document (#492) — the Rust
+counterpart of docling-core's `HTMLDocSerializer` with its default
+parameters: the single-column stylesheet in `<head>`, `<title>` = the
+document name, `<div class='page'>` around the body, `<h1>` for the title and
+`<h{level+1}>` for section headers, `<p>` paragraphs with `<br>` for newlines,
+`<ol>`/`<ul>` lists whose `<li>` carry the original marker as
+`list-style-type`, inline groups as `<span class='inline-group'>` with
+`<strong>`/`<em>`/`<u>`/`<del>`/`<sub>`/`<sup>`/`<a href>`, tables with
+`<th>` header cells, `rowspan`/`colspan` and rich cells rendered as their
+block content, `<figure>` pictures with `<figcaption>`, and the picture
+`meta` block (`<details class="docling-meta">` with the classification and
+the tabular-chart table). Pictures follow the image mode exactly as Markdown
+does: `export_to_html_with_images(ImageMode::Embedded, …)` inlines `data:`
+URIs, `Referenced` returns the same `<stem>_artifacts/image_NNNNNN.<ext>`
+files the Markdown export names and links to them, and the default
+placeholder mode (upstream's `ImageRefMode.PLACEHOLDER`) leaves pictures out
+but for their captions and meta.
+
+The serializer walks the docling-JSON structure the JSON export already
+reproduces item for item, so it inherits every heading-nesting, inline-group
+and rich-cell decision from there. It is pinned two ways: byte-for-byte
+against the HTML groundtruth upstream ships for its ODF and DOCX fixtures
+(`crates/docling/tests/html_export.rs`, 8/8 — picture payloads masked, since
+upstream's `save_as_html` re-encodes every picture through PIL), and against
+docling-core 2.99's own `export_to_html()` run over our exported JSON for the
+whole declarative corpus: **254 of 265 fixtures byte-identical**; the other
+11 are formulas, which upstream converts to MathML with `latex2mathml` and
+docling.rs renders through upstream's own fallback branch (`<pre>` for a
+block formula, `<code>` inline). That is the one deviation; even upstream's
+raw (unescaped) source inside `<pre><code>` for code items is reproduced.
+The regression suite pins every fixture's `.html`.
+
+```rust
+let (html, _) = result.document.export_to_html_with_images(ImageMode::Embedded, "artifacts");
+```
+
+`--to html` on the CLI prints it (batch mode writes `<stem>.html`, pictures
+per `--images`), serve answers `to=html` as `text/html` (inline under `html`
+in a batch), the Node bindings take `to: 'html'`, wasm `"html"`. The Python
+bindings need nothing: `result.document.export_to_html()` is upstream's.
 
 DocLang also reads back **in**: `.dclg`/`.dclg.xml` (bare DocLang XML) and
 `.dclx` archives are input formats like any other —

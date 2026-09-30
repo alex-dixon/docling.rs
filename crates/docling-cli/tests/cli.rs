@@ -547,3 +547,25 @@ fn repeated_to_respects_abort_on_error() {
     assert_eq!(stdout.lines().count(), 2, "stdout: {stdout}");
     assert!(out.0.join("good.md").is_file() && out.0.join("good.json").is_file());
 }
+
+/// `--to html` (#492): a complete HTML document on stdout for one file, and
+/// `<stem>.html` per document in batch mode.
+#[test]
+fn to_html_writes_a_complete_document() {
+    let src = format!("{MD_FIXTURES}/duck.md");
+    let (code, stdout, stderr) = run(&["--to", "html", &src]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.starts_with("<!DOCTYPE html>\n<html>\n<head>\n"),
+        "{stdout:.80}"
+    );
+    assert!(stdout.contains("<title>duck</title>"), "{stdout:.400}");
+    assert!(stdout.contains("<div class='page'>"), "{stdout:.400}");
+    assert!(stdout.trim_end().ends_with("</html>"), "{stdout:.80}");
+    let out = Scratch::new("html");
+    let (code, paths, stderr) = run(&["--to", "html", "--output", &out.path(""), &src]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(paths.trim_end().ends_with("duck.html"), "{paths}");
+    let written = std::fs::read_to_string(out.0.join("duck.html")).unwrap();
+    assert_eq!(written.trim_end(), stdout.trim_end());
+}

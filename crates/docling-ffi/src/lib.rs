@@ -41,7 +41,7 @@ use serde::Deserialize;
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    /// Output format: `md` (default) | `json` | `dclx` | `latex`.
+    /// Output format: `md` (default) | `json` | `dclx` | `latex` | `html`.
     to: Option<String>,
     /// Strict (docling-faithful) Markdown instead of the readable default.
     strict: Option<bool>,
@@ -183,8 +183,9 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
         // C string.
         "dclx" => Ok(docling::dclx::to_dclx_bytes(&document)),
         "latex" => Ok(document.export_to_latex().into_bytes()),
+        "html" => Ok(document.export_to_html().into_bytes()),
         other => Err(format!(
-            "unknown to={other:?} (expected: md, json, dclx, latex)"
+            "unknown to={other:?} (expected: md, json, dclx, latex, html)"
         )),
     }
 }

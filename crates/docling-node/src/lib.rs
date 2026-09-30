@@ -170,7 +170,9 @@ pub struct ConverterOptions {
 #[derive(Clone, Default)]
 pub struct OutputOptions {
     /// `"markdown"` (default), `"json"` (docling-core DoclingDocument wire
-    /// format) or `"latex"` (a complete LaTeX document, #317).
+    /// format), `"latex"` (a complete LaTeX document, #317) or `"html"` (a
+    /// complete HTML document, docling-core's `HTMLDocSerializer`, #492 —
+    /// pictures follow `imageMode` like Markdown).
     pub to: Option<String>,
     /// Picture handling for Markdown: `"placeholder"` (default), `"embedded"`
     /// (base64 data URIs inline), or `"referenced"` (returns image files in
@@ -360,6 +362,9 @@ enum OutputKind {
     Json,
     /// A complete LaTeX document (docling 2.124's `--to latex`, #317).
     Latex,
+    /// A complete HTML document (docling-core's `HTMLDocSerializer`, #492);
+    /// pictures follow `imageMode` like the Markdown export.
+    Html,
 }
 
 /// A Send-safe conversion result (raw bytes, no `Buffer`), so it can be produced
@@ -659,6 +664,10 @@ fn render_doc(
     let (content, images) = match cfg.to {
         OutputKind::Json => (doc.export_to_json(), Vec::new()),
         OutputKind::Latex => (doc.export_to_latex(), Vec::new()),
+        OutputKind::Html => match cfg.image_mode {
+            ImageMode::Placeholder => (doc.export_to_html(), Vec::new()),
+            mode => doc.export_to_html_with_images(mode, &cfg.artifacts_dir),
+        },
         OutputKind::Markdown => match cfg.image_mode {
             ImageMode::Placeholder => (doc.export_to_markdown(), Vec::new()),
             mode => doc.export_to_markdown_with_images(mode, &cfg.artifacts_dir),
@@ -1952,9 +1961,10 @@ fn parse_output_kind(to: Option<&str>) -> Result<OutputKind> {
         None | Some("md") | Some("markdown") => Ok(OutputKind::Markdown),
         Some("json") => Ok(OutputKind::Json),
         Some("latex") => Ok(OutputKind::Latex),
+        Some("html") => Ok(OutputKind::Html),
         Some(other) => Err(Error::new(
             Status::InvalidArg,
-            format!("unknown `to` '{other}' (expected: markdown, json, latex)"),
+            format!("unknown `to` '{other}' (expected: markdown, json, html, latex)"),
         )),
     }
 }

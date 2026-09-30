@@ -77,8 +77,14 @@ fn convert_impl(
         "json" => Ok(result.document.export_to_json()),
         "doclang" => Ok(result.document.export_to_doclang()),
         "latex" => Ok(result.document.export_to_latex()),
+        // #492: like Markdown, pictures embed (`referenced` is unreachable
+        // here for the same reason).
+        "html" => Ok(result
+            .document
+            .export_to_html_with_images(image_mode, "artifacts")
+            .0),
         other => Err(format!(
-            "unknown output format {other:?} (expected \"md\", \"json\", \"doclang\" or \"latex\")"
+            "unknown output format {other:?} (expected \"md\", \"json\", \"doclang\", \"latex\" or \"html\")"
         )),
     }
 }
