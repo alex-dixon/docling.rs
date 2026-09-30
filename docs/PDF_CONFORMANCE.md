@@ -207,7 +207,7 @@ still has a job:
 | need | answered by | pdfium when |
 |---|---|---|
 | page count, size, `/Rotate`, links | `pdf_meta` (lopdf) | lopdf cannot read the file at all |
-| text layer | `textparse` (lopdf) | a page the parser reads no text from, when the library is present (`DOCLING_PDFIUM_TEXT`, the unreadable-font fallbacks) |
+| text layer | `textparse` (lopdf) — the only text source since phase 4 below | never |
 | layout / TableFormer page images | the docling-parse renderer plugin, else the Rust renderer (phase 3 below) | `DOCLING_RS_RENDERER=pdfium` |
 | a scanned page's OCR bitmap | the Rust raster (phase 2 below — pdfium's bitmap byte for byte), else the Rust renderer | `DOCLING_RS_RENDERER=pdfium` on a page the raster declines |
 | `render_pages` (the `pages` / VLM raster) | the plugin, else the Rust raster of an image-only page, else the Rust renderer | `DOCLING_RS_RENDERER=pdfium`, or a file lopdf cannot read |
@@ -416,6 +416,14 @@ closer on the heavy files (`2203.01017v2` 58 vs 69 lines, `redp5110` 186 vs
 193, `table_mislabeled_as_picture` 88 vs 97) and further on one
 (`right_to_left_03` 30 vs 4); neither replaces the plugin as the reference.
 
+Two snapshots moved with this phase even under the plugin: a scanned page the
+Rust raster declines (`sample_with_rotation_mismatch`'s ICC-profiled image,
+the vector figure `fp8-v.s.-bf16.pdf` with its non-rectangular clip) used to
+take pdfium's render for its OCR bitmap and now takes the Rust renderer's,
+and PP-OCR reads the two bitmaps a little differently (`facility` and `18th
+January` right where they were wrong before, `BOOLE-DORSET` for
+`BOOLE.DORSET`); both snapshots are refreshed to the new bitmaps.
+
 Synthetic pages (`render::synthetic`, 18 tests) pin the frame mapping, the
 crop box, `/Rotate`, hairline and wide strokes, constant alpha, rectangle and
 shape clips, XObject and inline images with a stencil, axial shadings as
@@ -433,6 +441,32 @@ over the shape's box, from 1.8 s), a scanned page in its JPEG decode
 `render.clip_mask`, `render.sh`, `render.pattern_fill`, `render.image`,
 `render.image_decode`).
 
+### Retiring pdfium — phase 4 landed: the text layer has one source
+
+pdfium's text page was the fallback for a page the pure-Rust parser read no
+text from. Measured over every PDF under `tests/data` before removing it —
+the corpus, the scanned suite, the LaTeX figure PDFs and the 1,913-page .NET
+reference — the 38 pages where the parser's prose is empty (the scans, four
+matplotlib/vector figures, `redp5110` p17 and 18 blank or figure-only pages
+of the reference) are exactly the pages where pdfium's text page has no
+characters either: the fallback had nothing to add, and `textparse` already
+carries the fixture-by-fixture fixes that made it so (the base-14 AFM widths,
+the Type 1 program encodings, the `/Differences` GID names, the xref repairs). Deleted
+with it: the raw text FFI (`FfiText`, `FPDFText_*` glyph loop), pdfium's
+`segment_cells`, the legacy gap-heuristic prose and space-glyph code groupings
+(`Grouping::Prose` / `CodeSpaceOnly`, `words_from_glyphs`), the
+`DOCLING_PDFIUM_TEXT` / `DOCLING_PDFIUM_WORDS` / `DOCLING_LEGACY_LINES` knobs
+and the legacy branches they selected in assembly, and the two pdfium-only
+diagnostics (`dump_chars`, `dump_render_modes`; `textparse_glyphs` is the
+parser's). The heading-hierarchy stage's style signal (#302), which read
+pdfium's loose char boxes and font names, now reads the parser's glyph boxes
+(the same ascent + descent proxy) and each font's `/BaseFont` style
+(`PageTextParser::glyph_styles`). Outputs are unchanged by construction —
+snapshots 98/98 (with the two phase 3 refreshed above), groundtruth 374 lines /
+9 of 18 strict, the scanned suite byte-identical. pdfium is now opened for two
+things only: its render under
+`DOCLING_RS_RENDERER=pdfium`, and a file lopdf cannot read.
+
 **The roadmap.** The aim is everything in Rust except the ONNX models; the
 shim stays as long as it is the byte-exact oracle for what replaces it.
 
@@ -447,10 +481,12 @@ shim stays as long as it is the byte-exact oracle for what replaces it.
    font-similarity resolver with its bundled faces (the host faces differ
    in metrics where a PDF embeds no program), and the bilinear phase of
    its image blit. Each is a measurable step on the same test.
-4. *Drop the pdfium text fallback.* Make `textparse` read the corpus files
-   pdfium still handles better (broken xref chains lopdf cannot repair, Type 3
-   fonts, ToUnicode gaps), fixture by fixture, then delete `ffi_text.rs` and
-   `DOCLING_PDFIUM_TEXT`.
+4. *Drop the pdfium text fallback* — landed above: on the whole corpus the
+   parser and pdfium were empty on exactly the same pages, so the fallback
+   never fired; the raw text FFI, the pdfium glyph grouping and the
+   `DOCLING_PDFIUM_TEXT` / `DOCLING_PDFIUM_WORDS` / `DOCLING_LEGACY_LINES`
+   knobs are deleted and the heading-hierarchy style signal reads the
+   parser's glyphs.
 5. *Remove pdfium and the shim.* Once 2–4 hold on the corpus and on the
    2,000-page manuals of #478, `pdfium-render` leaves `Cargo.toml`, the
    `.pdfium/` asset goes out of `download_dependencies.sh`, the shim becomes a
@@ -1180,12 +1216,10 @@ that drive conformance (generated spaces, combining marks, ligature/fraction
 positioning). The pipeline now ships a **pure-Rust text parser** (`textparse.rs`,
 on `lopdf`) that reconstructs each glyph's box from the *font's own advance
 widths* and the PDF text/graphics matrices — the same information docling-parse
-uses. It is the **default** text layer; set `DOCLING_PDFIUM_TEXT=1` to fall back
-to pdfium. Pages without a parseable text layer fall back to pdfium
-automatically, so scanned/OCR pages are unaffected. The parser supplies **all**
-text — prose, the **word cells** TableFormer matches against, and **code cells**
-(`DOCLING_PDFIUM_WORDS` reverts words+code to pdfium; `DOCLING_PDFIUM_TEXT`
-reverts everything). pdfium now does only page rasterisation + link annotations.
+uses. It is the **only** text layer (the pdfium fallback it once had is gone —
+"Retiring pdfium", phase 4): a page it reads no text from is a scanned page for
+the OCR path. The parser supplies **all** text — prose, the **word cells**
+TableFormer matches against, and **code cells**.
 
 The parser handles Type0/CID + Identity-H and simple Type1/TrueType fonts,
 ToUnicode CMaps (`bfchar`/`bfrange`), WinAnsi/MacRoman + `/Differences`

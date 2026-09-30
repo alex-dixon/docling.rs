@@ -97,6 +97,9 @@ struct Font {
     ascent: f64,
     descent: f64,
     hash: u64,
+    /// Weight and slant read from the `/BaseFont` name (the heading
+    /// hierarchy's style signal, #302).
+    style: crate::font_style::FontStyle,
 }
 
 impl Font {
@@ -257,6 +260,9 @@ fn parse_font(doc: &Document, name: &[u8], fdict: &Dictionary) -> Font {
         ascent,
         descent,
         hash: hash_name(name),
+        style: crate::font_style::parse_font_style(&String::from_utf8_lossy(
+            &base_font_name(fdict).unwrap_or_else(|| name.to_vec()),
+        )),
     }
 }
 
@@ -1112,9 +1118,52 @@ impl PageTextParser {
         })
     }
 
+    /// The glyph boxes and font styles of the 0-based page `index` — the
+    /// heading-hierarchy stage's style signal (#302): every non-space glyph's
+    /// box (font ascent + descent at its size — the font-size proxy pdfium's
+    /// loose char box also gave) in top-left coordinates, with the weight
+    /// class and slant its `/BaseFont` name declares. Empty for a page
+    /// without a text layer (a scan), and the stage falls back to its other
+    /// signals.
+    pub(crate) fn glyph_styles(
+        &mut self,
+        index: usize,
+    ) -> Vec<crate::heading_hierarchy::GlyphStyle> {
+        let Some(&pid) = self.pages.get(index) else {
+            return Vec::new();
+        };
+        let (_w, h) = page_size(&self.doc, pid);
+        let glyphs = page_glyphs_cached(&self.doc, pid, &mut self.caches);
+        // Font hash → style, over the fonts the walk just parsed (an inline,
+        // uncached font dictionary reads as unstyled).
+        let styles: HashMap<u64, crate::font_style::FontStyle> = self
+            .caches
+            .fonts
+            .values()
+            .map(|f| (f.hash, f.style))
+            .collect();
+        glyphs
+            .iter()
+            .filter(|g| !g.ch.is_whitespace() && g.ll.is_finite())
+            .map(|g| {
+                let st = styles.get(&g.font).copied().unwrap_or_default();
+                crate::heading_hierarchy::GlyphStyle {
+                    l: g.ll,
+                    t: h - g.lt,
+                    r: g.lr,
+                    b: h - g.lb,
+                    height: g.lt - g.lb,
+                    weight_cls: crate::font_style::weight_class(st.weight),
+                    italic: st.italic,
+                    styled: st.known,
+                }
+            })
+            .collect()
+    }
+
     /// Prose, word and code cells of the 0-based page `index` — empty for an
-    /// index the parser's page tree doesn't have (pdfium and lopdf can
-    /// disagree on a damaged file; the caller falls back to pdfium's text).
+    /// index the parser's page tree doesn't have (a damaged file whose page
+    /// tree disagrees with the object model's count).
     pub fn cells(&mut self, index: usize) -> PageParserCells {
         let Some(&pid) = self.pages.get(index) else {
             return PageParserCells::default();
@@ -1302,6 +1351,30 @@ fn fonts_from_res(
 }
 
 /// Extract every glyph on a page as a native-coordinate [`Glyph`].
+/// [`PageTextParser::glyph_styles`] for the given **1-based** pages of a
+/// document, keyed by page number — a separate, on-demand pass (no
+/// rendering), so the extraction pipeline stays byte-identical whether or not
+/// the heading-hierarchy stage runs. Empty when lopdf cannot open the file.
+pub(crate) fn glyph_styles(
+    bytes: &[u8],
+    pages: &[usize],
+) -> HashMap<usize, Vec<crate::heading_hierarchy::GlyphStyle>> {
+    let mut out = HashMap::new();
+    let Some(mut parser) = PageTextParser::open(bytes) else {
+        return out;
+    };
+    for &page_no in pages {
+        if page_no == 0 {
+            continue;
+        }
+        let styles = parser.glyph_styles(page_no - 1);
+        if !styles.is_empty() {
+            out.insert(page_no, styles);
+        }
+    }
+    out
+}
+
 pub(crate) fn page_glyphs(doc: &Document, page_id: lopdf::ObjectId) -> Vec<Glyph> {
     page_glyphs_cached(doc, page_id, &mut DocCaches::default())
 }

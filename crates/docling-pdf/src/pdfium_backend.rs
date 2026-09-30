@@ -180,35 +180,6 @@ pub struct PdfDocument {
     pub pages: Vec<PdfPage>,
 }
 
-/// Whether to use the docling-parse line sanitizer ([`crate::dp_lines`]) for prose
-/// reconstruction — the default. Set `DOCLING_LEGACY_LINES` to fall back to the
-/// older gap-heuristic `lines_from_glyphs`.
-pub(crate) fn use_dp_lines() -> bool {
-    !docling_core::env::flag("DOCLING_LEGACY_LINES")
-}
-
-/// Whether to source **word** cells from the pure-Rust parser (roadmap item 6),
-/// the default. The parser's `word_cells` reproduce docling-parse's word grouping
-/// byte-for-byte — the per-word tokens TableFormer matches table-grid cells
-/// against — which moves table extraction closer to docling on the heavy
-/// multi-column fixtures. Set `DOCLING_PDFIUM_WORDS` to keep pdfium's word cells,
-/// or `DOCLING_PDFIUM_TEXT` to fall back to pdfium for all text.
-pub(crate) fn use_parser_words() -> bool {
-    !docling_core::env::flag("DOCLING_PDFIUM_WORDS")
-        && !docling_core::env::flag("DOCLING_PDFIUM_TEXT")
-}
-
-/// Whether to source **code** cells from the parser too (the default) — the last
-/// text layer to leave pdfium, fully retiring its text path. The parser's
-/// gap-based code grouping ([`code_cells_from_glyphs`]) reconstructs monospace
-/// spacing from positioning gaps (`function add(a, b) { … }`), so it no longer
-/// drops the inter-token spaces the old space-glyph-only grouping lost
-/// (`functionadd`). Reverts to pdfium with `DOCLING_PDFIUM_WORDS` (alongside word
-/// cells) or `DOCLING_PDFIUM_TEXT` (all text).
-pub(crate) fn use_parser_code() -> bool {
-    use_parser_words()
-}
-
 #[cfg(feature = "ml")]
 /// Try binding pdfium from a directory (or a literal library file path):
 /// `<dir>/<platform library name>` first, else `<dir>` itself as the file.
@@ -259,17 +230,12 @@ impl PdfDocument {
 }
 
 #[cfg(feature = "ml")]
-/// Per-page prose line cells from the pure-Rust text parser. This is the
-/// **default** text layer (it matches docling-parse's char geometry and is a
-/// strict improvement on byte-conformance — e.g. it recovers the Arabic
-/// sentence-period attachment in `right_to_left_01`). Set `DOCLING_PDFIUM_TEXT`
-/// to fall back to pdfium's text layer. The parser returns an empty page when a
-/// PDF (or a page) has no parseable text layer; the caller keeps pdfium's cells
-/// in that case, so scanned/edge-case pages are unaffected.
+/// The document's text layer: the pure-Rust text parser (docling-parse's
+/// char geometry; the only text source since phase 4 of "Retiring pdfium" —
+/// on the whole corpus every page it reads no text from is one pdfium read
+/// no text from either, i.e. a scan for the OCR path). `None` for a file
+/// lopdf cannot open at all.
 fn rust_parser_cells(bytes: &[u8]) -> Option<crate::textparse::PageTextParser> {
-    if docling_core::env::flag("DOCLING_PDFIUM_TEXT") {
-        return None;
-    }
     // Only the document load happens here; pages are parsed as the walk
     // reaches them (`cells_timed`), so nothing is decoded for pages outside
     // a `--pages` window and the parse overlaps the workers' inference.
@@ -419,7 +385,6 @@ where
         let extracted = extract_page(
             PageSources {
                 page: page.as_ref(),
-                ffi: session.as_ref().map(|s| &s.ffi),
                 dparse: dparse.as_ref(),
                 meta: meta.as_ref(),
                 renderer: renderer.as_ref(),
@@ -429,7 +394,6 @@ where
             i as i32,
             rc,
             render_image,
-            extract_text,
         )?;
         f(i, total, extracted)?;
     }
@@ -697,13 +661,14 @@ fn rust_bitmap(
 
 #[cfg(feature = "ml")]
 /// Everything pdfium contributes to a conversion when it is present: the
-/// document, its page handles, and the raw text FFI. Absent (`None`) when the
-/// library is not installed and the conversion can do without it — the page
-/// geometry and links come from [`crate::pdf_meta`], the raster from the
-/// docling-parse plugin, the text layer from the pure-Rust parser.
+/// document and its page handles, for its render under
+/// `DOCLING_RS_RENDERER=pdfium` or for a file lopdf cannot read. Absent
+/// (`None`) when the library is not installed and the conversion can do
+/// without it — the page geometry and links come from [`crate::pdf_meta`],
+/// the raster from the docling-parse plugin or the Rust renderer, the text
+/// layer from the pure-Rust parser.
 struct PdfiumSession<'a> {
     doc: pdfium_render::prelude::PdfDocument<'a>,
-    ffi: FfiText<'a>,
 }
 
 #[cfg(feature = "ml")]
@@ -714,10 +679,9 @@ impl<'a> PdfiumSession<'a> {
         password: Option<&str>,
     ) -> Result<Self, PdfiumError> {
         crate::timing::timed("pdfium.open", || {
-            let ffi = FfiText::load(pdfium.bindings(), bytes, password);
             pdfium
                 .load_pdf_from_byte_slice(bytes, password)
-                .map(|doc| PdfiumSession { doc, ffi })
+                .map(|doc| PdfiumSession { doc })
         })
     }
 }
@@ -743,14 +707,13 @@ fn bind_or_skip(meta_ok: bool) -> Result<Option<Pdfium>, PdfiumError> {
 }
 
 /// The native sources a page may draw on, each optional: pdfium's page handle
-/// and raw text FFI (absent in a plugin-only checkout — [`bind_or_skip`]) and
-/// the docling-parse renderer (absent when the plugin is not installed or no
+/// (absent in a checkout without the library — [`bind_or_skip`]) and the
+/// docling-parse renderer (absent when the plugin is not installed or no
 /// raster is wanted).
 #[cfg(feature = "ml")]
 #[derive(Clone, Copy)]
 struct PageSources<'a> {
     page: Option<&'a pdfium_render::prelude::PdfPage<'a>>,
-    ffi: Option<&'a FfiText<'a>>,
     dparse: Option<&'a crate::dparse_render::Doc>,
     /// The object model, for the Rust raster of an image-only page.
     meta: Option<&'a crate::pdf_meta::PdfMeta>,
@@ -767,11 +730,9 @@ fn extract_page(
     index: i32,
     rust_cells: Option<crate::textparse::PageParserCells>,
     render_image: bool,
-    extract_text: bool,
 ) -> Result<PdfPage, PdfiumError> {
     let PageSources {
         page,
-        ffi,
         dparse,
         meta,
         renderer,
@@ -786,42 +747,12 @@ fn extract_page(
     let rotation = geom.rotation;
     let (unrot_w, unrot_h) = geom.unrotated();
 
-    // Default: use the pure-Rust text parser instead of pdfium's text layer
-    // (override with `DOCLING_PDFIUM_TEXT`). Prose line cells always come from the
-    // parser; word and code cells do too unless `DOCLING_PDFIUM_WORDS` keeps them
-    // on pdfium (the parser's word grouping reproduces docling-parse's, which
-    // TableFormer matches against — roadmap item 6). A page the parser couldn't
-    // read (no text layer) keeps pdfium's cells.
+    // The text layer: the pure-Rust parser's prose, word and code cells (its
+    // word grouping reproduces docling-parse's, which TableFormer matches
+    // against). A page it reads nothing from is a scanned page for the OCR
+    // path — pdfium's text page is gone (phase 4 of "Retiring pdfium").
     let rc = rust_cells.unwrap_or_default();
-    let need_pdfium_prose = extract_text && rc.prose.is_empty();
-    let need_pdfium_words = extract_text && (!use_parser_words() || rc.words.is_empty());
-    let need_pdfium_code = extract_text && (!use_parser_code() || rc.code.is_empty());
-
-    // The parser covers prose/words/code from one shared glyph pass, so on the
-    // common (parser-succeeded) page all three are already satisfied and this
-    // pdfium FFI call — otherwise fully discarded below — is skipped outright.
-    // Without pdfium (plugin-only checkout) the parser's cells are all there
-    // is: a page it cannot read is a scanned page for the OCR path.
-    let (mut cells, mut code_cells, mut word_cells) = match (ffi, page) {
-        (Some(ffi), Some(page)) if need_pdfium_prose || need_pdfium_words || need_pdfium_code => {
-            let (mut cells, code_cells, word_cells) =
-                crate::timing::timed("ffi.page_cells", || ffi.page_cells(index, unrot_h));
-            if cells.is_empty() {
-                cells = segment_cells(&page.text()?, unrot_h);
-            }
-            (cells, code_cells, word_cells)
-        }
-        _ => (Vec::new(), Vec::new(), Vec::new()),
-    };
-    if !rc.prose.is_empty() {
-        cells = rc.prose;
-    }
-    if use_parser_words() && !rc.words.is_empty() {
-        word_cells = rc.words;
-    }
-    if use_parser_code() && !rc.code.is_empty() {
-        code_cells = rc.code;
-    }
+    let (mut cells, mut code_cells, mut word_cells) = (rc.prose, rc.code, rc.words);
     if rotation != 0 {
         for c in cells
             .iter_mut()
@@ -1096,38 +1027,6 @@ pub(crate) fn to_display_frame(
     }
 }
 
-#[cfg(feature = "ml")]
-/// Fallback line cells from pdfium-render's style segments (one cell per
-/// segment). Used only when the raw-FFI text page can't be loaded.
-fn segment_cells(text: &PdfPageText, page_h: f32) -> Vec<TextCell> {
-    text.segments()
-        .iter()
-        .filter_map(|seg| {
-            let s = seg.text();
-            if s.trim().is_empty() {
-                return None;
-            }
-            let r = seg.bounds();
-            Some(TextCell {
-                text: s,
-                l: r.left().value,
-                t: page_h - r.top().value,
-                r: r.right().value,
-                b: page_h - r.bottom().value,
-            })
-        })
-        .collect()
-}
-
-#[cfg(feature = "ml")]
-/// A second, raw-FFI handle on the same PDF used to drive the character loop
-/// (`FPDFText_GetUnicode`/`GetCharBox`) that pdfium-render's safe API doesn't
-/// expose. Closes the document on drop.
-struct FfiText<'a> {
-    bindings: &'a dyn PdfiumLibraryBindings,
-    doc: FPDF_DOCUMENT,
-}
-
 /// One glyph: codepoint + native (y-up) box edges. `l/b/r/t` is pdfium's *tight*
 /// ink box (used by the legacy `lines_from_glyphs`); `ll/lb/lr/lt` is the *loose*
 /// box (font ascent/descent + advance — uniform per font/size), which the
@@ -1148,443 +1047,18 @@ pub(crate) struct Glyph {
     pub(crate) font: u64,
 }
 
-#[cfg(feature = "ml")]
-impl<'a> FfiText<'a> {
-    fn load(bindings: &'a dyn PdfiumLibraryBindings, bytes: &[u8], password: Option<&str>) -> Self {
-        let doc = bindings.FPDF_LoadMemDocument(bytes, password);
-        FfiText { bindings, doc }
-    }
-
-    /// Reconstruct line cells for page `index` (zero-based) via the
-    /// chars→words→lines grouping. Returns `(prose_cells, code_cells)` — the same
-    /// glyphs grouped two ways (gap-heuristic for prose, space-glyph-only for
-    /// code). Both empty on any failure (caller falls back).
-    fn page_cells(&self, index: i32, page_h: f32) -> (Vec<TextCell>, Vec<TextCell>, Vec<TextCell>) {
-        let empty = || (Vec::new(), Vec::new(), Vec::new());
-        if self.doc.is_null() {
-            return empty();
-        }
-        let b = self.bindings;
-        let page = b.FPDF_LoadPage(self.doc, index);
-        if page.is_null() {
-            return empty();
-        }
-        let tp = b.FPDFText_LoadPage(page);
-        let out = if tp.is_null() {
-            empty()
-        } else {
-            let dp = use_dp_lines();
-            let g = glyphs(b, tp, dp);
-            b.FPDFText_ClosePage(tp);
-            // Prose line cells: the docling-parse-style sanitizer (behind a flag
-            // while it's validated) or the legacy gap-heuristic reconstruction.
-            let prose = if dp {
-                crate::dp_lines::line_cells(&g, page_h, false)
-            } else {
-                lines_from_glyphs(&g, page_h, Grouping::Prose)
-            };
-            (
-                prose,
-                lines_from_glyphs(&g, page_h, Grouping::CodeSpaceOnly),
-                words_from_glyphs(&g, page_h),
-            )
-        };
-        b.FPDF_ClosePage(page);
-        out
-    }
-}
-
-#[cfg(feature = "ml")]
-impl Drop for FfiText<'_> {
-    fn drop(&mut self) {
-        if !self.doc.is_null() {
-            self.bindings.FPDF_CloseDocument(self.doc);
-        }
-    }
-}
-
-#[cfg(feature = "ml")]
-/// Read every glyph (codepoint + native box) from the text page, in document
-/// order. A space glyph is kept as a word-boundary marker (NaN box, char `' '`);
-/// pdfium emits these on most lines and they pin word splits exactly. Hard line
-/// breaks are dropped (line structure comes from geometry); the gap heuristic in
-/// [`lines_from_glyphs`] is the fallback for the lines pdfium leaves space-less.
-/// Debug helper: the raw pdfium glyph stream (codepoint + native bottom-left
-/// box) for a page, in pdfium's character order. For comparing against
-/// docling-parse's char cells.
-pub fn debug_glyphs(bytes: &[u8], index: i32) -> Vec<(char, f32, f32)> {
-    let Ok(pdfium) = bind() else {
-        return Vec::new();
-    };
-    let ffi = FfiText::load(pdfium.bindings(), bytes, None);
-    if ffi.doc.is_null() {
-        return Vec::new();
-    }
-    let b = ffi.bindings;
-    let page = b.FPDF_LoadPage(ffi.doc, index);
-    if page.is_null() {
-        return Vec::new();
-    }
-    let tp = b.FPDFText_LoadPage(page);
-    let mut out = Vec::new();
-    if !tp.is_null() {
-        for g in glyphs(b, tp, true) {
-            out.push((g.ch, g.ll, g.lr));
-        }
-        b.FPDFText_ClosePage(tp);
-    }
-    b.FPDF_ClosePage(page);
-    out
-}
-
-#[cfg(feature = "ml")]
-/// One text object on a page, for the hidden-layer diagnostic.
-#[derive(Debug, Clone)]
-pub struct DebugTextObject {
-    /// True when the object is drawn invisibly (text render mode 3) — the marker of
-    /// a hidden duplicate text layer.
-    pub invisible: bool,
-    /// Bounding box in native PDF points (bottom-left origin).
-    pub l: f32,
-    pub b: f32,
-    pub r: f32,
-    pub t: f32,
-    /// The object's text (best-effort; empty if it could not be read).
-    pub text: String,
-}
-
-#[cfg(feature = "ml")]
-/// Diagnostic: every text object on page `index`, each tagged visible/invisible
-/// (via the object-level [`FPDFTextObj_GetTextRenderMode`], which — unlike the
-/// per-character render-mode API — is available on the default pdfium binding).
-/// A hidden duplicate text layer shows up as invisible objects repeating the
-/// visible text. Used by the `dump_render_modes` example.
-///
-/// [`FPDFTextObj_GetTextRenderMode`]: pdfium_render::prelude::PdfiumLibraryBindings::FPDFTextObj_GetTextRenderMode
-pub fn debug_text_objects(bytes: &[u8], index: i32) -> Vec<DebugTextObject> {
-    let Ok(pdfium) = bind() else {
-        return Vec::new();
-    };
-    let ffi = FfiText::load(pdfium.bindings(), bytes, None);
-    if ffi.doc.is_null() {
-        return Vec::new();
-    }
-    let b = ffi.bindings;
-    let page = b.FPDF_LoadPage(ffi.doc, index);
-    if page.is_null() {
-        return Vec::new();
-    }
-    let tp = b.FPDFText_LoadPage(page);
-    let mut out = Vec::new();
-    let n = b.FPDFPage_CountObjects(page);
-    for i in 0..n {
-        let obj = b.FPDFPage_GetObject(page, i);
-        if obj.is_null() || b.FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_TEXT as i32 {
-            continue;
-        }
-        let (mut l, mut bot, mut r, mut top) = (0f32, 0f32, 0f32, 0f32);
-        if b.FPDFPageObj_GetBounds(obj, &mut l, &mut bot, &mut r, &mut top) == 0 {
-            continue;
-        }
-        let invisible = b.FPDFTextObj_GetTextRenderMode(obj) == INVISIBLE_RENDER_MODE;
-        let text = if tp.is_null() {
-            String::new()
-        } else {
-            // FPDFTextObj_GetText returns the count of UTF-16 code units, including
-            // the trailing NUL; call once for the size, once to fill.
-            let need = b.FPDFTextObj_GetText(obj, tp, std::ptr::null_mut(), 0);
-            if need <= 1 {
-                String::new()
-            } else {
-                let mut buf = vec![0u16; need as usize];
-                b.FPDFTextObj_GetText(obj, tp, buf.as_mut_ptr(), need);
-                if let Some(&0) = buf.last() {
-                    buf.pop();
-                }
-                String::from_utf16_lossy(&buf)
-            }
-        };
-        out.push(DebugTextObject {
-            invisible,
-            l,
-            b: bot,
-            r,
-            t: top,
-            text,
-        });
-    }
-    if !tp.is_null() {
-        b.FPDFText_ClosePage(tp);
-    }
-    b.FPDF_ClosePage(page);
-    out
-}
-
-#[cfg(feature = "ml")]
-/// Hash a glyph's PDF font name + flags, for `enforce_same_font`. 0 if unavailable.
-fn font_hash(b: &dyn PdfiumLibraryBindings, tp: FPDF_TEXTPAGE, i: i32) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut flags: std::os::raw::c_int = 0;
-    let len = b.FPDFText_GetFontInfo(tp, i, std::ptr::null_mut(), 0, &mut flags);
-    if len == 0 {
-        return 0;
-    }
-    let mut buf = vec![0u8; len as usize];
-    b.FPDFText_GetFontInfo(
-        tp,
-        i,
-        buf.as_mut_ptr() as *mut std::os::raw::c_void,
-        len,
-        &mut flags,
-    );
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    buf.hash(&mut h);
-    flags.hash(&mut h);
-    h.finish()
-}
-
-#[cfg(feature = "ml")]
-/// A glyph's PDF font name (NUL-trimmed), or empty if unavailable.
-fn font_name_bytes(b: &dyn PdfiumLibraryBindings, tp: FPDF_TEXTPAGE, i: i32) -> Vec<u8> {
-    let mut flags: std::os::raw::c_int = 0;
-    let len = b.FPDFText_GetFontInfo(tp, i, std::ptr::null_mut(), 0, &mut flags);
-    if len == 0 {
-        return Vec::new();
-    }
-    let mut buf = vec![0u8; len as usize];
-    b.FPDFText_GetFontInfo(
-        tp,
-        i,
-        buf.as_mut_ptr() as *mut std::os::raw::c_void,
-        len,
-        &mut flags,
-    );
-    while buf.last() == Some(&0) {
-        buf.pop();
-    }
-    buf
-}
-
-#[cfg(feature = "ml")]
-/// Read the text layer's glyph boxes and font styles for the given **1-based**
-/// pages — the heading-hierarchy stage's style signal (#302). A separate,
-/// on-demand pass over the text pages (no rendering), so the extraction
-/// pipeline itself stays byte-identical whether or not the stage runs; pages
-/// without a text layer (scans) simply yield no glyphs and the stage falls
-/// back to its other signals. Boxes are the *loose* char boxes (font ascent +
-/// descent — the font-size proxy), converted to top-left origin.
-pub(crate) fn glyph_styles(
-    bytes: &[u8],
-    password: Option<&str>,
-    pages: &[usize],
-) -> std::collections::HashMap<usize, Vec<crate::heading_hierarchy::GlyphStyle>> {
-    use crate::heading_hierarchy::GlyphStyle;
-    let mut out = std::collections::HashMap::new();
-    let Ok(pdfium) = bind() else {
-        return out;
-    };
-    let ffi = FfiText::load(pdfium.bindings(), bytes, password);
-    if ffi.doc.is_null() {
-        return out;
-    }
-    let b = ffi.bindings;
-    // Each distinct font name parses once per document.
-    let mut cache: std::collections::HashMap<Vec<u8>, crate::font_style::FontStyle> =
-        std::collections::HashMap::new();
-    for &page_no in pages {
-        if page_no == 0 {
-            continue;
-        }
-        let page = b.FPDF_LoadPage(ffi.doc, (page_no - 1) as i32);
-        if page.is_null() {
-            continue;
-        }
-        let page_h = b.FPDF_GetPageHeightF(page);
-        let tp = b.FPDFText_LoadPage(page);
-        if !tp.is_null() {
-            let n = b.FPDFText_CountChars(tp);
-            let mut styles = Vec::with_capacity(n.max(0) as usize);
-            for i in 0..n {
-                let ch = match char::from_u32(b.FPDFText_GetUnicode(tp, i)) {
-                    Some(c) => c,
-                    None => continue,
-                };
-                if ch.is_whitespace() {
-                    continue;
-                }
-                let mut lr = FS_RECTF {
-                    left: 0.0,
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 0.0,
-                };
-                if b.FPDFText_GetLooseCharBox(tp, i, &mut lr) == 0 {
-                    continue;
-                }
-                let name = font_name_bytes(b, tp, i);
-                let style = *cache.entry(name).or_insert_with_key(|n| {
-                    crate::font_style::parse_font_style(&String::from_utf8_lossy(n))
-                });
-                styles.push(GlyphStyle {
-                    l: lr.left,
-                    t: page_h - lr.top,
-                    r: lr.right,
-                    b: page_h - lr.bottom,
-                    height: lr.top - lr.bottom,
-                    weight_cls: crate::font_style::weight_class(style.weight),
-                    italic: style.italic,
-                    styled: style.known,
-                });
-            }
-            b.FPDFText_ClosePage(tp);
-            out.insert(page_no, styles);
-        }
-        b.FPDF_ClosePage(page);
-    }
-    out
-}
-
-#[cfg(feature = "ml")]
-/// pdfium text render mode 3: the glyph is drawn with neither fill nor stroke —
-/// an invisible glyph. Web-to-PDF exporters put a hidden plain-text copy of
-/// syntax-highlighted code (and other "copy"/accessibility layers) in this mode,
-/// which the char-level text API then extracts as a duplicate of the visible text.
-const INVISIBLE_RENDER_MODE: i32 = 3;
-
-#[cfg(feature = "ml")]
-fn glyphs(b: &dyn PdfiumLibraryBindings, tp: FPDF_TEXTPAGE, fetch_font: bool) -> Vec<Glyph> {
-    let n = b.FPDFText_CountChars(tp);
-    let mut out = Vec::with_capacity(n.max(0) as usize);
-    for i in 0..n {
-        let ch = match char::from_u32(b.FPDFText_GetUnicode(tp, i)) {
-            Some(c) => c,
-            None => continue,
-        };
-        if ch == '\r' || ch == '\n' {
-            continue;
-        }
-        // Spaces are font-neutral (0): pdfium's generated spaces carry a default
-        // font that would otherwise block every word↔space merge under
-        // enforce_same_font; docling-parse's spaces inherit the run's font.
-        let font = if fetch_font && !ch.is_whitespace() {
-            font_hash(b, tp, i)
-        } else {
-            0
-        };
-        let (mut l, mut r, mut bot, mut top) = (0f64, 0f64, 0f64, 0f64);
-        let has_box = b.FPDFText_GetCharBox(tp, i, &mut l, &mut r, &mut bot, &mut top) != 0;
-        // Loose box: font ascent/descent + glyph advance, uniform per font/size.
-        let mut lr = FS_RECTF {
-            left: 0.0,
-            top: 0.0,
-            right: 0.0,
-            bottom: 0.0,
-        };
-        let (ll, lb, lrt, ltop) = if b.FPDFText_GetLooseCharBox(tp, i, &mut lr) != 0 {
-            (lr.left, lr.bottom, lr.right, lr.top)
-        } else if has_box {
-            (l as f32, bot as f32, r as f32, top as f32)
-        } else {
-            (f32::NAN, 0.0, 0.0, 0.0)
-        };
-        if ch.is_whitespace() {
-            // Keep the space *with its box* (the docling-parse-style line sanitizer
-            // needs literal space glyphs); NaN `l` if pdfium reports no box (the
-            // legacy `lines_from_glyphs` ignores the box and only flags a space).
-            out.push(Glyph {
-                ch: ' ',
-                l: if has_box { l as f32 } else { f32::NAN },
-                b: if has_box { bot as f32 } else { 0.0 },
-                r: if has_box { r as f32 } else { 0.0 },
-                t: if has_box { top as f32 } else { 0.0 },
-                ll,
-                lb,
-                lr: lrt,
-                lt: ltop,
-                font,
-            });
-            continue;
-        }
-        if !has_box {
-            continue;
-        }
-        out.push(Glyph {
-            ch,
-            l: l as f32,
-            b: bot as f32,
-            r: r as f32,
-            t: top as f32,
-            ll,
-            lb,
-            lr: lrt,
-            lt: ltop,
-            font,
-        });
-    }
-    // pdfium splits the Arabic lam-alef ligature into two chars at the *same* x
-    // (it's one glyph) in visual order — `alef-variant, lam`. docling-parse and
-    // logical order are `lam, alef-variant`. Detect the ligature by the shared x
-    // and swap. The shared-x test reliably distinguishes a true ligature from a
-    // genuine `alef + lam` sequence (the article `ال`, or `فعالة`), whose two
-    // glyphs sit at different x and must NOT be reordered.
-    for i in 0..out.len().saturating_sub(1) {
-        let same_x = out[i].l.is_finite()
-            && out[i + 1].l.is_finite()
-            && (out[i].l - out[i + 1].l).abs() < 1.0;
-        if same_x
-            && matches!(out[i].ch, '\u{0622}' | '\u{0623}' | '\u{0625}' | '\u{0627}')
-            && out[i + 1].ch == '\u{0644}'
-        {
-            out.swap(i, i + 1);
-        }
-    }
-    // Reconstruct degenerate (zero-width) loose space boxes by spanning the gap to
-    // the next glyph on the same line, so the sanitizer keeps them as word
-    // separators rather than dropping them (which would merge `Information systems`
-    // → `Informationsystems`). pdfium gives generated spaces a zero-width box at a
-    // wrong baseline; a wrap (different baseline) or a touching gap is left alone.
-    for i in 0..out.len() {
-        if out[i].ch != ' ' || (out[i].lr - out[i].ll).abs() >= 0.5 {
-            continue;
-        }
-        let prev = out[..i]
-            .iter()
-            .rev()
-            .find(|g| g.ch != ' ' && g.ll.is_finite())
-            .map(|g| (g.lr, g.lb, g.lt));
-        let next = out[i + 1..]
-            .iter()
-            .find(|g| g.ch != ' ' && g.ll.is_finite())
-            .map(|g| (g.ll, g.lb));
-        if let (Some((plr, plb, plt)), Some((nll, nlb))) = (prev, next) {
-            let line_h = (plt - plb).abs().max(1.0);
-            if (plb - nlb).abs() < line_h * 0.5 && nll > plr + 0.5 {
-                out[i].ll = plr;
-                out[i].lr = nll;
-                out[i].lb = plb;
-                out[i].lt = plt;
-            }
-        }
-    }
-    out
-}
-
-/// How [`lines_from_glyphs`] splits a line into words.
+/// How [`lines_from_glyphs`] splits a line into words. Two more modes lived
+/// here — the prose gap heuristic with punctuation glue and pdfium's
+/// space-glyph-only code split — for pdfium's glyph stream; the parser's
+/// prose goes through `dp_lines` and pdfium's text page is gone.
 #[derive(Clone, Copy, PartialEq)]
 enum Grouping {
-    /// Gap heuristic + punctuation glue (`engines,`, `[37`, `98.5`) — prose.
-    Prose,
-    /// Split only at literal space glyphs, never glue — pdfium code cells.
-    /// pdfium's monospace listings carry a real space glyph at every source space,
-    /// and its overhanging loose boxes would make the gap heuristic over-split
-    /// (`f un c t i o n`), so honouring just the spaces reproduces the spacing.
-    CodeSpaceOnly,
     /// Split on the inter-glyph **gap** (or a space glyph), but never glue — for
     /// the parser's code cells: the parser emits no space glyphs (a source space
     /// is a positioning gap), and its clean advance boxes make the gap reliable.
-    /// Unlike [`Grouping::Prose`] there is no punctuation glue, so a real gap
-    /// always splits (`et al. 2000`, not `et al.2000`) while genuinely touching
-    /// tokens stay joined (`add(a,` / `b)`).
+    /// There is no punctuation glue, so a real gap always splits (`et al.
+    /// 2000`, not `et al.2000`) while genuinely touching tokens stay joined
+    /// (`add(a,` / `b)`).
     CodeGap,
 }
 
@@ -1638,30 +1112,10 @@ fn lines_from_glyphs(gs: &[Glyph], page_h: f32, mode: Grouping) -> Vec<TextCell>
                 g.l < p.r
             };
             new_line = (p.b - g.b > h * 0.5 && x_reset) || (p.b - g.b > line_h.max(h) * 1.5);
-            // Don't split before closing punctuation, after opening punctuation, or
-            // after a period that runs into a digit/lowercase letter — docling
-            // keeps `engines,` / `[37` / `i.e.` / `98.5` together even across a
-            // space or gap.
-            let glued = is_close_punct(g.ch)
-                || is_open_punct(p.ch)
-                || (p.ch.is_ascii_digit() && g.ch.is_ascii_digit())
-                || (p.ch == '.'
-                    && !pending_space
-                    && (g.ch.is_ascii_digit() || g.ch.is_ascii_lowercase()));
             let word_gap = line_h.max(h) * 0.25;
-            new_word = if mode == Grouping::CodeSpaceOnly {
-                new_line || pending_space
-            } else if mode == Grouping::CodeGap {
+            new_word = match mode {
                 // Gap-based, no glue: a real gap always splits, touching tokens join.
-                new_line || pending_space || g.l - p.r > word_gap
-            } else if is_arabic(g.ch) || is_arabic(p.ch) {
-                // RTL runs right-to-left, so the inter-word gap is `p.l - g.r`. A
-                // real word space has a gap; pdfium also emits spurious zero-gap
-                // space glyphs inside words (`التي`), so require the gap rather
-                // than trusting a bare space glyph.
-                new_line || (p.l - g.r > word_gap && !glued)
-            } else {
-                new_line || ((pending_space || g.l - p.r > word_gap) && !glued)
+                Grouping::CodeGap => new_line || pending_space || g.l - p.r > word_gap,
             };
         }
         pending_space = false;
@@ -1691,114 +1145,19 @@ fn lines_from_glyphs(gs: &[Glyph], page_h: f32, mode: Grouping) -> Vec<TextCell>
     cells
 }
 
-/// Code line cells from the **parser**'s glyph stream. Unlike pdfium — whose
-/// monospace listings carry explicit space glyphs (so [`Grouping::CodeSpaceOnly`]
-/// keeps their spacing) — the parser emits no space glyphs: a source space is a
-/// positioning gap. So code cells use [`Grouping::CodeGap`], which splits on the
-/// inter-glyph gap (a space wherever it exceeds ~0.25× the line height) but never
-/// glues punctuation, so `et al. 2000` keeps its space while `add(a,` / `b)` stay
-/// joined. The parser's clean advance boxes make the gap heuristic reliable here,
-/// where pdfium's overhanging loose boxes would over-split (`f un c t i o n`).
+/// Code line cells from the parser's glyph stream. The parser emits no space
+/// glyphs — a source space is a positioning gap — so code cells use
+/// [`Grouping::CodeGap`], which splits on the inter-glyph gap (a space
+/// wherever it exceeds ~0.25× the line height) but never glues punctuation,
+/// so `et al. 2000` keeps its space while `add(a,` / `b)` stay joined. The
+/// parser's clean advance boxes make the gap heuristic reliable here, where
+/// pdfium's overhanging loose boxes used to over-split (`f un c t i o n`).
 pub(crate) fn code_cells_from_glyphs(gs: &[Glyph], page_h: f32) -> Vec<TextCell> {
     lines_from_glyphs(gs, page_h, Grouping::CodeGap)
 }
 
-/// Per-word cells (each word's text + top-left bbox), using the same word/line
-/// splitting as [`lines_from_glyphs`] but emitting one cell per word instead of
-/// joining into lines — the legacy gap-heuristic word grouping, kept for the
-/// pdfium word path (`DOCLING_PDFIUM_WORDS`). The default parser path uses
-/// [`crate::dp_lines::word_cells`] instead.
-pub(crate) fn words_from_glyphs(gs: &[Glyph], page_h: f32) -> Vec<TextCell> {
-    let mut cells = Vec::new();
-    let mut word = String::new();
-    let inf = (
-        f32::INFINITY,
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-    );
-    let (mut wl, mut wb, mut wr, mut wt) = inf;
-    let mut line_h: f32 = 0.0;
-    let mut prev: Option<&Glyph> = None;
-    let mut pending_space = false;
-    for g in gs {
-        if g.ch == ' ' {
-            pending_space = true;
-            continue;
-        }
-        let h = (g.t - g.b).abs().max(1.0);
-        let mut new_line = false;
-        let mut new_word = false;
-        if let Some(p) = prev {
-            // LTR wraps reset x leftward (`g.l < p.r`); RTL (Arabic) wraps reset
-            // rightward (the new line begins at the far right). A large drop
-            // (≥1.5× line height) is a new line regardless of x.
-            let x_reset = if is_arabic(g.ch) || is_arabic(p.ch) {
-                g.l > p.r
-            } else {
-                g.l < p.r
-            };
-            new_line = (p.b - g.b > h * 0.5 && x_reset) || (p.b - g.b > line_h.max(h) * 1.5);
-            // No digit-digit glue here (unlike the prose grouping): table cells in
-            // adjacent columns are numeric and a column gap must still split them
-            // (`0.965` `0.934`, not `0.9650.934`). Intra-number digits have no gap
-            // so they stay together regardless.
-            let glued = is_close_punct(g.ch)
-                || is_open_punct(p.ch)
-                || (p.ch == '.'
-                    && !pending_space
-                    && (g.ch.is_ascii_digit() || g.ch.is_ascii_lowercase()));
-            let word_gap = line_h.max(h) * 0.25;
-            new_word = new_line || ((pending_space || g.l - p.r > word_gap) && !glued);
-        }
-        pending_space = false;
-        if new_word && !word.is_empty() {
-            cells.push(TextCell {
-                text: std::mem::take(&mut word),
-                l: wl,
-                t: page_h - wt,
-                r: wr,
-                b: page_h - wb,
-            });
-            (wl, wb, wr, wt) = inf;
-        }
-        if new_line {
-            line_h = 0.0;
-        }
-        word.push(g.ch);
-        wl = wl.min(g.l);
-        wb = wb.min(g.b);
-        wr = wr.max(g.r);
-        wt = wt.max(g.t);
-        line_h = line_h.max(h);
-        prev = Some(g);
-    }
-    if !word.is_empty() {
-        cells.push(TextCell {
-            text: word,
-            l: wl,
-            t: page_h - wt,
-            r: wr,
-            b: page_h - wb,
-        });
-    }
-    cells
-}
-
 fn is_arabic(c: char) -> bool {
     ('\u{0600}'..='\u{06FF}').contains(&c)
-}
-
-fn is_close_punct(c: char) -> bool {
-    matches!(
-        c,
-        ',' | '.' | ';' | '!' | '?' | ')' | ']' | '}' | '%' | '\'' | '\u{2019}' | '\u{2018}'
-    )
-}
-
-fn is_open_punct(c: char) -> bool {
-    // `@` glues to what follows (`mAP @0.5`, `bpf@zurich`, `@decorator`).
-    matches!(c, '(' | '[' | '{' | '@')
 }
 
 fn push_word(word: &mut String, words: &mut Vec<String>) {

@@ -92,8 +92,9 @@ cargo check -p docling --no-default-features --features pdf-text \
   patterns, images; measured against the shim) otherwise, image-only pages
   (scans) from `raster/` byte-identical to pdfium
   (`DOCLING_RS_SCAN_RASTER=pdfium` disables it), so `.models/` alone
-  converts every PDF; pdfium is loaded only for the text layer of a file
-  lopdf cannot read and under `DOCLING_RS_RENDERER=pdfium` (`bind_or_skip`).
+  converts every PDF; the text layer is `textparse` alone (no pdfium
+  fallback), and pdfium is loaded only under `DOCLING_RS_RENDERER=pdfium`
+  and for a file lopdf cannot read (`bind_or_skip`).
   Fetch: `scripts/install/download_dependencies.sh`.
 - Resolution is CWD-relative, then `$DOCLING_RS_MODELS_DIR` for `.models/…`
   paths (#285 — whole-dir override keeping the engine's own selection logic,

@@ -1977,12 +1977,7 @@ impl Pipeline {
     /// on demand, then assign levels in place. `bytes` is `None` on paths
     /// with no PDF behind them (standalone images, METS) — those degrade to
     /// the numbering signal, exactly like docling without parsed pages.
-    fn apply_heading_hierarchy(
-        &self,
-        nodes: &mut [Node],
-        bytes: Option<&[u8]>,
-        password: Option<&str>,
-    ) {
+    fn apply_heading_hierarchy(&self, nodes: &mut [Node], bytes: Option<&[u8]>) {
         let opts = &self.heading_hierarchy;
         if !opts.enabled {
             return;
@@ -1994,7 +1989,7 @@ impl Pipeline {
         let styles = match bytes {
             Some(bytes) if opts.use_style => {
                 let pages = heading_hierarchy::heading_pages(nodes);
-                pdfium_backend::glyph_styles(bytes, password, &pages)
+                textparse::glyph_styles(bytes, &pages)
             }
             _ => Default::default(),
         };
@@ -2394,7 +2389,7 @@ impl Pipeline {
             },
         )?;
         assemble::merge_continuations(&mut doc.nodes);
-        self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes), password);
+        self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes));
         doc.confidence = Some(docling_core::ConfidenceReport::from_pages(confs));
         Ok(doc)
     }
@@ -2502,7 +2497,7 @@ impl Pipeline {
             confs.insert(idx + 1, conf);
         }
         assemble::merge_continuations(&mut doc.nodes);
-        self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes), password);
+        self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes));
         doc.confidence = Some(docling_core::ConfidenceReport::from_pages(confs));
         Ok(doc)
     }
@@ -2784,7 +2779,7 @@ impl Pipeline {
         // No PDF behind these pages (images, METS): the heading-hierarchy
         // stage degrades to the numbering signal — exactly docling without
         // an outline or parsed pages.
-        self.apply_heading_hierarchy(&mut doc.nodes, None, None);
+        self.apply_heading_hierarchy(&mut doc.nodes, None);
         doc.confidence = Some(docling_core::ConfidenceReport::from_pages(confs));
         Ok(doc)
     }

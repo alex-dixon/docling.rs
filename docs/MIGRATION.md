@@ -448,7 +448,7 @@ These are deliberate or unavoidable divergences, not bugs.
      page frame — the CropBox ∩ MediaBox box with its lower-left corner as
      the origin, inherited through the page tree — so a trimmed or offset
      page lines up with the rendered bitmap and docling's `prov` boxes. It is
-     the default text layer (`DOCLING_PDFIUM_TEXT=1` falls back to pdfium). Its cells feed a port of
+     the only text layer (pdfium's text page is gone — phase 4 of "Retiring pdfium"). Its cells feed a port of
      docling-parse's line sanitizer (`dp_lines.rs`): 3-pass corner-distance
      contraction with gap-proportional space insertion, `enforce_same_font`,
      ligature recomposition, loose-box geometry. Plus docling's markdown escaping,

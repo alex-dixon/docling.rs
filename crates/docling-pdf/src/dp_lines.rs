@@ -4,8 +4,8 @@
 //! cells via a 3-pass contraction — left-to-right, right-to-left, then
 //! left-to-right with reverse — using corner-distance adjacency and inserting at
 //! most one space per merge. This reproduces docling-parse's inter-word spacing
-//! (justified double spaces, the space before a `:`, and RTL ordering) that the
-//! ad-hoc `lines_from_glyphs` reconstruction can't.
+//! (justified double spaces, the space before a `:`, and RTL ordering) that an
+//! ad-hoc gap-heuristic reconstruction can't.
 //!
 //! Geometry uses native PDF coordinates (y increases upward); each cell carries
 //! its four transformed corners r0=bottom-left, r1=bottom-right, r2=top-right,

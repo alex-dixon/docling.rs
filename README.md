@@ -98,11 +98,11 @@ installed), and an ONNX layout/TableFormer/OCR stack. Image-only pages —
 scans — are rasterized byte for byte what pdfium renders (its stretch engine
 and a libjpeg-exact JPEG decoder, ported; `DOCLING_RS_SCAN_RASTER=pdfium`
 switches back). pdfium is no longer needed to convert a PDF: a checkout with
-`.models/` alone converts the whole corpus; the library is loaded only for
-the text layer of a file the Rust parser cannot read, for the two image
-codecs the Rust decoders lack (JPX, JBIG2 — drawn as placeholders otherwise)
-and under `DOCLING_RS_RENDERER=pdfium` (`docs/PDF_CONFORMANCE.md`,
-"Retiring pdfium"). TableFormer is ported
+`.models/` alone converts the whole corpus; the text layer has one source,
+the Rust parser, and the library is loaded only under
+`DOCLING_RS_RENDERER=pdfium` and for a file lopdf cannot read
+(`docs/PDF_CONFORMANCE.md`, "Retiring pdfium"; JPX and JBIG2 images draw as
+placeholders, as docling-parse draws them). TableFormer is ported
 to ONNX and run on every detected table region to recover its structure;
 geometric reconstruction from cell positions remains only as the fallback when
 the TableFormer graphs aren't present (see `docs/PDF_CONFORMANCE.md`).
