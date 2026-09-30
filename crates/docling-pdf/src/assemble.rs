@@ -1268,59 +1268,164 @@ pub fn cluster_cids(regions: &[Region], cells: &[TextCell]) -> Vec<usize> {
 /// (`docling/models/postprocessing/list_marker_processor.py`), one glyph each.
 const LIST_BULLET_MARKERS: &str = "\u{2022}\u{2023}\u{25E6}\u{2043}\u{204C}\u{204D}\u{2219}\u{25AA}\u{25AB}\u{25CF}\u{25CB}-*+•·‣⁃►▶▸➤➢✓✔✗✘";
 
-/// docling's numbered-marker patterns, in its first-wins order (the compound
-/// ones first, as they are the more specific).
-const LIST_NUMBERED_MARKERS: &[&str] = &[
-    r"\d+(?:\.\d+)+\.?",   // 1.1  1.2.3  1.1.
-    r"\d+\.?[a-zA-Z]\.",   // 9a. 3.a.
-    r"\d+\.?[a-zA-Z]\)",   // 9a) 3.a)
-    r"\(\d+\.?[a-zA-Z]\)", // (9a) (3.a)
-    r"\d+\.",              // 1. 2. 3.
-    r"\d+\)",              // 1) 2) 3)
-    r"\(\d+\)",            // (1) (2) (3)
-    r"\[\d+\]",            // [1] [2] [3]
-    r"[ivxlcdm]+\.",       // i. ii. iii.
-    r"[IVXLCDM]+\.",       // I. II. III.
-    r"[a-z]\.",            // a. b. c.
-    r"[A-Z]\.",            // A. B. C.
-    r"[a-z]\)",            // a) b) c)
-    r"[A-Z]\)",            // A) B) C)
+/// docling's numbered-marker patterns as byte-length scanners over the start
+/// of the text, in its first-wins order (the compound ones first, as they are
+/// the more specific). Each returns the marker's candidate lengths, longest
+/// (greedy) first — the alternatives Python's regex would backtrack through
+/// before the `\s(.+)` tail. Hand-rolled rather than `regex` because this file
+/// is part of the `pdf-text` (wasm) build, where the `regex` crate is not.
+/// `\d` is Unicode-aware in Python, hence `char::is_numeric`; the letters are
+/// ASCII classes in both.
+const LIST_NUMBERED_MARKERS: &[fn(&str) -> Vec<usize>] = &[
+    // `\d+(?:\.\d+)+\.?` — 1.1  1.2.3  1.1.
+    |s| {
+        let mut i = digits(s, 0);
+        if i == 0 {
+            return Vec::new();
+        }
+        let mut groups = 0;
+        while s[i..].starts_with('.') && digits(s, i + 1) > i + 1 {
+            i = digits(s, i + 1);
+            groups += 1;
+        }
+        if groups == 0 {
+            return Vec::new();
+        }
+        if s[i..].starts_with('.') {
+            vec![i + 1, i]
+        } else {
+            vec![i]
+        }
+    },
+    // `\d+\.?[a-zA-Z]\.` — 9a. 3.a.
+    |s| digits_dot_letter(s, 0, '.').into_iter().collect(),
+    // `\d+\.?[a-zA-Z]\)` — 9a) 3.a)
+    |s| digits_dot_letter(s, 0, ')').into_iter().collect(),
+    // `\(\d+\.?[a-zA-Z]\)` — (9a) (3.a)
+    |s| {
+        if !s.starts_with('(') {
+            return Vec::new();
+        }
+        digits_dot_letter(s, 1, ')').into_iter().collect()
+    },
+    // `\d+\.` — 1. 2. 3.
+    |s| digits_then(s, 0, '.').into_iter().collect(),
+    // `\d+\)` — 1) 2) 3)
+    |s| digits_then(s, 0, ')').into_iter().collect(),
+    // `\(\d+\)` — (1) (2) (3)
+    |s| {
+        if !s.starts_with('(') {
+            return Vec::new();
+        }
+        digits_then(s, 1, ')').into_iter().collect()
+    },
+    // `\[\d+\]` — [1] [2] [3]
+    |s| {
+        if !s.starts_with('[') {
+            return Vec::new();
+        }
+        digits_then(s, 1, ']').into_iter().collect()
+    },
+    // `[ivxlcdm]+\.` — i. ii. iii.
+    |s| class_run_then(s, "ivxlcdm", '.').into_iter().collect(),
+    // `[IVXLCDM]+\.` — I. II. III.
+    |s| class_run_then(s, "IVXLCDM", '.').into_iter().collect(),
+    // `[a-z]\.` / `[A-Z]\.` / `[a-z]\)` / `[A-Z]\)`
+    |s| {
+        letter_then(s, char::is_ascii_lowercase, '.')
+            .into_iter()
+            .collect()
+    },
+    |s| {
+        letter_then(s, char::is_ascii_uppercase, '.')
+            .into_iter()
+            .collect()
+    },
+    |s| {
+        letter_then(s, char::is_ascii_lowercase, ')')
+            .into_iter()
+            .collect()
+    },
+    |s| {
+        letter_then(s, char::is_ascii_uppercase, ')')
+            .into_iter()
+            .collect()
+    },
 ];
+
+/// Byte offset just past the run of `\d` characters starting at `from`
+/// (`from` itself when there is none).
+fn digits(s: &str, from: usize) -> usize {
+    s[from..]
+        .char_indices()
+        .find(|(_, c)| !c.is_numeric())
+        .map_or(s.len(), |(i, _)| from + i)
+}
+
+/// `\d+<close>` from `from`: the length through `close`, if it matches.
+fn digits_then(s: &str, from: usize, close: char) -> Option<usize> {
+    let end = digits(s, from);
+    (end > from && s[end..].starts_with(close)).then(|| end + close.len_utf8())
+}
+
+/// `\d+\.?[a-zA-Z]<close>` from `from`.
+fn digits_dot_letter(s: &str, from: usize, close: char) -> Option<usize> {
+    let mut i = digits(s, from);
+    if i == from {
+        return None;
+    }
+    if s[i..].starts_with('.') {
+        i += 1;
+    }
+    let letter = s[i..].chars().next().filter(char::is_ascii_alphabetic)?;
+    i += letter.len_utf8();
+    s[i..].starts_with(close).then(|| i + close.len_utf8())
+}
+
+/// `[<class>]+<close>` at the start.
+fn class_run_then(s: &str, class: &str, close: char) -> Option<usize> {
+    let end = s
+        .char_indices()
+        .find(|(_, c)| !class.contains(*c))
+        .map_or(s.len(), |(i, _)| i);
+    (end > 0 && s[end..].starts_with(close)).then(|| end + close.len_utf8())
+}
+
+/// `[<letter class>]<close>` at the start.
+fn letter_then(s: &str, class: fn(&char) -> bool, close: char) -> Option<usize> {
+    let letter = s.chars().next().filter(class)?;
+    let i = letter.len_utf8();
+    s[i..].starts_with(close).then(|| i + close.len_utf8())
+}
 
 /// docling's `ListItemMarkerProcessor.process_list_item`: the item's original
 /// text is matched against `^(marker)\s(.+)` (DOTALL) for the bullet patterns,
-/// then the numbered ones; a hit splits it into `(marker, text, enumerated)`.
-/// Python's `\s`/`\d` are Unicode-aware, as the `regex` crate's are.
+/// then the numbered ones in order; a hit splits it into
+/// `(marker, text, enumerated)`. `\s` is one Unicode whitespace character and
+/// `.+` everything after it, which must be non-empty.
 fn split_list_marker(text: &str) -> Option<(&str, &str, bool)> {
-    use std::sync::OnceLock;
-    static PATTERNS: OnceLock<Vec<(regex::Regex, bool)>> = OnceLock::new();
-    let patterns = PATTERNS.get_or_init(|| {
-        let bullet_class: String = LIST_BULLET_MARKERS
-            .chars()
-            .map(|c| regex::escape(&c.to_string()))
-            .collect();
-        let mut v = vec![(
-            regex::Regex::new(&format!("(?s)^([{bullet_class}])\\s(.+)"))
-                .expect("bullet marker regex"),
-            false,
-        )];
-        v.extend(LIST_NUMBERED_MARKERS.iter().map(|p| {
-            (
-                regex::Regex::new(&format!("(?s)^({p})\\s(.+)")).expect("numbered marker regex"),
-                true,
-            )
-        }));
-        v
-    });
-    patterns.iter().find_map(|(re, enumerated)| {
-        re.captures(text).map(|c| {
-            (
-                c.get(1).map_or("", |m| m.as_str()),
-                c.get(2).map_or("", |m| m.as_str()),
-                *enumerated,
-            )
-        })
-    })
+    let tail_after = |len: usize| -> Option<&str> {
+        let ws = text[len..].chars().next()?;
+        if !ws.is_whitespace() {
+            return None;
+        }
+        let rest = &text[len + ws.len_utf8()..];
+        (!rest.is_empty()).then_some(rest)
+    };
+    let first = text.chars().next()?;
+    if LIST_BULLET_MARKERS.contains(first) {
+        if let Some(rest) = tail_after(first.len_utf8()) {
+            return Some((&text[..first.len_utf8()], rest, false));
+        }
+    }
+    for matcher in LIST_NUMBERED_MARKERS {
+        for len in matcher(text) {
+            if let Some(rest) = tail_after(len) {
+                return Some((&text[..len], rest, true));
+            }
+        }
+    }
+    None
 }
 
 /// A PDF `list_item` region as docling emits it: `ListItemMarkerProcessor`
@@ -4225,6 +4330,33 @@ mod tests {
             text_of(&super::list_item_node("-5 degrees", loc, false)),
             (false, 0, "-5 degrees".into(), Some("·".into()))
         );
+        // The remaining numbered shapes, first-wins like docling's list.
+        for (input, marker, body) in [
+            ("1.2.3. Deep", "1.2.3.", "Deep"),
+            ("9a) Nine-a", "9a)", "Nine-a"),
+            ("(3.a) Paren", "(3.a)", "Paren"),
+            ("12) Twelve", "12)", "Twelve"),
+            ("(4) Four", "(4)", "Four"),
+            ("[7] Seven", "[7]", "Seven"),
+            ("iv. Roman", "iv.", "Roman"),
+            ("IX. Roman", "IX.", "Roman"),
+            ("b. Letter", "b.", "Letter"),
+            ("B) Letter", "B)", "Letter"),
+        ] {
+            assert_eq!(
+                super::split_list_marker(input),
+                Some((marker, body, true)),
+                "{input}"
+            );
+        }
+        // A `1.2.` whose optional dot would eat the separator backtracks like
+        // Python's regex; a marker with nothing after the whitespace is none.
+        assert_eq!(
+            super::split_list_marker("1.2.\tx"),
+            Some(("1.2.", "x", true))
+        );
+        assert_eq!(super::split_list_marker("1. "), None);
+        assert_eq!(super::split_list_marker("• "), None);
         assert_eq!(
             text_of(&super::list_item_node("Plain item", loc, false)),
             (false, 0, "Plain item".into(), Some("·".into()))
