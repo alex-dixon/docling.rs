@@ -4,7 +4,7 @@ Mistral is a good ...
 
 This
 
-Mistral
+Mistra
 
 The cat sat on the mat ...
 
@@ -12,25 +12,15 @@ The Timestep i Timestep i + 1
 
 Timestep i + 2
 
-.
-
 IS
 
 an
 
-.
-
 IS
 
-cat sat
-
-.
-
-IS
+cat sat on IS
 
 an
-
-.
 
 IS
 
@@ -38,20 +28,12 @@ a
 
 This
 
-Mistral the cat sat
-
-.
-
-IS
+Mistra the cat sat on IS
 
 an
-
-.
 
 IS
 
 a
 
-of
-
-Mistral the mat sat on example on example good on
+lexample of Mistra the mat example good sat on

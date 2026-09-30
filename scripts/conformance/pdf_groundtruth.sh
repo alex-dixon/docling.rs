@@ -43,8 +43,10 @@ cargo build --release --quiet -p docling-cli
 BIN=./target/release/docling-rs
 # Upstream generates tests/data/pdf/groundtruth with `do_ocr=False`
 # (tests/test_e2e_conversion.py: layout + TableFormer with cell matching, no
-# OCR), so the pipeline runs the same way — layout and tables, never OCR.
-BIN_ARGS=(--skip-ocr)
+# OCR) and serializes it with `export_to_markdown(compact_tables=True)`
+# (tests/verify_utils.py), so the pipeline runs the same way — layout and
+# tables, never OCR, unpadded `| - |` tables.
+BIN_ARGS=(--skip-ocr --compact-tables)
 
 # Collapse whitespace runs to a single space (and trim) so a spacing-only diff —
 # e.g. docling's spurious double space in amt's `up to  1 / 4`, where our

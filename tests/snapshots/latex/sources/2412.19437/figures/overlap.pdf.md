@@ -2,13 +2,17 @@
 
 <!-- image -->
 
-<!-- image -->
-
 Communication
 
 <!-- image -->
 
+<!-- image -->
+
+Time
+
 ➔
+
+<!-- image -->
 
 <!-- image -->
 

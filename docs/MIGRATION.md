@@ -393,10 +393,13 @@ These are deliberate or unavoidable divergences, not bugs.
 4. **Tables use docling-core's padded GitHub format.** All backends emit the
    width-padded `tabulate(tablefmt="github")` tables that current published
    docling produces (columns padded to header-width+2 or the widest data cell,
-   numeric columns right-aligned). The PDF groundtruth was regenerated from live
-   docling to match. (An earlier compact `| - |` variant — to match a stale
-   committed corpus — was reverted; the `compact_tables` option still exists but
-   no backend sets it.)
+   numeric columns right-aligned). The `compact_tables` option (`--compact-tables`,
+   the serve/Python/Node option) renders the unpadded `| - |` form of
+   `export_to_markdown(compact_tables=True)` on every path, streaming included.
+   The committed **PDF groundtruth is upstream's own** (`tests/data/pdf/groundtruth`,
+   which docling's test suite writes with `compact_tables=True` and `do_ocr=False`),
+   so `scripts/conformance/pdf_groundtruth.sh` scores the pipeline with
+   `--compact-tables --skip-ocr`; every other format's groundtruth is padded.
 
 5. **The PDF pipeline is discriminative and byte-measured.** Ported from
    docling's standard pipeline:

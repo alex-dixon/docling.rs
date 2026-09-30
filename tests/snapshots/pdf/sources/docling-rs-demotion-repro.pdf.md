@@ -1,8 +1,8 @@
-## Monthly Concrete Pour Volume vs. Plan
+## MonthlyConcretePourVolumevs.Plan
 
-Projectreadinessindicatoractualplacementstrackedagainstthe baselinescheduleforthereportingperiod(cubicmetres).
+Project readiness indicator-actual placements tracked against the baseline schedule for the reporting period (cubic metres)
 
-Table1.Pour volume by month (m3)
+Table1.Pourvolumebymonth(m3)
 
 <!-- image -->
 

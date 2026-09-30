@@ -1,35 +1,15 @@
-BF16V.s.FP8on16BDeepSeek-V2
+BF16v.s.FP8on16BDeepSeek-V2
 
 BF16V.s.FP8on230BDeepSeek-V2
 
-1.8.
+I
 
-200
+0
 
-400
+20
 
-00
-
-800
-
-000
-
-1200
-
-Tokens/B
+-
 
 100
 
-.
-
-500
-
-500
-
-000
-
-000
-
-Tokens/B
-
-1.70
+okens/e Tokens Se
