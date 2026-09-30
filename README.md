@@ -96,8 +96,8 @@ stack. Image-only pages — scans — are rasterized in pure Rust, byte for byte
 what pdfium renders (its stretch engine and a libjpeg-exact JPEG decoder,
 ported; `DOCLING_RS_SCAN_RASTER=pdfium` switches back). pdfium is a fallback
 only: the raster of a born-digital page when the plugin is not installed, the
-text layer of a file the Rust parser cannot read, and the image codecs the
-Rust raster lacks (JPX, JBIG2, CCITT); a checkout with `.docling-parse/` and
+text layer of a file the Rust parser cannot read, and the two image codecs
+the Rust raster lacks (JPX, JBIG2); a checkout with `.docling-parse/` and
 no `libpdfium` converts PDFs end to end, one with `.models/` alone converts
 scans (`docs/PDF_CONFORMANCE.md`, "Retiring pdfium"). TableFormer is ported
 to ONNX and run on every detected table region to recover its structure;

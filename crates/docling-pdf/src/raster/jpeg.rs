@@ -10,10 +10,13 @@
 //! conversion. The pixel differences are ±1, invisible — and exactly what a
 //! byte-for-byte oracle against pdfium's raster cannot tolerate. So this is a
 //! deliberately small decoder: baseline and progressive Huffman, 8-bit,
-//! 1 or 3 components, restart intervals; everything else (arithmetic coding,
-//! 12-bit, lossless, CMYK/YCCK, DNL) is reported as unsupported and the page
-//! stays with pdfium. Checked against Pillow's libjpeg-turbo on the fixtures
-//! of `tests/data/jpeg/` (`tests::matches_libjpeg_on_the_fixtures`).
+//! 1 or 3 components, restart intervals, and libjpeg's `1/2`, `1/4`, `1/8`
+//! DCT-scaled output (`jidctred.c`'s 4×4/2×2/1×1 transforms with
+//! `jdmaster.c`'s per-component scaling and the scaled upsampler rules);
+//! everything else (arithmetic coding, 12-bit, lossless, CMYK/YCCK, DNL) is
+//! reported as unsupported and the page stays with pdfium. Checked against
+//! Pillow's libjpeg-turbo on the fixtures of `tests/data/jpeg/`
+//! (`tests::matches_libjpeg_on_the_fixtures`).
 
 /// A decoded image: `channels` is 1 (gray) or 3 (RGB, or the raw component
 /// triplets when no colour transform applies), rows of `width` pixels.
@@ -224,13 +227,18 @@ struct Component {
     /// Blocks per line / rows of the padded (whole-MCU) grid.
     bw: usize,
     bh: usize,
-    /// `downsampled_width/height`: `ceil(X·h/hmax)`, `ceil(Y·v/vmax)`.
+    /// `downsampled_width/height` after IDCT scaling:
+    /// `ceil(X·h·dct/(hmax·8))`, `ceil(Y·v·dct/(vmax·8))`.
     dw: usize,
     dh: usize,
+    /// `DCT_scaled_size`: the IDCT output size per block (8, 4, 2 or 1) —
+    /// libjpeg scales chroma up through the IDCT rather than the upsampler
+    /// where the sampling ratios allow (`jpeg_calc_output_dimensions`).
+    dct: usize,
     /// Coefficients in natural order, `bw·bh` blocks of 64 (progressive
     /// accumulates here; baseline reconstructs each block on the spot).
     coefs: Vec<i16>,
-    /// Reconstructed samples, `bw·8` × `bh·8`.
+    /// Reconstructed samples, `bw·dct` × `bh·dct`.
     samples: Vec<u8>,
     dc_tbl: usize,
     ac_tbl: usize,
@@ -262,11 +270,13 @@ struct Decoder<'a> {
     saw_jfif: bool,
     adobe_transform: Option<u8>,
     eobrun: u32,
+    /// `min_DCT_scaled_size` for the requested `1/scale_denom`: 8, 4, 2 or 1.
+    min_dct: usize,
 }
 
 /// Read the frame header only.
 pub fn info(data: &[u8]) -> Result<Info, Error> {
-    let mut d = Decoder::new(data);
+    let mut d = Decoder::new(data, 1)?;
     d.run(true)?;
     Ok(Info {
         width: d.width,
@@ -275,19 +285,30 @@ pub fn info(data: &[u8]) -> Result<Info, Error> {
     })
 }
 
-/// Decode `data`; `color_transform` is the PDF's `/ColorTransform` decode
-/// parameter (default 1), which pdfium forces on when an Adobe marker is
-/// present and otherwise uses to decide whether a 3-component image is
+/// Decode `data` at `1/scale_denom` (1, 2, 4 or 8 — libjpeg's DCT scaling,
+/// which pdfium requests for an image at least twice the bitmap's size:
+/// `resolution_levels_to_skip`); the output is `ceil(w/scale_denom)` ×
+/// `ceil(h/scale_denom)`. `color_transform` is the PDF's `/ColorTransform`
+/// decode parameter (default 1), which pdfium forces on when an Adobe marker
+/// is present and otherwise uses to decide whether a 3-component image is
 /// converted from YCbCr or handed over raw.
-pub fn decode(data: &[u8], color_transform: bool) -> Result<Image, Error> {
-    let mut d = Decoder::new(data);
+pub fn decode(data: &[u8], color_transform: bool, scale_denom: u32) -> Result<Image, Error> {
+    let mut d = Decoder::new(data, scale_denom)?;
     d.run(false)?;
     d.finish(color_transform)
 }
 
 impl<'a> Decoder<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Decoder {
+    fn new(data: &'a [u8], scale_denom: u32) -> Result<Self, Error> {
+        // `jpeg_core_output_dimensions` for `scale_num = 1`.
+        let min_dct = match scale_denom {
+            1 => 8,
+            2 => 4,
+            4 => 2,
+            8 => 1,
+            _ => return Err(Error::Unsupported("DCT scale")),
+        };
+        Ok(Decoder {
             data,
             qt: [[0; 64]; 4],
             qt_present: [false; 4],
@@ -305,7 +326,8 @@ impl<'a> Decoder<'a> {
             saw_jfif: false,
             adobe_transform: None,
             eobrun: 0,
-        }
+            min_dct,
+        })
     }
 
     fn u16_at(&self, p: usize) -> Result<usize, Error> {
@@ -438,6 +460,7 @@ impl<'a> Decoder<'a> {
                 bh: 0,
                 dw: 0,
                 dh: 0,
+                dct: 8,
                 coefs: Vec::new(),
                 samples: Vec::new(),
                 dc_tbl: 0,
@@ -449,7 +472,7 @@ impl<'a> Decoder<'a> {
         self.vmax = self.comps.iter().map(|c| c.v).max().unwrap_or(1);
         self.mcux = self.width.div_ceil(8 * self.hmax);
         self.mcuy = self.height.div_ceil(8 * self.vmax);
-        let (w, h, hmax, vmax, mcux, mcuy, progressive) = (
+        let (w, h, hmax, vmax, mcux, mcuy, progressive, min_dct) = (
             self.width,
             self.height,
             self.hmax,
@@ -457,12 +480,23 @@ impl<'a> Decoder<'a> {
             self.mcux,
             self.mcuy,
             self.progressive,
+            self.min_dct,
         );
         for c in &mut self.comps {
             c.bw = mcux * c.h;
             c.bh = mcuy * c.v;
-            c.dw = (w * c.h).div_ceil(hmax);
-            c.dh = (h * c.v).div_ceil(vmax);
+            // `jpeg_calc_output_dimensions`: scale a subsampled component up
+            // through the IDCT while the ratios stay integral.
+            let mut ssize = min_dct;
+            while ssize < 8
+                && (hmax * min_dct).is_multiple_of(c.h * ssize * 2)
+                && (vmax * min_dct).is_multiple_of(c.v * ssize * 2)
+            {
+                ssize *= 2;
+            }
+            c.dct = ssize;
+            c.dw = (w * c.h * c.dct).div_ceil(hmax * 8);
+            c.dh = (h * c.v * c.dct).div_ceil(vmax * 8);
             let blocks = c.bw * c.bh;
             if blocks > (1usize << 26) {
                 return Err(Error::Unsupported("image too large"));
@@ -470,7 +504,7 @@ impl<'a> Decoder<'a> {
             if progressive {
                 c.coefs = vec![0; blocks * 64];
             }
-            c.samples = vec![0; blocks * 64];
+            c.samples = vec![0; blocks * c.dct * c.dct];
         }
         Ok(())
     }
@@ -673,7 +707,7 @@ impl<'a> Decoder<'a> {
             }
             let q = &self.qt[self.comps[ci].tq.min(3)];
             let c = &mut self.comps[ci];
-            idct_islow(&coef, q, &mut c.samples, bi, bw);
+            idct(c.dct, &coef, q, &mut c.samples, bi, bw);
             return Ok(());
         }
 
@@ -815,13 +849,17 @@ impl<'a> Decoder<'a> {
                 for bi in 0..c.bw * c.bh {
                     let mut coef = [0i16; 64];
                     coef.copy_from_slice(&c.coefs[bi * 64..bi * 64 + 64]);
-                    idct_islow(&coef, &q, &mut c.samples, bi, bw);
+                    idct(c.dct, &coef, &q, &mut c.samples, bi, bw);
                 }
                 c.coefs = Vec::new();
             }
         }
-        let (w, h) = (self.width, self.height);
-        let planes: Vec<Vec<u8>> = self.comps.iter().map(|c| self.upsample(c)).collect();
+        // `output_width/height`: `ceil(dim · min_DCT_scaled_size / 8)`.
+        let (w, h) = (
+            (self.width * self.min_dct).div_ceil(8),
+            (self.height * self.min_dct).div_ceil(8),
+        );
+        let planes: Vec<Vec<u8>> = self.comps.iter().map(|c| self.upsample(c, w, h)).collect();
         let n = self.comps.len();
         let space = self.color_space();
         // pdfium: the /ColorTransform parameter, forced on by an Adobe marker;
@@ -880,65 +918,48 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// One component to the full image size (`jdsample.c`, `do_fancy`): the
-    /// triangle filters for 2:1 horizontal/vertical, replication otherwise,
-    /// with libjpeg's edge rules (the row above the first / below the last is
-    /// the edge row itself; the last column repeats).
-    fn upsample(&self, c: &Component) -> Vec<u8> {
-        let (w, h) = (self.width, self.height);
-        let stride = c.bw * 8;
+    /// One component to the output size (`jinit_upsampler`): input groups
+    /// of `h·dct/min_dct` × `v·dct/min_dct` samples become `hmax` × `vmax`
+    /// — the triangle filters for 2:1 (only while `do_fancy`, i.e. the IDCT
+    /// still produces more than one sample per block, and the row is wider
+    /// than 2), replication otherwise, with libjpeg's edge rules (the row
+    /// above the first / below the last is the edge row itself; the last
+    /// column repeats).
+    fn upsample(&self, c: &Component, w: usize, h: usize) -> Vec<u8> {
+        let stride = c.bw * c.dct;
         let (dw, dh) = (c.dw, c.dh);
         let row = |r: usize| -> &[u8] {
             let r = r.min(dh.saturating_sub(1));
             &c.samples[r * stride..r * stride + dw]
         };
-        let h_exp = self.hmax / c.h;
-        let v_exp = self.vmax / c.v;
-        let exact = self.hmax.is_multiple_of(c.h) && self.vmax.is_multiple_of(c.v);
+        let h_in = c.h * c.dct / self.min_dct;
+        let v_in = c.v * c.dct / self.min_dct;
+        let (h_out, v_out) = (self.hmax, self.vmax);
+        let do_fancy = self.min_dct > 1;
         let mut out = vec![0u8; w * h];
-        if h_exp == 1 && v_exp == 1 {
+        let replicate = |out: &mut Vec<u8>, h_exp: usize, v_exp: usize| {
+            for y in 0..h {
+                let src = row(y / v_exp);
+                for x in 0..w {
+                    out[y * w + x] = src[(x / h_exp).min(dw - 1)];
+                }
+            }
+        };
+        if h_in == h_out && v_in == v_out {
             for y in 0..h {
                 out[y * w..y * w + w].copy_from_slice(&row(y)[..w]);
             }
-        } else if h_exp == 2 && v_exp == 1 && exact {
-            let mut line = vec![0u8; dw * 2];
-            for y in 0..h {
-                if dw > 2 {
+        } else if h_in * 2 == h_out && v_in == v_out {
+            if do_fancy && dw > 2 {
+                let mut line = vec![0u8; dw * 2];
+                for y in 0..h {
                     h2v1_fancy(row(y), &mut line);
-                } else {
-                    for (i, &v) in row(y).iter().enumerate() {
-                        line[2 * i] = v;
-                        line[2 * i + 1] = v;
-                    }
-                }
-                out[y * w..y * w + w].copy_from_slice(&line[..w]);
-            }
-        } else if h_exp == 2 && v_exp == 2 && exact {
-            let mut line = vec![0u8; dw * 2];
-            for r in 0..dh {
-                for v in 0..2 {
-                    let y = 2 * r + v;
-                    if y >= h {
-                        break;
-                    }
-                    let near = row(r);
-                    let far = if v == 0 {
-                        row(r.saturating_sub(1))
-                    } else {
-                        row(r + 1)
-                    };
-                    if dw > 2 {
-                        h2v2_fancy(near, far, &mut line);
-                    } else {
-                        for (i, &v) in near.iter().enumerate() {
-                            line[2 * i] = v;
-                            line[2 * i + 1] = v;
-                        }
-                    }
                     out[y * w..y * w + w].copy_from_slice(&line[..w]);
                 }
+            } else {
+                replicate(&mut out, 2, 1);
             }
-        } else if h_exp == 1 && v_exp == 2 && exact {
+        } else if h_in == h_out && v_in * 2 == v_out && do_fancy {
             for r in 0..dh {
                 for v in 0..2 {
                     let y = 2 * r + v;
@@ -958,15 +979,34 @@ impl<'a> Decoder<'a> {
                     }
                 }
             }
-        } else {
-            // `int_upsample`: plain replication (any integral ratio).
-            let (h_exp, v_exp) = (h_exp.max(1), v_exp.max(1));
-            for y in 0..h {
-                let src = row(y / v_exp);
-                for x in 0..w {
-                    out[y * w + x] = src[(x / h_exp).min(dw - 1)];
+        } else if h_in * 2 == h_out && v_in * 2 == v_out {
+            if do_fancy && dw > 2 {
+                let mut line = vec![0u8; dw * 2];
+                for r in 0..dh {
+                    for v in 0..2 {
+                        let y = 2 * r + v;
+                        if y >= h {
+                            break;
+                        }
+                        let near = row(r);
+                        let far = if v == 0 {
+                            row(r.saturating_sub(1))
+                        } else {
+                            row(r + 1)
+                        };
+                        h2v2_fancy(near, far, &mut line);
+                        out[y * w..y * w + w].copy_from_slice(&line[..w]);
+                    }
                 }
+            } else {
+                replicate(&mut out, 2, 2);
             }
+        } else if h_in > 0 && v_in > 0 && h_out.is_multiple_of(h_in) && v_out.is_multiple_of(v_in) {
+            // `int_upsample`: plain replication (any integral ratio).
+            replicate(&mut out, h_out / h_in, v_out / v_in);
+        } else {
+            // `JERR_FRACT_SAMPLE_NOTIMPL`: libjpeg refuses; leave the plane
+            // black rather than guess.
         }
         out
     }
@@ -1057,12 +1097,169 @@ fn idct_range_limit(x: i32) -> u8 {
     }
 }
 
+/// The IDCT for a block at `DCT_scaled_size` `dct` (`jddctmgr.c`: 8 →
+/// `jpeg_idct_islow`, 4/2/1 → the `jidctred.c` reduced-size transforms,
+/// which always use the islow-style dequantization), writing the `dct` ×
+/// `dct` output of block `bi` into a plane `bw` blocks wide.
+fn idct(dct: usize, coef: &[i16; 64], q: &[u16; 64], samples: &mut [u8], bi: usize, bw: usize) {
+    match dct {
+        8 => idct_islow(coef, q, samples, bi, bw),
+        4 => idct_4x4(coef, q, samples, bi, bw),
+        2 => idct_2x2(coef, q, samples, bi, bw),
+        _ => idct_1x1(coef, q, samples, bi, bw),
+    }
+}
+
+const CONST_BITS: i32 = 13;
+const PASS1_BITS: i32 = 2;
+
+#[inline(always)]
+fn descale(x: i32, n: i32) -> i32 {
+    x.wrapping_add(1 << (n - 1)) >> n
+}
+
+#[inline(always)]
+fn mul(a: i32, b: i32) -> i32 {
+    a.wrapping_mul(b)
+}
+
+/// `jpeg_idct_4x4` (jidctred.c): a 4×4 output from the 8×8 block, column 4
+/// never examined.
+fn idct_4x4(coef: &[i16; 64], q: &[u16; 64], samples: &mut [u8], bi: usize, bw: usize) {
+    const FIX_0_211164243: i32 = 1730;
+    const FIX_0_509795579: i32 = 4176;
+    const FIX_0_601344887: i32 = 4926;
+    const FIX_0_765366865: i32 = 6270;
+    const FIX_0_899976223: i32 = 7373;
+    const FIX_1_061594337: i32 = 8697;
+    const FIX_1_451774981: i32 = 11893;
+    const FIX_1_847759065: i32 = 15137;
+    const FIX_2_172734803: i32 = 17799;
+    const FIX_2_562915447: i32 = 20995;
+    let dq = |k: usize| i32::from(coef[k]).wrapping_mul(i32::from(q[k]));
+    let mut ws = [0i32; 32]; // 4 rows × 8 columns
+    for col in 0..8 {
+        if col == 4 {
+            continue;
+        }
+        if [1, 2, 3, 5, 6, 7].iter().all(|&r| coef[r * 8 + col] == 0) {
+            let dc = dq(col) << PASS1_BITS;
+            for r in 0..4 {
+                ws[r * 8 + col] = dc;
+            }
+            continue;
+        }
+        let tmp0 = dq(col) << (CONST_BITS + 1);
+        let z2 = dq(2 * 8 + col);
+        let z3 = dq(6 * 8 + col);
+        let tmp2 = mul(z2, FIX_1_847759065).wrapping_add(mul(z3, -FIX_0_765366865));
+        let tmp10 = tmp0.wrapping_add(tmp2);
+        let tmp12 = tmp0.wrapping_sub(tmp2);
+        let z1 = dq(7 * 8 + col);
+        let z2 = dq(5 * 8 + col);
+        let z3 = dq(3 * 8 + col);
+        let z4 = dq(8 + col);
+        let tmp0 = mul(z1, -FIX_0_211164243)
+            .wrapping_add(mul(z2, FIX_1_451774981))
+            .wrapping_add(mul(z3, -FIX_2_172734803))
+            .wrapping_add(mul(z4, FIX_1_061594337));
+        let tmp2 = mul(z1, -FIX_0_509795579)
+            .wrapping_add(mul(z2, -FIX_0_601344887))
+            .wrapping_add(mul(z3, FIX_0_899976223))
+            .wrapping_add(mul(z4, FIX_2_562915447));
+        let n = CONST_BITS - PASS1_BITS + 1;
+        ws[col] = descale(tmp10.wrapping_add(tmp2), n);
+        ws[3 * 8 + col] = descale(tmp10.wrapping_sub(tmp2), n);
+        ws[8 + col] = descale(tmp12.wrapping_add(tmp0), n);
+        ws[2 * 8 + col] = descale(tmp12.wrapping_sub(tmp0), n);
+    }
+    let stride = bw * 4;
+    let (bx, by) = (bi % bw, bi / bw);
+    for row in 0..4 {
+        let w = &ws[row * 8..row * 8 + 8];
+        let off = (by * 4 + row) * stride + bx * 4;
+        let out = &mut samples[off..off + 4];
+        if [1, 2, 3, 5, 6, 7].iter().all(|&k| w[k] == 0) {
+            out.fill(idct_range_limit(descale(w[0], PASS1_BITS + 3)));
+            continue;
+        }
+        let tmp0 = w[0] << (CONST_BITS + 1);
+        let tmp2 = mul(w[2], FIX_1_847759065).wrapping_add(mul(w[6], -FIX_0_765366865));
+        let tmp10 = tmp0.wrapping_add(tmp2);
+        let tmp12 = tmp0.wrapping_sub(tmp2);
+        let (z1, z2, z3, z4) = (w[7], w[5], w[3], w[1]);
+        let tmp0 = mul(z1, -FIX_0_211164243)
+            .wrapping_add(mul(z2, FIX_1_451774981))
+            .wrapping_add(mul(z3, -FIX_2_172734803))
+            .wrapping_add(mul(z4, FIX_1_061594337));
+        let tmp2 = mul(z1, -FIX_0_509795579)
+            .wrapping_add(mul(z2, -FIX_0_601344887))
+            .wrapping_add(mul(z3, FIX_0_899976223))
+            .wrapping_add(mul(z4, FIX_2_562915447));
+        let n = CONST_BITS + PASS1_BITS + 3 + 1;
+        out[0] = idct_range_limit(descale(tmp10.wrapping_add(tmp2), n));
+        out[3] = idct_range_limit(descale(tmp10.wrapping_sub(tmp2), n));
+        out[1] = idct_range_limit(descale(tmp12.wrapping_add(tmp0), n));
+        out[2] = idct_range_limit(descale(tmp12.wrapping_sub(tmp0), n));
+    }
+}
+
+/// `jpeg_idct_2x2` (jidctred.c): columns 2, 4, 6 never examined.
+fn idct_2x2(coef: &[i16; 64], q: &[u16; 64], samples: &mut [u8], bi: usize, bw: usize) {
+    const FIX_0_720959822: i32 = 5906;
+    const FIX_0_850430095: i32 = 6967;
+    const FIX_1_272758580: i32 = 10426;
+    const FIX_3_624509785: i32 = 29692;
+    let dq = |k: usize| i32::from(coef[k]).wrapping_mul(i32::from(q[k]));
+    let mut ws = [0i32; 16]; // 2 rows × 8 columns
+    for col in [0usize, 1, 3, 5, 7] {
+        if [1, 3, 5, 7].iter().all(|&r| coef[r * 8 + col] == 0) {
+            let dc = dq(col) << PASS1_BITS;
+            ws[col] = dc;
+            ws[8 + col] = dc;
+            continue;
+        }
+        let tmp10 = dq(col) << (CONST_BITS + 2);
+        let tmp0 = mul(dq(7 * 8 + col), -FIX_0_720959822)
+            .wrapping_add(mul(dq(5 * 8 + col), FIX_0_850430095))
+            .wrapping_add(mul(dq(3 * 8 + col), -FIX_1_272758580))
+            .wrapping_add(mul(dq(8 + col), FIX_3_624509785));
+        let n = CONST_BITS - PASS1_BITS + 2;
+        ws[col] = descale(tmp10.wrapping_add(tmp0), n);
+        ws[8 + col] = descale(tmp10.wrapping_sub(tmp0), n);
+    }
+    let stride = bw * 2;
+    let (bx, by) = (bi % bw, bi / bw);
+    for row in 0..2 {
+        let w = &ws[row * 8..row * 8 + 8];
+        let off = (by * 2 + row) * stride + bx * 2;
+        let out = &mut samples[off..off + 2];
+        if [1, 3, 5, 7].iter().all(|&k| w[k] == 0) {
+            out.fill(idct_range_limit(descale(w[0], PASS1_BITS + 3)));
+            continue;
+        }
+        let tmp10 = w[0] << (CONST_BITS + 2);
+        let tmp0 = mul(w[7], -FIX_0_720959822)
+            .wrapping_add(mul(w[5], FIX_0_850430095))
+            .wrapping_add(mul(w[3], -FIX_1_272758580))
+            .wrapping_add(mul(w[1], FIX_3_624509785));
+        let n = CONST_BITS + PASS1_BITS + 3 + 2;
+        out[0] = idct_range_limit(descale(tmp10.wrapping_add(tmp0), n));
+        out[1] = idct_range_limit(descale(tmp10.wrapping_sub(tmp0), n));
+    }
+}
+
+/// `jpeg_idct_1x1`: the DC term, one eighth.
+fn idct_1x1(coef: &[i16; 64], q: &[u16; 64], samples: &mut [u8], bi: usize, bw: usize) {
+    let dc = descale(i32::from(coef[0]).wrapping_mul(i32::from(q[0])), 3);
+    let (bx, by) = (bi % bw, bi / bw);
+    samples[by * bw + bx] = idct_range_limit(dc);
+}
+
 /// `jpeg_idct_islow` (jidctint.c): the accurate integer inverse DCT with its
 /// exact fixed-point constants and descaling, writing the dequantized block
 /// `bi` of a `bw`-blocks-wide plane.
 fn idct_islow(coef: &[i16; 64], q: &[u16; 64], samples: &mut [u8], bi: usize, bw: usize) {
-    const CONST_BITS: i32 = 13;
-    const PASS1_BITS: i32 = 2;
     const FIX_0_298631336: i32 = 2446;
     const FIX_0_390180644: i32 = 3196;
     const FIX_0_541196100: i32 = 4433;
@@ -1075,15 +1272,6 @@ fn idct_islow(coef: &[i16; 64], q: &[u16; 64], samples: &mut [u8], bi: usize, bw
     const FIX_2_053119869: i32 = 16819;
     const FIX_2_562915447: i32 = 20995;
     const FIX_3_072711026: i32 = 25172;
-
-    #[inline(always)]
-    fn descale(x: i32, n: i32) -> i32 {
-        x.wrapping_add(1 << (n - 1)) >> n
-    }
-    #[inline(always)]
-    fn mul(a: i32, b: i32) -> i32 {
-        a.wrapping_mul(b)
-    }
 
     let dq = |k: usize| i32::from(coef[k]).wrapping_mul(i32::from(q[k]));
     let mut ws = [0i32; 64];
@@ -1236,7 +1424,7 @@ mod tests {
     fn matches_libjpeg_on_the_fixtures() {
         let mut failures = Vec::new();
         for (name, jpg, reference) in fixtures() {
-            let img = decode(&jpg, true).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let img = decode(&jpg, true, 1).unwrap_or_else(|e| panic!("{name}: {e:?}"));
             let want: Vec<u8> = if img.channels == 1 {
                 reference.to_luma8().into_raw()
             } else {
@@ -1276,6 +1464,38 @@ mod tests {
             (i.width, i.height, i.components),
             (reference.width() as usize, reference.height() as usize, 3)
         );
+    }
+
+    /// Reduced-scale decoding: the output is `ceil(w/N)` × `ceil(h/N)`, and
+    /// at 1/8 every block collapses to its DC — the mean of the 8×8 full
+    /// decode within a tolerance of quantization.
+    #[test]
+    fn reduced_scales_have_the_right_size_and_dc() {
+        let (_, jpg, _) = fixtures()
+            .into_iter()
+            .find(|(n, _, _)| n == "rgb_420_big")
+            .unwrap();
+        let full = decode(&jpg, true, 1).unwrap();
+        for denom in [2usize, 4, 8] {
+            let img = decode(&jpg, true, denom as u32).unwrap();
+            assert_eq!(img.width, full.width.div_ceil(denom));
+            assert_eq!(img.height, full.height.div_ceil(denom));
+            assert_eq!(img.channels, 3);
+        }
+        let eighth = decode(&jpg, true, 8).unwrap();
+        // Block (0,0): the mean of the full decode's first 8×8 luma-ish block,
+        // per channel, within a few levels.
+        for c in 0..3 {
+            let mut sum = 0u32;
+            for y in 0..8 {
+                for x in 0..8 {
+                    sum += u32::from(full.data[(y * full.width + x) * 3 + c]);
+                }
+            }
+            let mean = (sum / 64) as i32;
+            let got = i32::from(eighth.data[c]);
+            assert!((got - mean).abs() <= 6, "channel {c}: {got} vs mean {mean}");
+        }
     }
 
     #[test]

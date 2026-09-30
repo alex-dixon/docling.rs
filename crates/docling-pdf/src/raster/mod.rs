@@ -9,14 +9,17 @@
 //!
 //! * the content stream — through Form XObjects, with their `/Matrix` and
 //!   `/BBox` — draws nothing but images: `q`/`Q`/`cm`, rectangular `re W n`
-//!   clips, ExtGStates that change nothing visible, invisible (`3 Tr`) text;
-//!   a painted path, shading, inline image, non-rectangular clip, visible
-//!   text, or a soft mask/blend/alpha declines the page;
-//! * each image is 1- or 8-bit DeviceGray/CalGray, or 8-bit
-//!   DeviceRGB/CalRGB/sRGB-ICC, without `/SMask`/`/Mask`/`/ImageMask`, in a
-//!   filter chain this module decodes (Flate/LZW/RunLength/ASCII with
-//!   predictors, and `DCTDecode` through [`jpeg`]); JPX, JBIG2, CCITT, CMYK,
-//!   Indexed and non-sRGB ICC images stay with pdfium;
+//!   clips, ExtGStates that change nothing visible, invisible (`3 Tr`) text,
+//!   fill colours in DeviceGray/DeviceRGB (for stencil masks); a painted
+//!   path, shading, inline image, non-rectangular clip, visible text, or a
+//!   soft mask/blend/alpha declines the page;
+//! * each image is 1/2/4/8-bit DeviceGray/CalGray, 8-bit
+//!   DeviceRGB/CalRGB/sRGB-ICC, Indexed over one of those, or a 1-bit
+//!   `/ImageMask` stencil, without `/SMask`/`/Mask`, in a filter chain this
+//!   module decodes (Flate/LZW/RunLength/ASCII with predictors, `DCTDecode`
+//!   through [`jpeg`] — at pdfium's reduced DCT scale when the image is at
+//!   least twice the bitmap — and `CCITTFaxDecode` through [`fax`]); JPX,
+//!   JBIG2, CMYK/Lab/Separation and non-sRGB ICC images stay with pdfium;
 //! * the image matrix is axis-aligned or a 90° rotation — pdfium's
 //!   `CFX_AggImageRenderer` stretch paths, both ported in [`stretch`]; a
 //!   general affine placement (its `CFX_ImageTransformer`) declines.
@@ -27,11 +30,15 @@
 //! the image's device rectangle, the rectangular-clip shortcut of
 //! `CFX_AggDeviceDriver::SetClip_PathFill`, the flips and swapped clip of a
 //! 90° placement, and the image's own decode/palette rules of `CPDF_DIB`
-//! (a `/Decode [1 0]` gray image inverts before the stretch, a 1-bit one
-//! after it, the way pdfium's palettes fall). The oracle is pdfium itself:
-//! `tests::matches_pdfium_on_the_scanned_fixtures` compares against
-//! `render_with_config` when the library is installed.
+//! (`/Decode` and Indexed lookups become the 2ⁿ-entry palette pdfium
+//! builds — applied before the stretch for 2–8-bit samples, after it through
+//! the 256-step ramp for 1-bit ones — a stencil mask is stretched to 8-bit
+//! coverage and merged with the fill colour as `CompositeRow_ByteMask2Rgb`
+//! does). The oracle is pdfium itself: the tests compare against
+//! `render_with_config` on the scanned fixtures and on synthesized pages
+//! covering every image kind, when the library is installed.
 
+pub mod fax;
 pub mod filters;
 pub mod jpeg;
 pub mod stretch;
@@ -202,6 +209,12 @@ fn sat(v: f32) -> i32 {
     }
 }
 
+/// `FXSYS_roundf(clamp(v, 0, 1) · 255)`: a colour component to a byte the
+/// way `CPDF_Color::GetColorRef` and `CPDF_DIB::LoadPalette` do it.
+fn to_byte(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 /// One image placement in device space.
 struct Draw {
     stream: ObjectId,
@@ -209,6 +222,17 @@ struct Draw {
     matrix: M,
     /// Device clip at the time of `Do` (integer, from the rectangular clips).
     clip: Rect,
+    /// The fill colour at `Do` (a stencil mask paints with it); `None` when
+    /// it was set through a colour space this module does not convert.
+    fill: Option<[u8; 3]>,
+}
+
+/// The fill colour space `sc`/`scn` operands are read in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FillCs {
+    Gray,
+    Rgb,
+    Other,
 }
 
 /// The graphics state the walk tracks (`CPDF_AllStates` subset).
@@ -218,6 +242,10 @@ struct GState {
     clip: Rect,
     /// `Tr` — only invisible text (3) is tolerated.
     text_render: i64,
+    /// pdfium's `fill_color_ref_` (black by default); `None` once a colour
+    /// this module cannot reproduce (CMYK, patterns, …) was set.
+    fill: Option<[u8; 3]>,
+    fill_cs: FillCs,
 }
 
 /// Rendering context of one content stream: the `mtObj2Device` its objects
@@ -320,6 +348,44 @@ fn extgstate_is_neutral(doc: &Document, gs: &Dictionary) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The fill colour space a `cs` operand selects, as far as `sc` values can
+/// be converted here (`CPDF_StreamContentParser::FindColorSpace` +
+/// `CPDF_Color::GetRGB`): the device gray/RGB spaces (unless the resources
+/// override them with `/DefaultGray`/`/DefaultRGB`), CalGray (pdfium ignores
+/// its gamma), a CalRGB without `/Gamma`/`/Matrix`, the sRGB ICC profile.
+fn fill_cs_of(ctx: &Ctx<'_>, name: &[u8]) -> FillCs {
+    match name {
+        b"DeviceGray" | b"DeviceRGB" => {
+            let default: &[u8] = if name == b"DeviceGray" {
+                b"DefaultGray"
+            } else {
+                b"DefaultRGB"
+            };
+            if find_resource(ctx, b"ColorSpace", default).is_some() {
+                return FillCs::Other;
+            }
+            if name == b"DeviceGray" {
+                FillCs::Gray
+            } else {
+                FillCs::Rgb
+            }
+        }
+        b"DeviceCMYK" | b"Pattern" => FillCs::Other,
+        other => {
+            let Some(obj) = find_resource(ctx, b"ColorSpace", other) else {
+                return FillCs::Other;
+            };
+            match color_space(ctx.doc, obj, None, None) {
+                Ok(Cs::Gray) => FillCs::Gray,
+                Ok(Cs::Rgb {
+                    cal_rgb_with_transform: false,
+                }) => FillCs::Rgb,
+                _ => FillCs::Other,
+            }
+        }
+    }
 }
 
 impl Walker {
@@ -450,10 +516,63 @@ impl Walker {
                         return Err("visible text".into());
                     }
                 }
-                // Colour, line state, marked content, compatibility: no pixels.
-                "g" | "rg" | "k" | "cs" | "sc" | "scn" | "G" | "RG" | "K" | "CS" | "SC" | "SCN"
-                | "w" | "J" | "j" | "M" | "d" | "ri" | "i" | "BMC" | "BDC" | "EMC" | "MP"
-                | "DP" => {}
+                // Fill colour (a stencil mask paints with it); pdfium rounds
+                // each component to a byte when the colour is set.
+                "g" => {
+                    if let Some(v) = args.last().and_then(num) {
+                        let b = to_byte(v);
+                        st.fill = Some([b, b, b]);
+                    }
+                    st.fill_cs = FillCs::Gray;
+                }
+                "rg" => {
+                    if let Some(v) = nums(args).filter(|v| v.len() >= 3) {
+                        let n = v.len();
+                        st.fill = Some([to_byte(v[n - 3]), to_byte(v[n - 2]), to_byte(v[n - 1])]);
+                    }
+                    st.fill_cs = FillCs::Rgb;
+                }
+                "k" => {
+                    // Adobe CMYK → sRGB is a 9⁴-sample table in pdfium.
+                    st.fill = None;
+                    st.fill_cs = FillCs::Other;
+                }
+                "cs" => {
+                    // `cs` selects the space and resets the colour value but
+                    // leaves the cached colour ref alone until `sc`.
+                    st.fill_cs = match args.first() {
+                        Some(Object::Name(n)) => fill_cs_of(ctx, n),
+                        _ => FillCs::Other,
+                    };
+                }
+                "sc" | "scn" => {
+                    if args.iter().any(|a| matches!(a, Object::Name(_))) {
+                        // A pattern.
+                        st.fill = None;
+                    } else {
+                        let v: Vec<f32> = args.iter().filter_map(num).collect();
+                        let v = if v.len() > 4 {
+                            v[v.len() - 4..].to_vec()
+                        } else {
+                            v
+                        };
+                        match st.fill_cs {
+                            FillCs::Gray if !v.is_empty() => {
+                                let b = to_byte(v[0]);
+                                st.fill = Some([b, b, b]);
+                            }
+                            FillCs::Rgb if v.len() >= 3 => {
+                                st.fill = Some([to_byte(v[0]), to_byte(v[1]), to_byte(v[2])]);
+                            }
+                            // Too few operands: pdfium leaves the colour alone.
+                            FillCs::Gray | FillCs::Rgb => {}
+                            FillCs::Other => st.fill = None,
+                        }
+                    }
+                }
+                // Stroke colour, line state, marked content, compatibility: no pixels.
+                "G" | "RG" | "K" | "CS" | "SC" | "SCN" | "w" | "J" | "j" | "M" | "d" | "ri"
+                | "i" | "BMC" | "BDC" | "EMC" | "MP" | "DP" => {}
                 "BX" => compat += 1,
                 "EX" => compat = compat.saturating_sub(1),
                 "Do" => {
@@ -480,6 +599,7 @@ impl Walker {
                             stream: id,
                             matrix: st.ctm.then(ctx.obj2dev),
                             clip: st.clip,
+                            fill: st.fill,
                         });
                     } else if name_is(subtype, b"Form") {
                         self.form(ctx, stream, st)?;
@@ -538,8 +658,7 @@ impl Walker {
         };
         let mut inner_state = GState {
             ctm: form_matrix,
-            clip: st.clip,
-            text_render: st.text_render,
+            ..st
         };
         if let Some(Object::Array(b)) = d.get(b"BBox").ok().map(|o| deref(ctx.doc, o)) {
             let v: Vec<f32> = b.iter().filter_map(|o| num(deref(ctx.doc, o))).collect();
@@ -573,34 +692,60 @@ struct Decoded {
 }
 
 enum Kind {
-    /// 1 bpp with the two-entry palette pdfium builds for a non-default
-    /// `/Decode` (`None` = the stock black/white, no palette).
+    /// 1 bpp (`k1bppRgb`), with the two-entry palette pdfium builds for a
+    /// non-default `/Decode` or an Indexed space (`None` = the stock
+    /// black/white, no palette) — applied through the 256-step ramp after
+    /// the stretch.
     Bilevel {
         data: Vec<u8>,
         stride: usize,
-        palette: Option<[u8; 2]>,
+        palette: Option<[[u8; 3]; 2]>,
     },
+    /// An `/ImageMask` stencil (`k1bppMask`): bit 1 = paint with the fill
+    /// colour, stretched to 8-bit coverage.
+    Mask { data: Vec<u8>, stride: usize },
+    /// 8-bit gray, no palette (`k8bppRgb`).
     Gray8(Vec<u8>),
+    /// 8-bit RGB (`kBgr`), or a paletted image already looked up.
     Rgb8(Vec<u8>),
 }
 
+/// The image colour spaces this module reproduces.
+#[derive(Clone)]
+enum Cs {
+    Gray,
+    Rgb {
+        /// A CalRGB carrying `/Gamma` or `/Matrix`: pdfium copies image
+        /// samples through untouched but converts a *fill colour* through
+        /// XYZ, so it is fine for images and declined for `sc`.
+        cal_rgb_with_transform: bool,
+    },
+    Indexed {
+        base: Base,
+        hival: i64,
+        table: Vec<u8>,
+    },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Family {
+enum Base {
     Gray,
     Rgb,
 }
 
-/// Resolve the image's `/ColorSpace` to a family this module reproduces.
-fn color_family(
+/// Resolve a `/ColorSpace` object (`CPDF_DocPageData::GetColorSpace`).
+fn color_space(
     doc: &Document,
     cs: &Object,
     res: Option<&Dictionary>,
     page_res: Option<&Dictionary>,
-) -> Result<Family, String> {
+) -> Result<Cs, String> {
     match deref(doc, cs) {
         Object::Name(n) => match n.as_slice() {
-            b"DeviceGray" | b"G" | b"CalGray" => Ok(Family::Gray),
-            b"DeviceRGB" | b"RGB" | b"CalRGB" => Ok(Family::Rgb),
+            b"DeviceGray" | b"G" | b"CalGray" => Ok(Cs::Gray),
+            b"DeviceRGB" | b"RGB" | b"CalRGB" => Ok(Cs::Rgb {
+                cal_rgb_with_transform: false,
+            }),
             b"DeviceCMYK" | b"CMYK" | b"Pattern" | b"I" | b"Indexed" => {
                 Err(format!("colour space /{}", String::from_utf8_lossy(n)))
             }
@@ -613,7 +758,7 @@ fn color_family(
                         .and_then(|o| as_dict(doc, o))
                         .and_then(|d| d.get(other).ok())
                     {
-                        return color_family(doc, o, None, None);
+                        return color_space(doc, o, None, None);
                     }
                 }
                 Err(format!("colour space /{}", String::from_utf8_lossy(other)))
@@ -622,8 +767,14 @@ fn color_family(
         Object::Array(a) => {
             let fam = a.first().map(|o| deref(doc, o));
             match fam {
-                Some(Object::Name(n)) if n == b"CalGray" => Ok(Family::Gray),
-                Some(Object::Name(n)) if n == b"CalRGB" => Ok(Family::Rgb),
+                Some(Object::Name(n)) if n == b"CalGray" => Ok(Cs::Gray),
+                Some(Object::Name(n)) if n == b"CalRGB" => {
+                    let d = a.get(1).and_then(|o| as_dict(doc, o));
+                    Ok(Cs::Rgb {
+                        cal_rgb_with_transform: d
+                            .is_some_and(|d| d.get(b"Gamma").is_ok() || d.get(b"Matrix").is_ok()),
+                    })
+                }
                 Some(Object::Name(n)) if n == b"ICCBased" => {
                     let stream = a
                         .get(1)
@@ -644,10 +795,32 @@ fn color_family(
                         && bytes.len() == 3144
                         && bytes.get(400..417) == Some(b"sRGB IEC61966-2.1")
                     {
-                        Ok(Family::Rgb)
+                        Ok(Cs::Rgb {
+                            cal_rgb_with_transform: false,
+                        })
                     } else {
                         Err("ICC profile (Little-CMS transform)".into())
                     }
+                }
+                Some(Object::Name(n)) if n == b"Indexed" || n == b"I" => {
+                    if a.len() < 4 {
+                        return Err("Indexed array".into());
+                    }
+                    let base = match color_space(doc, &a[1], res, page_res)? {
+                        Cs::Gray => Base::Gray,
+                        Cs::Rgb { .. } => Base::Rgb,
+                        Cs::Indexed { .. } => return Err("Indexed over Indexed".into()),
+                    };
+                    // pdfium clamps hival to 0..=255 so out-of-range files load.
+                    let hival = deref(doc, &a[2]).as_i64().unwrap_or(0).clamp(0, 255);
+                    let table = match deref(doc, &a[3]) {
+                        Object::String(s, _) => s.clone(),
+                        Object::Stream(s) => s
+                            .decompressed_content()
+                            .map_err(|e| format!("Indexed lookup: {e}"))?,
+                        _ => return Err("Indexed lookup".into()),
+                    };
+                    Ok(Cs::Indexed { base, hival, table })
                 }
                 Some(Object::Name(n)) => {
                     Err(format!("colour space /{}", String::from_utf8_lossy(n)))
@@ -659,10 +832,113 @@ fn color_family(
     }
 }
 
+impl Cs {
+    /// `CPDF_ColorSpace::GetRGBOrZerosOnError` for one component value
+    /// (`GetRGB`, then `FXSYS_roundf(· 255)` as `LoadPalette` does).
+    fn rgb_of(&self, value: f32) -> [u8; 3] {
+        match self {
+            Cs::Gray | Cs::Rgb { .. } => {
+                let g = to_byte(value);
+                [g, g, g]
+            }
+            Cs::Indexed { base, hival, table } => {
+                // `CPDF_IndexedCS::GetRGB`: truncate, range-check against
+                // hival and the table, base component = byte / 255.
+                let index = value as i32;
+                let n = if *base == Base::Gray { 1 } else { 3 };
+                if index < 0 || i64::from(index) > *hival {
+                    return [0, 0, 0];
+                }
+                let start = index as usize * n;
+                if start + n > table.len() {
+                    return [0, 0, 0];
+                }
+                let comp = |i: usize| f32::from(table[start + i]) / 255.0;
+                match base {
+                    Base::Gray => {
+                        let g = to_byte(comp(0));
+                        [g, g, g]
+                    }
+                    Base::Rgb => [to_byte(comp(0)), to_byte(comp(1)), to_byte(comp(2))],
+                }
+            }
+        }
+    }
+}
+
+/// `CPDF_DIB::LoadPalette` for a one-component image of `bits` bits per
+/// pixel: the palette pdfium attaches (`None` = it keeps none and the
+/// samples are gray values as they are), from the `/Decode` range and the
+/// colour space.
+fn palette(cs: &Cs, bits: u32, decode: Option<&[f32]>) -> Result<Option<Vec<[u8; 3]>>, String> {
+    let max_data = ((1u32 << bits) - 1) as f32;
+    // `GetDecodeAndMaskArray`: default range 0..1, or 0..max_data for
+    // Indexed; a `/Decode` sets min and step and flags a non-default one.
+    let (def_min, def_max) = match cs {
+        Cs::Indexed { .. } => (0.0f32, max_data),
+        _ => (0.0, 1.0),
+    };
+    let (dmin, step, default_decode) = match decode {
+        Some(d) if d.len() >= 2 => {
+            let (min, max) = (d[0], d[1]);
+            (
+                min,
+                (max - min) / max_data,
+                def_min == min && def_max == max,
+            )
+        }
+        Some(_) => return Err("Decode array".into()),
+        None => (def_min, (def_max - def_min) / max_data, true),
+    };
+    let stock_gray = matches!(cs, Cs::Gray);
+    if bits == 1 {
+        if default_decode && stock_gray {
+            return Ok(None);
+        }
+        let c0 = cs.rgb_of(dmin);
+        let c1 = match cs {
+            Cs::Indexed { hival: 0, .. } => [0, 0, 0],
+            _ => cs.rgb_of(dmin + step),
+        };
+        if c0 == [0, 0, 0] && c1 == [255, 255, 255] {
+            return Ok(None);
+        }
+        return Ok(Some(vec![c0, c1]));
+    }
+    if bits == 8 && default_decode && stock_gray {
+        return Ok(None);
+    }
+    Ok(Some(
+        (0..(1u32 << bits))
+            .map(|i| cs.rgb_of(dmin + step * i as f32))
+            .collect(),
+    ))
+}
+
+/// `GetBits8`: the `bpc`-bit sample at `index` of a byte-aligned row.
+fn sample(row: &[u8], index: usize, bpc: u32) -> u8 {
+    match bpc {
+        8 => row[index],
+        _ => {
+            let bitpos = index * bpc as usize;
+            (row[bitpos / 8] >> (8 - bpc as usize - bitpos % 8)) & ((1u8 << bpc) - 1)
+        }
+    }
+}
+
+/// The sample rows a filter chain yields.
+enum Rows {
+    /// Byte-aligned packed rows of `bpc`-bit samples.
+    Packed { data: Vec<u8>, bpc: u32 },
+    /// CCITT: pdfium's 32-bit-pitch 1-bit rows, `None` = a zero row.
+    Fax(Vec<Option<Vec<u8>>>),
+    /// A decoded JPEG (possibly at a reduced scale).
+    Jpeg(jpeg::Image),
+}
+
 /// Decode one image XObject the way `CPDF_DIB` loads it, or say why not.
 /// `device` is the render bitmap size — pdfium decodes a JPEG at a reduced
-/// DCT scale when the image is at least twice as large, which this module
-/// does not (yet) reproduce.
+/// DCT scale when the image is at least twice as large.
 fn decode_image(
     ctx: &Ctx<'_>,
     stream: &lopdf::Stream,
@@ -676,23 +952,12 @@ fn decode_image(
     if width <= 0 || height <= 0 || width > 1 << 16 || height > 1 << 16 {
         return Err("image size".into());
     }
-    if bool_or_int_true(doc, d.get(b"ImageMask").ok().or_else(|| d.get(b"IM").ok())) {
-        return Err("image mask".into());
-    }
     if d.get(b"SMask").is_ok() || d.get(b"Mask").is_ok() {
         return Err("soft/colour-key mask".into());
     }
+    let is_mask = bool_or_int_true(doc, d.get(b"ImageMask").ok().or_else(|| d.get(b"IM").ok()));
     let interpolate =
         bool_or_int_true(doc, d.get(b"Interpolate").ok().or_else(|| d.get(b"I").ok()));
-    let cs = d
-        .get(b"ColorSpace")
-        .ok()
-        .or_else(|| d.get(b"CS").ok())
-        .ok_or("no ColorSpace")?;
-    let family = color_family(doc, cs, ctx.res, ctx.page_res)?;
-    let bpc = int(b"BitsPerComponent")
-        .or_else(|| int(b"BPC"))
-        .unwrap_or(0);
     let decode: Option<Vec<f32>> = match d
         .get(b"Decode")
         .ok()
@@ -702,20 +967,31 @@ fn decode_image(
         Some(Object::Array(a)) => Some(a.iter().filter_map(|o| num(deref(doc, o))).collect()),
         _ => None,
     };
+    let (w, h) = (width as usize, height as usize);
 
     let chain = filters::filters(doc, d);
     let (data, codec) =
         filters::apply(doc, &stream.content, &chain).map_err(|e| format!("filter {e:?}"))?;
-    let (w, h) = (width as usize, height as usize);
 
-    let samples: Kind = match codec {
+    let rows = match codec {
         Some(codec) if codec.name == "DCTDecode" => {
+            if is_mask {
+                return Err("DCT image mask".into());
+            }
+            // pdfium's tip (2025+) asks libjpeg for a `1/2^n` DCT-scaled decode
+            // when the image is at least twice the bitmap in both dimensions
+            // (`CPDF_DIB::StartLoadDIBBase`, `log2(min(w/W, h/H))` capped at
+            // 3); the pinned conformance build decodes at full size and
+            // stretches — the oracle test says so, byte for byte — and this
+            // raster follows the pinned build. `jpeg::decode` implements the
+            // reduced sizes (`jidctred`), so flipping this constant is all a
+            // move of the reference needs.
+            const DCT_SCALING_LIKE_PDFIUM_TIP: bool = false;
             let (dw, dh) = (i64::from(device.0), i64::from(device.1));
-            if dw > 0 && dh > 0 {
+            let mut levels = 0u32;
+            if DCT_SCALING_LIKE_PDFIUM_TIP && dw > 0 && dh > 0 {
                 let ratio = (width / dw).min(height / dh).max(1);
-                if ratio >= 2 {
-                    return Err("JPEG decoded at a reduced DCT scale by pdfium".into());
-                }
+                levels = (63 - ratio.leading_zeros()).min(3);
             }
             let transform = codec
                 .parms
@@ -724,89 +1000,276 @@ fn decode_image(
                 .and_then(|o| deref(doc, o).as_i64().ok())
                 .unwrap_or(1)
                 != 0;
-            let img = jpeg::decode(&data, transform).map_err(|e| format!("JPEG {e:?}"))?;
-            if img.width != w || img.height != h {
+            let img =
+                jpeg::decode(&data, transform, 1 << levels).map_err(|e| format!("JPEG {e:?}"))?;
+            if img.width != w.div_ceil(1 << levels) || img.height != h.div_ceil(1 << levels) {
                 return Err("JPEG size differs from the dictionary".into());
             }
-            match (img.channels, family) {
-                (1, Family::Gray) => Kind::Gray8(img.data),
-                (3, Family::Rgb) => Kind::Rgb8(img.data),
-                _ => return Err("JPEG components vs colour space".into()),
+            Rows::Jpeg(img)
+        }
+        Some(codec) if codec.name == "CCITTFaxDecode" => {
+            let p = codec.parms.as_ref();
+            let pi = |k: &[u8], default: i64| {
+                p.and_then(|p| p.get(k).ok())
+                    .and_then(|o| deref(doc, o).as_i64().ok())
+                    .unwrap_or(default)
+            };
+            let pb = |k: &[u8]| p.is_some_and(|p| bool_or_int_true(doc, p.get(k).ok()));
+            let mut rows_param = pi(b"Rows", 0);
+            if rows_param > i64::from(u16::MAX) {
+                rows_param = 0;
             }
+            let params = fax::Params {
+                k: pi(b"K", 0) as i32,
+                end_of_line: pb(b"EndOfLine"),
+                byte_align: pb(b"EncodedByteAlign"),
+                black_is_1: pb(b"BlackIs1"),
+                columns: pi(b"Columns", 1728).max(0) as usize,
+                rows: rows_param.max(0) as usize,
+            };
+            if params.columns == 0 || params.columns > 65535 {
+                return Err("CCITT columns".into());
+            }
+            // `CreateDecoder`: the decoder's rows must be at least as wide
+            // as the image's.
+            if fax::pitch(params.columns) < w.div_ceil(8) {
+                return Err("CCITT columns narrower than the image".into());
+            }
+            Rows::Fax(fax::decode(&data, &params, h))
         }
         Some(codec) => return Err(format!("codec {}", codec.name)),
         None => {
-            let comps = if family == Family::Gray { 1 } else { 3 };
-            match (bpc, family) {
-                (1, Family::Gray) => {
-                    let stride = w.div_ceil(8);
-                    if data.len() < stride * h {
-                        return Err("truncated image data".into());
-                    }
-                    Kind::Bilevel {
-                        data,
-                        stride,
-                        palette: None,
-                    }
-                }
-                (8, _) => {
-                    if data.len() < w * h * comps {
-                        return Err("truncated image data".into());
-                    }
-                    if comps == 1 {
-                        Kind::Gray8(data)
-                    } else {
-                        Kind::Rgb8(data)
-                    }
-                }
-                _ => return Err(format!("{bpc} bits per component")),
-            }
+            let bpc = if is_mask {
+                1
+            } else {
+                int(b"BitsPerComponent")
+                    .or_else(|| int(b"BPC"))
+                    .unwrap_or(0)
+            };
+            let bpc = match bpc {
+                1 | 2 | 4 | 8 => bpc as u32,
+                other => return Err(format!("{other} bits per component")),
+            };
+            Rows::Packed { data, bpc }
         }
     };
 
-    // `/Decode`: pdfium's palette rules. Default arrays are a no-op; a gray
-    // `[1 0]` inverts (a 1-bit image after the stretch through its palette,
-    // an 8-bit one before it through the 256-entry palette); anything else
-    // on RGB is a per-component transform this module does not do.
-    let kind = match (decode, samples) {
-        (None, s) => s,
-        (Some(dec), s) => {
-            let default_gray = dec == [0.0, 1.0];
-            let default_rgb = dec == [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
-            match s {
-                Kind::Bilevel { data, stride, .. } if default_gray => Kind::Bilevel {
-                    data,
-                    stride,
-                    palette: None,
-                },
-                Kind::Bilevel { data, stride, .. } if dec == [1.0, 0.0] => Kind::Bilevel {
-                    data,
-                    stride,
-                    palette: Some([255, 0]),
-                },
-                Kind::Gray8(v) if default_gray => Kind::Gray8(v),
-                Kind::Gray8(mut v) if dec == [1.0, 0.0] => {
-                    for b in &mut v {
-                        *b = 255 - *b;
-                    }
-                    Kind::Gray8(v)
+    if is_mask {
+        // `k1bppMask`: `default_decode_ = !Decode || Decode[0] == 0` (as an
+        // integer); a default-decode row is inverted so that 1 = paint.
+        let default_decode = decode
+            .as_ref()
+            .is_none_or(|d| d.first().is_none_or(|v| *v as i64 == 0));
+        let stride = w.div_ceil(8);
+        let mut out = vec![0u8; stride * h];
+        match rows {
+            Rows::Packed { data, .. } => {
+                if data.len() < stride * h {
+                    return Err("truncated image data".into());
                 }
-                Kind::Rgb8(v) if default_rgb => Kind::Rgb8(v),
-                _ => return Err("Decode array".into()),
+                for (y, row) in out.chunks_exact_mut(stride).enumerate() {
+                    for (o, &s) in row.iter_mut().zip(&data[y * stride..y * stride + stride]) {
+                        *o = if default_decode { !s } else { s };
+                    }
+                }
             }
+            Rows::Fax(lines) => {
+                for (y, row) in out.chunks_exact_mut(stride).enumerate() {
+                    if let Some(Some(line)) = lines.get(y) {
+                        for (o, &s) in row.iter_mut().zip(&line[..stride]) {
+                            *o = if default_decode { !s } else { s };
+                        }
+                    }
+                }
+            }
+            Rows::Jpeg(_) => return Err("DCT image mask".into()),
+        }
+        return Ok(Decoded {
+            width: width as i32,
+            height: height as i32,
+            kind: Kind::Mask { data: out, stride },
+            interpolate,
+        });
+    }
+
+    let cs_obj = d
+        .get(b"ColorSpace")
+        .ok()
+        .or_else(|| d.get(b"CS").ok())
+        .ok_or("no ColorSpace")?;
+    let cs = color_space(doc, cs_obj, ctx.res, ctx.page_res)?;
+    let comps = match cs {
+        Cs::Rgb { .. } => 3,
+        _ => 1,
+    };
+    let default_rgb = decode
+        .as_deref()
+        .is_none_or(|dec| dec == [0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+
+    let (out_w, out_h, kind) = match rows {
+        Rows::Jpeg(img) => {
+            let kind = match (img.channels, comps) {
+                // 8-bit gray, with a palette when the space or Decode is not
+                // the stock one.
+                (1, 1) => match palette(&cs, 8, decode.as_deref())? {
+                    None => Kind::Gray8(img.data),
+                    Some(pal) => {
+                        Kind::Rgb8(img.data.iter().flat_map(|&v| pal[usize::from(v)]).collect())
+                    }
+                },
+                (3, 3) => rgb8(img.data, decode.as_deref(), default_rgb),
+                _ => return Err("JPEG components vs colour space".into()),
+            };
+            (img.width as i32, img.height as i32, kind)
+        }
+        Rows::Fax(lines) => {
+            // 1-bit gray: pdfium's rows (1 = white), zero rows where the data
+            // ran out, through the 1-bit palette rules.
+            if comps != 1 {
+                return Err("CCITT with an RGB colour space".into());
+            }
+            let stride = w.div_ceil(8);
+            let mut out = vec![0u8; stride * h];
+            for (y, row) in out.chunks_exact_mut(stride).enumerate() {
+                if let Some(Some(line)) = lines.get(y) {
+                    row.copy_from_slice(&line[..stride]);
+                }
+            }
+            let pal = palette(&cs, 1, decode.as_deref())?.map(|p| [p[0], p[1]]);
+            (
+                width as i32,
+                height as i32,
+                Kind::Bilevel {
+                    data: out,
+                    stride,
+                    palette: pal,
+                },
+            )
+        }
+        Rows::Packed { data, bpc } => {
+            let stride = (w * bpc as usize * comps).div_ceil(8);
+            if data.len() < stride * h {
+                return Err("truncated image data".into());
+            }
+            let kind = if comps == 3 {
+                if bpc != 8 {
+                    return Err(format!("{bpc}-bit RGB"));
+                }
+                rgb8(data, decode.as_deref(), default_rgb)
+            } else if bpc == 1 {
+                let pal = palette(&cs, 1, decode.as_deref())?.map(|p| [p[0], p[1]]);
+                Kind::Bilevel {
+                    data,
+                    stride,
+                    palette: pal,
+                }
+            } else {
+                // 2/4/8-bit one-component: `TranslateScanline` unpacks the
+                // indices, the palette (if any) turns them into colours.
+                match palette(&cs, bpc, decode.as_deref())? {
+                    None => Kind::Gray8(data),
+                    Some(pal) => {
+                        let mut out = Vec::with_capacity(w * h * 3);
+                        for y in 0..h {
+                            let row = &data[y * stride..y * stride + stride];
+                            for x in 0..w {
+                                out.extend_from_slice(&pal[usize::from(sample(row, x, bpc))]);
+                            }
+                        }
+                        Kind::Rgb8(out)
+                    }
+                }
+            };
+            (width as i32, height as i32, kind)
         }
     };
     Ok(Decoded {
-        width: width as i32,
-        height: height as i32,
+        width: out_w,
+        height: out_h,
         kind,
         interpolate,
     })
 }
 
+/// 8-bit RGB samples: a default `/Decode` passes through; any other range
+/// goes through `TranslateScanline24bpp` — `min + step · v` per component,
+/// clamped, `· 255` truncated to a byte.
+fn rgb8(data: Vec<u8>, decode: Option<&[f32]>, default_rgb: bool) -> Kind {
+    if default_rgb {
+        return Kind::Rgb8(data);
+    }
+    let dec = decode.unwrap_or(&[0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+    let tables: Vec<[u8; 256]> = (0..3)
+        .map(|c| {
+            let (min, max) = (
+                dec.get(2 * c).copied().unwrap_or(0.0),
+                dec.get(2 * c + 1).copied().unwrap_or(1.0),
+            );
+            let step = (max - min) / 255.0;
+            let mut t = [0u8; 256];
+            for (v, slot) in t.iter_mut().enumerate() {
+                *slot = ((min + step * v as f32).clamp(0.0, 1.0) * 255.0) as u8;
+            }
+            t
+        })
+        .collect();
+    let mut out = data;
+    for px in out.chunks_exact_mut(3) {
+        for (c, v) in px.iter_mut().enumerate() {
+            *v = tables[c][usize::from(*v)];
+        }
+    }
+    Kind::Rgb8(out)
+}
+
+/// How a stretched sample lands on the canvas.
+enum Blend {
+    Gray,
+    Rgb,
+    /// `BuildPaletteFrom1BppSource`: the 256-step ramp between the two
+    /// palette colours, integer arithmetic.
+    Ramp([[u8; 3]; 2]),
+    /// `CompositeRow_ByteMask2Rgb` with the fill colour: coverage `a` blends
+    /// `(dest·(255−a) + fill·a) / 255`, zero coverage leaves the pixel.
+    Mask([u8; 3]),
+}
+
+fn put(canvas: &mut RgbImage, x: usize, y: usize, px: &[u8], blend: &Blend) {
+    if x >= canvas.width() as usize || y >= canvas.height() as usize {
+        return;
+    }
+    let p = canvas.get_pixel_mut(x as u32, y as u32);
+    match blend {
+        Blend::Gray => *p = image::Rgb([px[0], px[0], px[0]]),
+        Blend::Rgb => *p = image::Rgb([px[0], px[1], px[2]]),
+        Blend::Ramp([p0, p1]) => {
+            let v = i32::from(px[0]);
+            let ramp = |c: usize| {
+                (i32::from(p0[c]) + (i32::from(p1[c]) - i32::from(p0[c])) * v / 255) as u8
+            };
+            *p = image::Rgb([ramp(0), ramp(1), ramp(2)]);
+        }
+        Blend::Mask(fill) => {
+            let a = i32::from(px[0]);
+            if a == 0 {
+                return;
+            }
+            for (d, &f) in p.0.iter_mut().zip(fill) {
+                *d = ((i32::from(*d) * (255 - a) + i32::from(f) * a) / 255) as u8;
+            }
+        }
+    }
+}
+
 /// `CFX_AggImageRenderer` for one placement: the image rectangle, the clip,
 /// the axis-aligned or 90° stretch, and the composite onto `canvas`.
-fn draw(canvas: &mut RgbImage, img: &Decoded, m: M, clip: Rect) -> Result<(), String> {
+fn draw(
+    canvas: &mut RgbImage,
+    img: &Decoded,
+    m: M,
+    clip: Rect,
+    fill: Option<[u8; 3]>,
+) -> Result<(), String> {
     let unit = [
         m.apply(0.0, 1.0),
         m.apply(0.0, 0.0),
@@ -823,7 +1286,7 @@ fn draw(canvas: &mut RgbImage, img: &Decoded, m: M, clip: Rect) -> Result<(), St
     let bytes = i64::from(img.width)
         * i64::from(img.height)
         * match img.kind {
-            Kind::Bilevel { .. } => 0,
+            Kind::Bilevel { .. } | Kind::Mask { .. } => 0,
             Kind::Gray8(_) => 1,
             Kind::Rgb8(_) => 3,
         };
@@ -831,36 +1294,46 @@ fn draw(canvas: &mut RgbImage, img: &Decoded, m: M, clip: Rect) -> Result<(), St
         bilinear: img.interpolate || bytes > 60_000_000,
         no_smoothing: false,
     };
-    let source = match &img.kind {
-        Kind::Bilevel { data, stride, .. } => Source::Bilevel {
-            data,
-            stride: *stride,
-        },
-        Kind::Gray8(v) => Source::Gray8 {
-            data: v,
-            stride: img.width as usize,
-        },
-        Kind::Rgb8(v) => Source::Rgb8 {
-            data: v,
-            stride: 3 * img.width as usize,
-        },
-    };
-    let palette = match &img.kind {
+    let (source, blend) = match &img.kind {
         Kind::Bilevel {
-            palette: Some([p0, p1]),
-            ..
-        } => Some((*p0, *p1)),
-        _ => None,
-    };
-    // `CFX_ImageStretcher::BuildPaletteFrom1BppSource`: the 256-step ramp
-    // between the two palette colours, integer arithmetic.
-    let map = |v: u8| -> u8 {
-        match palette {
-            None => v,
-            Some((p0, p1)) => {
-                (i32::from(p0) + (i32::from(p1) - i32::from(p0)) * i32::from(v) / 255) as u8
-            }
+            data,
+            stride,
+            palette,
+        } => (
+            Source::Bilevel {
+                data,
+                stride: *stride,
+            },
+            match palette {
+                Some(p) => Blend::Ramp(*p),
+                None => Blend::Gray,
+            },
+        ),
+        Kind::Mask { data, stride } => {
+            // A fill colour this module could not convert declines the page.
+            let fill = fill.ok_or("stencil mask fill colour")?;
+            (
+                Source::Bilevel {
+                    data,
+                    stride: *stride,
+                },
+                Blend::Mask(fill),
+            )
         }
+        Kind::Gray8(v) => (
+            Source::Gray8 {
+                data: v,
+                stride: img.width as usize,
+            },
+            Blend::Gray,
+        ),
+        Kind::Rgb8(v) => (
+            Source::Rgb8 {
+                data: v,
+                stride: 3 * img.width as usize,
+            },
+            Blend::Rgb,
+        ),
     };
     let rotated = (m.b.abs() >= 0.5 || m.a == 0.0) || (m.c.abs() >= 0.5 || m.d == 0.0);
     if rotated {
@@ -906,7 +1379,7 @@ fn draw(canvas: &mut RgbImage, img: &Decoded, m: M, clip: Rect) -> Result<(), St
                     dx,
                     dy,
                     &s.data[(line * s.width + i) * s.channels..][..s.channels],
-                    &map,
+                    &blend,
                 );
             }
         }
@@ -942,24 +1415,11 @@ fn draw(canvas: &mut RgbImage, img: &Decoded, m: M, clip: Rect) -> Result<(), St
                 clip_box.left as usize + col,
                 clip_box.top as usize + row,
                 &s.data[(row * s.width + col) * s.channels..][..s.channels],
-                &map,
+                &blend,
             );
         }
     }
     Ok(())
-}
-
-fn put(canvas: &mut RgbImage, x: usize, y: usize, px: &[u8], map: &dyn Fn(u8) -> u8) {
-    if x >= canvas.width() as usize || y >= canvas.height() as usize {
-        return;
-    }
-    let p = canvas.get_pixel_mut(x as u32, y as u32);
-    if px.len() == 1 {
-        let g = map(px[0]);
-        *p = image::Rgb([g, g, g]);
-    } else {
-        *p = image::Rgb([px[0], px[1], px[2]]);
-    }
 }
 
 fn render_inner(meta: &PdfMeta, index: usize, width: u32, height: u32) -> Result<RgbImage, String> {
@@ -1081,6 +1541,8 @@ fn render_inner(meta: &PdfMeta, index: usize, width: u32, height: u32) -> Result
             ctm: M::ID,
             clip: device,
             text_render: 0,
+            fill: Some([0, 0, 0]),
+            fill_cs: FillCs::Gray,
         },
     )?;
     if walker.draws.is_empty() {
@@ -1103,7 +1565,7 @@ fn render_inner(meta: &PdfMeta, index: usize, width: u32, height: u32) -> Result
         }
         let img = &cache[&dr.stream];
         crate::timing::timed("raster.stretch", || {
-            draw(&mut canvas, img, dr.matrix, dr.clip)
+            draw(&mut canvas, img, dr.matrix, dr.clip, dr.fill)
         })?;
     }
     Ok(canvas)
@@ -1112,6 +1574,7 @@ fn render_inner(meta: &PdfMeta, index: usize, width: u32, height: u32) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lopdf::{dictionary, Stream};
 
     fn root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -1119,6 +1582,11 @@ mod tests {
 
     fn fixture(rel: &str) -> Vec<u8> {
         std::fs::read(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+    }
+
+    fn crate_fixture(rel: &str) -> Vec<u8> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
     }
 
     /// The scanned fixtures this module must take over from pdfium.
@@ -1156,7 +1624,7 @@ mod tests {
     fn born_digital_pages_are_declined() {
         let meta = PdfMeta::open(&fixture("tests/data/pdf/sources/2206.01062.pdf")).unwrap();
         assert!(render(&meta, 0, 612, 792).is_none());
-        // Text over a scan (skipped_2pages p2) and the ICC-profiled scan.
+        // The ICC-profiled scan (Little-CMS in pdfium).
         let meta = PdfMeta::open(&fixture(
             "tests/data/scanned/sources/sample_with_rotation_mismatch.pdf",
         ))
@@ -1181,77 +1649,521 @@ mod tests {
         }
     }
 
-    /// The oracle: pdfium's own bitmap, byte for byte, on every image-only
-    /// fixture page at both pipeline sizes. Skipped without `libpdfium`.
-    #[test]
-    fn matches_pdfium_on_the_scanned_fixtures() {
+    /// Compare this module with pdfium on page `index` of `pdf` at `sizes`,
+    /// appending a line per mismatch to `failures`; `false` when pdfium is
+    /// not installed.
+    fn oracle(
+        label: &str,
+        pdf: &[u8],
+        index: usize,
+        sizes: &[(u32, u32)],
+        failures: &mut Vec<String>,
+    ) -> bool {
+        use pdfium_render::prelude::*;
         let pdfium = match crate::pdfium_backend::bind_for_tests() {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("pdfium not installed — skipping the raster oracle ({e:?})");
-                return;
+                return false;
             }
         };
-        use pdfium_render::prelude::*;
-        let mut pages = 0;
-        let mut failures = Vec::new();
-        for rel in IMAGE_ONLY {
-            let bytes = fixture(rel);
-            let meta = PdfMeta::open(&bytes).unwrap();
-            let doc = pdfium.load_pdf_from_byte_slice(&bytes, None).unwrap();
-            for (i, page) in doc.pages().iter().enumerate() {
-                let g = meta.geometry(i).unwrap();
-                for (w, h) in sizes(g.width, g.height) {
-                    let want = page
-                        .render_with_config(
-                            &PdfRenderConfig::new()
-                                .set_target_width(w as i32)
-                                .set_target_height(h as i32),
-                        )
-                        .unwrap()
-                        .as_image()
-                        .into_rgb8();
-                    let Some(got) = render(&meta, i, w, h) else {
-                        failures.push(format!("{rel} p{} @{w}x{h}: declined", i + 1));
-                        continue;
-                    };
-                    pages += 1;
-                    if got.as_raw() != want.as_raw() {
-                        let diff = got
-                            .as_raw()
-                            .iter()
-                            .zip(want.as_raw())
-                            .filter(|(a, b)| a != b)
-                            .count();
-                        let max = got
-                            .as_raw()
-                            .iter()
-                            .zip(want.as_raw())
-                            .map(|(a, b)| (i32::from(*a) - i32::from(*b)).abs())
-                            .max()
-                            .unwrap_or(0);
-                        failures.push(format!(
-                            "{rel} p{} @{w}x{h}: {diff} of {} bytes differ (max |Δ| {max})",
-                            i + 1,
-                            want.len()
-                        ));
-                        if std::env::var_os("DOCLING_RS_RASTER_DUMP").is_some() {
-                            let stem = std::path::Path::new(rel)
-                                .file_stem()
-                                .unwrap()
-                                .to_string_lossy()
-                                .into_owned();
-                            let _ = got.save(format!("/tmp/{stem}.p{}.{w}.rust.png", i + 1));
-                            let _ = want.save(format!("/tmp/{stem}.p{}.{w}.pdfium.png", i + 1));
-                        }
-                    }
+        let meta = PdfMeta::open(pdf).unwrap_or_else(|| panic!("{label}: lopdf cannot open"));
+        let doc = pdfium
+            .load_pdf_from_byte_slice(pdf, None)
+            .unwrap_or_else(|e| panic!("{label}: pdfium {e:?}"));
+        let page = doc.pages().get(index as PdfPageIndex).unwrap();
+        for &(w, h) in sizes {
+            let want = page
+                .render_with_config(
+                    &PdfRenderConfig::new()
+                        .set_target_width(w as i32)
+                        .set_target_height(h as i32),
+                )
+                .unwrap()
+                .as_image()
+                .into_rgb8();
+            let Some(got) = render(&meta, index, w, h) else {
+                failures.push(format!("{label} @{w}x{h}: declined"));
+                continue;
+            };
+            if got.as_raw() != want.as_raw() {
+                let diff = got
+                    .as_raw()
+                    .iter()
+                    .zip(want.as_raw())
+                    .filter(|(a, b)| a != b)
+                    .count();
+                let max = got
+                    .as_raw()
+                    .iter()
+                    .zip(want.as_raw())
+                    .map(|(a, b)| (i32::from(*a) - i32::from(*b)).abs())
+                    .max()
+                    .unwrap_or(0);
+                failures.push(format!(
+                    "{label} @{w}x{h}: {diff} of {} bytes differ (max |Δ| {max})",
+                    want.len()
+                ));
+                if std::env::var_os("DOCLING_RS_RASTER_DUMP").is_some() {
+                    let stem = label.replace(['/', ' '], "_");
+                    let _ = got.save(format!("/tmp/{stem}.{w}.rust.png"));
+                    let _ = want.save(format!("/tmp/{stem}.{w}.pdfium.png"));
                 }
             }
         }
+        true
+    }
+
+    /// The oracle on the corpus: pdfium's own bitmap, byte for byte, on every
+    /// image-only fixture page at both pipeline sizes. Skipped without
+    /// `libpdfium`.
+    #[test]
+    fn matches_pdfium_on_the_scanned_fixtures() {
+        let mut failures = Vec::new();
+        let mut pages = 0;
+        for rel in IMAGE_ONLY {
+            let bytes = fixture(rel);
+            let meta = PdfMeta::open(&bytes).unwrap();
+            for i in 0..meta.page_count() {
+                let g = meta.geometry(i).unwrap();
+                if !oracle(rel, &bytes, i, &sizes(g.width, g.height), &mut failures) {
+                    return;
+                }
+                pages += 1;
+            }
+        }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert!(pages >= IMAGE_ONLY.len(), "{pages} pages compared");
+    }
+
+    /// Build a one-page PDF: `page` points wide/high (with `/Rotate`), the
+    /// content stream, and image XObjects by name.
+    fn synth_pdf(
+        page: (f32, f32),
+        rotate: i64,
+        content: &str,
+        images: Vec<(&str, Stream)>,
+    ) -> Vec<u8> {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let mut xobjs = Dictionary::new();
+        for (name, stream) in images {
+            let id = doc.add_object(Object::Stream(stream));
+            xobjs.set(name, Object::Reference(id));
+        }
+        let res_id = doc.add_object(dictionary! { "XObject" => Object::Dictionary(xobjs) });
+        let content_id = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            content.as_bytes().to_vec(),
+        )));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => vec![0.into(), 0.into(), page.0.into(), page.1.into()],
+            "Rotate" => rotate,
+            "Contents" => Object::Reference(content_id),
+            "Resources" => Object::Reference(res_id),
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    fn image_stream(w: usize, h: usize, extra: Dictionary, data: Vec<u8>) -> Stream {
+        let mut d = dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => w as i64,
+            "Height" => h as i64,
+        };
+        for (k, v) in extra.into_iter() {
+            d.set(k, v);
+        }
+        Stream::new(d, data)
+    }
+
+    fn reals(v: &[f32]) -> Object {
+        Object::Array(v.iter().map(|&x| Object::Real(x)).collect())
+    }
+
+    /// Full-page placement of `/Im0` on a `w` × `h` point page.
+    fn full_page(w: f32, h: f32) -> String {
+        format!("q {w} 0 0 {h} 0 0 cm /Im0 Do Q")
+    }
+
+    /// The shapes fixture as packed 1-bit rows (1 = white), byte-aligned.
+    fn shapes_bits() -> (usize, usize, Vec<u8>) {
+        let img = image::open(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/fax/shapes.png"),
+        )
+        .unwrap()
+        .to_luma8();
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let stride = w.div_ceil(8);
+        let mut out = vec![0u8; stride * h];
+        for y in 0..h {
+            for x in 0..w {
+                if img.get_pixel(x as u32, y as u32)[0] >= 128 {
+                    out[y * stride + x / 8] |= 1 << (7 - x % 8);
+                }
+            }
+        }
+        (w, h, out)
+    }
+
+    /// Deterministic sample bytes.
+    fn noise(n: usize, seed: u32) -> Vec<u8> {
+        let mut s = seed.wrapping_mul(2654435761).wrapping_add(12345);
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                (s >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// The synthesized pages: every image kind the module reproduces.
+    fn synthesized_cases() -> Vec<(String, Vec<u8>, (f32, f32))> {
+        let mut cases: Vec<(String, Vec<u8>, (f32, f32))> = Vec::new();
+
+        // Reduced-scale JPEG decoding: the device is small enough for
+        // pdfium's `resolution_levels_to_skip` to be 1, 2 or 3.
+        for name in [
+            "rgb_420_big",
+            "gray_444",
+            "rgb_422",
+            "rgb_444_progressive",
+            "rgb_420_progressive",
+            "gray_progressive",
+        ] {
+            let jpg = crate_fixture(&format!("tests/data/jpeg/{name}.jpg"));
+            let info = jpeg::info(&jpg).unwrap();
+            let (w, h) = (info.width as f32, info.height as f32);
+            let cs = if info.components == 1 {
+                "DeviceGray"
+            } else {
+                "DeviceRGB"
+            };
+            let stream = image_stream(
+                info.width,
+                info.height,
+                dictionary! { "ColorSpace" => cs, "BitsPerComponent" => 8, "Filter" => "DCTDecode" },
+                jpg,
+            );
+            cases.push((
+                format!("jpeg {name}"),
+                synth_pdf((w, h), 0, &full_page(w, h), vec![("Im0", stream)]),
+                (w, h),
+            ));
+        }
+
+        // CCITT as 1-bit gray, both bit conventions, and as stencils.
+        let (sw, sh, bits) = shapes_bits();
+        let (swf, shf) = (sw as f32, sh as f32);
+        for (name, k) in [("shapes.g4", -1i64), ("shapes.g3", 0), ("shapes.g3_2d", 4)] {
+            let data = crate_fixture(&format!("tests/data/fax/{name}"));
+            let parms = |black: bool| {
+                dictionary! { "K" => k, "Columns" => sw as i64, "Rows" => sh as i64, "BlackIs1" => black }
+            };
+            let gray = image_stream(
+                sw,
+                sh,
+                dictionary! {
+                    "ColorSpace" => "DeviceGray", "BitsPerComponent" => 1,
+                    "Filter" => "CCITTFaxDecode", "DecodeParms" => parms(false),
+                },
+                data.clone(),
+            );
+            cases.push((
+                format!("ccitt {name} gray"),
+                synth_pdf((swf, shf), 0, &full_page(swf, shf), vec![("Im0", gray)]),
+                (swf, shf),
+            ));
+            let inverted = image_stream(
+                sw,
+                sh,
+                dictionary! {
+                    "ColorSpace" => "DeviceGray", "BitsPerComponent" => 1,
+                    "Filter" => "CCITTFaxDecode", "DecodeParms" => parms(true),
+                    "Decode" => reals(&[1.0, 0.0]),
+                },
+                data.clone(),
+            );
+            cases.push((
+                format!("ccitt {name} blackis1+decode"),
+                synth_pdf((swf, shf), 0, &full_page(swf, shf), vec![("Im0", inverted)]),
+                (swf, shf),
+            ));
+            let mask = image_stream(
+                sw,
+                sh,
+                dictionary! { "ImageMask" => true, "Filter" => "CCITTFaxDecode", "DecodeParms" => parms(false) },
+                data,
+            );
+            cases.push((
+                format!("ccitt {name} mask"),
+                synth_pdf(
+                    (swf, shf),
+                    0,
+                    &format!("0.2 0.5 0.8 rg {}", full_page(swf, shf)),
+                    vec![("Im0", mask)],
+                ),
+                (swf, shf),
+            ));
+        }
+
+        // Flate stencil masks: default decode (0 = paint), `/Decode [1 0]`,
+        // a gray fill through `cs`/`sc`, a clip, two placements, a rotated
+        // page, `/Interpolate`.
+        let mask_stream = |decode: Option<[f32; 2]>| {
+            let mut d = dictionary! { "ImageMask" => true };
+            if let Some(dec) = decode {
+                d.set("Decode", reals(&dec));
+            }
+            image_stream(sw, sh, d, bits.clone())
+        };
+        cases.push((
+            "mask default black".into(),
+            synth_pdf(
+                (swf, shf),
+                0,
+                &full_page(swf, shf),
+                vec![("Im0", mask_stream(None))],
+            ),
+            (swf, shf),
+        ));
+        cases.push((
+            "mask decode10 rgb".into(),
+            synth_pdf(
+                (swf, shf),
+                0,
+                &format!("0.9 0.1 0.3 rg {}", full_page(swf, shf)),
+                vec![("Im0", mask_stream(Some([1.0, 0.0])))],
+            ),
+            (swf, shf),
+        ));
+        cases.push((
+            "mask cs sc clip twice".into(),
+            synth_pdf(
+                (swf, shf),
+                0,
+                &format!(
+                    "/DeviceGray cs 0.35 sc q 20 10 150 90 re W n {} Q q 60 0 0 40 120 80 cm /Im0 Do Q",
+                    full_page(swf, shf)
+                ),
+                vec![("Im0", mask_stream(None))],
+            ),
+            (swf, shf),
+        ));
+        cases.push((
+            "mask rotated page".into(),
+            synth_pdf(
+                (swf, shf),
+                90,
+                &format!("0 0 1 rg {}", full_page(swf, shf)),
+                vec![("Im0", mask_stream(None))],
+            ),
+            (shf, swf),
+        ));
+        cases.push((
+            "mask interpolate".into(),
+            synth_pdf(
+                (swf, shf),
+                0,
+                &full_page(swf, shf),
+                vec![(
+                    "Im0",
+                    image_stream(
+                        sw,
+                        sh,
+                        dictionary! { "ImageMask" => true, "Interpolate" => true },
+                        bits.clone(),
+                    ),
+                )],
+            ),
+            (swf, shf),
+        ));
+
+        // Indexed and low-depth gray.
+        let (iw, ih) = (203usize, 131usize);
+        let indexed = |base: &str, hival: i64, table: Vec<u8>| -> Object {
+            Object::Array(vec![
+                "Indexed".into(),
+                base.into(),
+                hival.into(),
+                Object::String(table, lopdf::StringFormat::Hexadecimal),
+            ])
+        };
+        let raw = |label: &str, w: usize, h: usize, dict: Dictionary, data: Vec<u8>| {
+            (
+                label.to_string(),
+                synth_pdf(
+                    (w as f32, h as f32),
+                    0,
+                    &full_page(w as f32, h as f32),
+                    vec![("Im0", image_stream(w, h, dict, data))],
+                ),
+                (w as f32, h as f32),
+            )
+        };
+        cases.push(raw(
+            "indexed 4-bit rgb",
+            iw,
+            ih,
+            dictionary! { "ColorSpace" => indexed("DeviceRGB", 15, noise(48, 2)), "BitsPerComponent" => 4 },
+            noise(iw.div_ceil(2) * ih, 1),
+        ));
+        cases.push(raw(
+            "indexed 1-bit two colours",
+            sw,
+            sh,
+            dictionary! { "ColorSpace" => indexed("DeviceRGB", 1, vec![200, 30, 30, 20, 40, 220]), "BitsPerComponent" => 1 },
+            bits.clone(),
+        ));
+        cases.push(raw(
+            "indexed 8-bit hival 40",
+            iw,
+            ih,
+            dictionary! { "ColorSpace" => indexed("DeviceRGB", 40, noise(123, 3)), "BitsPerComponent" => 8 },
+            noise(iw * ih, 4),
+        ));
+        cases.push(raw(
+            "indexed 2-bit gray base",
+            iw,
+            ih,
+            dictionary! { "ColorSpace" => indexed("DeviceGray", 3, vec![10, 90, 170, 250]), "BitsPerComponent" => 2 },
+            noise(iw.div_ceil(4) * ih, 5),
+        ));
+        cases.push(raw(
+            "gray 2-bit",
+            iw,
+            ih,
+            dictionary! { "ColorSpace" => "DeviceGray", "BitsPerComponent" => 2 },
+            noise(iw.div_ceil(4) * ih, 6),
+        ));
+        cases.push(raw(
+            "gray 4-bit decode10",
+            iw,
+            ih,
+            dictionary! { "ColorSpace" => "DeviceGray", "BitsPerComponent" => 4, "Decode" => reals(&[1.0, 0.0]) },
+            noise(iw.div_ceil(2) * ih, 7),
+        ));
+        cases.push(raw(
+            "gray 8-bit decode range",
+            iw,
+            ih,
+            dictionary! { "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8, "Decode" => reals(&[0.2, 0.8]) },
+            noise(iw * ih, 8),
+        ));
+        cases.push(raw(
+            "rgb 8-bit inverted decode",
+            iw,
+            ih,
+            dictionary! {
+                "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+                "Decode" => reals(&[1.0, 0.0, 1.0, 0.0, 1.0, 0.0]),
+            },
+            noise(iw * ih * 3, 9),
+        ));
+        cases.push(raw(
+            "calgray 1-bit",
+            sw,
+            sh,
+            dictionary! {
+                "ColorSpace" => Object::Array(vec![
+                    "CalGray".into(),
+                    Object::Dictionary(dictionary! { "WhitePoint" => reals(&[0.9505, 1.0, 1.089]), "Gamma" => 2.2f32 }),
+                ]),
+                "BitsPerComponent" => 1,
+            },
+            bits.clone(),
+        ));
+        cases
+    }
+
+    /// Pages synthesized around every image kind the module reproduces,
+    /// each compared with pdfium's render at five sizes (down to the
+    /// reduced-scale JPEG regimes): CCITT G4/G3 as gray and as stencils,
+    /// Flate stencils with fill colours, clips and a rotated page, Indexed
+    /// 1/2/4/8-bit, 2/4-bit gray, `/Decode` ranges on gray and RGB. Skipped
+    /// without `libpdfium`.
+    #[test]
+    fn synthesized_pages_match_pdfium() {
+        let mut failures = Vec::new();
+        let mut compared = 0;
+        for (label, pdf, (pw, ph)) in synthesized_cases() {
+            let sizes: Vec<(u32, u32)> = [1.0f32, 2.5, 0.49, 0.24, 0.12]
+                .iter()
+                .map(|s| {
+                    (
+                        (pw * s).round().max(1.0) as u32,
+                        (ph * s).round().max(1.0) as u32,
+                    )
+                })
+                .collect();
+            if !oracle(&label, &pdf, 0, &sizes, &mut failures) {
+                return;
+            }
+            compared += sizes.len();
+        }
         assert!(
-            pages >= 2 * IMAGE_ONLY.len(),
-            "{pages} page renders compared"
+            failures.is_empty(),
+            "{}\n({compared} renders compared)",
+            failures.join("\n")
+        );
+        eprintln!("{compared} synthesized renders byte-identical to pdfium");
+    }
+
+    /// Without pdfium: every synthesized kind decodes and draws, and a
+    /// stencil paints its fill colour.
+    #[test]
+    fn synthesized_kinds_render_without_pdfium() {
+        for (label, pdf, (pw, ph)) in synthesized_cases() {
+            let meta = PdfMeta::open(&pdf).unwrap();
+            let (w, h) = ((pw * 0.49).round() as u32, (ph * 0.49).round() as u32);
+            assert!(
+                render(&meta, 0, w, h).is_some(),
+                "{label} declined at {w}x{h}"
+            );
+        }
+        let (sw, sh, bits) = shapes_bits();
+        let pdf = synth_pdf(
+            (sw as f32, sh as f32),
+            0,
+            &format!("0.2 0.5 0.8 rg {}", full_page(sw as f32, sh as f32)),
+            vec![(
+                "Im0",
+                image_stream(sw, sh, dictionary! { "ImageMask" => true }, bits),
+            )],
+        );
+        let meta = PdfMeta::open(&pdf).unwrap();
+        let img = render(&meta, 0, sw as u32, sh as u32).expect("stencil mask renders");
+        let painted = img
+            .pixels()
+            .filter(|p| **p == image::Rgb([51, 128, 204]))
+            .count();
+        let white = img
+            .pixels()
+            .filter(|p| **p == image::Rgb([255, 255, 255]))
+            .count();
+        assert!(
+            painted > 100 && white > 1000,
+            "painted {painted}, white {white}"
         );
     }
 

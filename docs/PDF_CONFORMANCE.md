@@ -264,39 +264,75 @@ pipeline — decode, one axis-aligned stretch, composite — that
   **10/10 byte-identical**.
 * `raster/filters.rs`: Flate/LZW/RunLength/ASCII85/ASCIIHex with the PNG
   and TIFF predictors, sized for 1-bit rows.
+* `raster/fax.rs`: pdfium's `FaxDecoder` (core/fxcodec/fax) ported statement
+  for statement — Group 3 one- and two-dimensional and Group 4,
+  `EncodedByteAlign`, `EndOfLine`, `BlackIs1`, and its behaviour at the
+  ragged edges (a row the data runs out in stays as far as it got, byte
+  alignment switches itself off for good on the first set padding bit, rows
+  past the data or past `/Rows` come back as zero rows). Checked against
+  Pillow's libtiff encodings of a bilevel fixture (`tests/data/fax/`: G4,
+  G3 1-D, G3 2-D) and against pdfium's render of the same streams.
+* Stencil masks (`/ImageMask`): the walk tracks the fill colour the way
+  `CPDF_ColorState` does (`g`/`rg`/`cs`+`sc`, rounded to bytes when set,
+  black by default, unchanged by `cs` alone; CMYK and patterns decline the
+  page when a mask uses them), the mask bits are normalized to 1 = paint
+  (`default_decode_` inverts), stretched as `k1bppMask` → 8-bit coverage
+  and merged per `CompositeRow_ByteMask2Rgb`: `(dest·(255−a) + fill·a)/255`.
+* Palettes (`CPDF_DIB::LoadPalette`): Indexed spaces over
+  DeviceGray/DeviceRGB/CalGray/sRGB (lookup string or stream, hival clamped
+  to 255, out-of-range indices black), 2- and 4-bit gray, and every
+  `/Decode` range on a one-component image become the 2ⁿ-entry palette
+  pdfium builds — `min + step·i` per entry through the space's `GetRGB`,
+  rounded — applied before the stretch for 2–8-bit samples and, for 1-bit
+  ones, after it through `BuildPaletteFrom1BppSource`'s integer ramp
+  between the two entries; an 8-bit RGB `/Decode` goes through
+  `TranslateScanline24bpp`'s truncating arithmetic.
+* JPEG at reduced scale: `jpeg::decode` implements libjpeg's `1/2`, `1/4`,
+  `1/8` DCT-scaled output (`jidctred.c`, the per-component scaling of
+  `jpeg_calc_output_dimensions`, the scaled upsampler rules), which
+  pdfium's tip asks for when an image is at least twice the bitmap in both
+  dimensions. The **pinned conformance build does not** — it decodes at
+  full size and stretches, the oracle says byte for byte — so the raster
+  follows the pinned build (`DCT_SCALING_LIKE_PDFIUM_TIP` in `raster/mod.rs`
+  is the one-line switch when the reference moves).
 
-**Oracle** (`raster::tests::matches_pdfium_on_the_scanned_fixtures`, runs
-when `.pdfium/lib` is present): the eleven image-only fixture pages —
+**Oracle** (`raster::tests::matches_pdfium_on_the_scanned_fixtures` and
+`synthesized_pages_match_pdfium`, run when `.pdfium/lib` is present): the
+eleven image-only fixture pages —
 `ocr_test` and its three `/Rotate` variants (cairo: a Form XObject with a
 4960 × 7016 `/Interpolate` gray Flate image), the four `ocr_test_raster*`
 (RGB Flate, enlarged 1190 → 1785), `nemotron_multipage` (4 pages, three
 rotations), `scanned_chart_table` and `docling-rs-demotion-repro` (RGB 4:2:0
 JPEG) — at both pipeline sizes (the 3× OCR bitmap and the 1.5× layout image):
-**22/22 renders byte-identical to `FPDF_RenderPageBitmap`**. So the scanned
-groundtruth stays pinned to the byte, and a checkout with only `.models/`
-(no pdfium, no plugin) converts every one of them; `pdfium_backend` tries
-the Rust raster before pdfium wherever it used to render a page bitmap
-(`DOCLING_RS_SCAN_RASTER=pdfium` switches it off for an A/B run).
+**22/22 renders byte-identical to `FPDF_RenderPageBitmap`**; and 33 pages
+synthesized in the test around every image kind — JPEGs, CCITT G4/G3 as
+gray, inverted and as stencils, Flate stencils with fill colours, a clip,
+two placements, a rotated page and `/Interpolate`, Indexed 1/2/4/8-bit over
+RGB and gray, 2- and 4-bit gray, `/Decode` ranges on gray and RGB, CalGray
+— each at five sizes down to an eighth of the page: **165/165
+byte-identical**. So the scanned groundtruth stays pinned to the byte, and a
+checkout with only `.models/` (no pdfium, no plugin) converts every one of
+them; `pdfium_backend` tries the Rust raster before pdfium wherever it used
+to render a page bitmap (`DOCLING_RS_SCAN_RASTER=pdfium` switches it off for
+an A/B run).
 
 **What still goes to pdfium** (the module declines, `DOCLING_RS_DEBUG` says
-why): JPX, JBIG2 and CCITT images (no decoder yet); CMYK, Indexed, Lab,
-Separation and every ICC profile but the 3144-byte sRGB one (pdfium runs
-Little-CMS on them); `/ImageMask` stencils, `/SMask` and colour-key `/Mask`;
-a JPEG at least twice the bitmap size in both dimensions (pdfium decodes it
-at a reduced DCT scale — libjpeg's `jidctred`, the next port);
-non-axis-aligned placements (`CFX_ImageTransformer`); isolated or knockout
-transparency groups; pages with annotations other than links; and, of
-course, any drawn path, shading, inline image or visible glyph.
-`sample_with_rotation_mismatch` is the corpus example: its image is
-`ICCBased` with a 344-byte profile.
+why): JPX and JBIG2 images (no decoder); CMYK, Lab, Separation, DeviceN and
+every ICC profile but the 3144-byte sRGB one (pdfium runs Little-CMS on
+them); `/SMask` and colour-key `/Mask`; a stencil mask whose fill colour is
+CMYK or a pattern; 16-bit samples; non-axis-aligned placements
+(`CFX_ImageTransformer`); isolated or knockout transparency groups; pages
+with annotations other than links; and, of course, any drawn path, shading,
+inline image or visible glyph. `sample_with_rotation_mismatch` is the corpus
+example: its image is `ICCBased` with a 344-byte profile.
 
 **The roadmap.** The aim is everything in Rust except the ONNX models; the
 shim stays as long as it is the byte-exact oracle for what replaces it.
 
-2. *Rust raster for image-only pages* — landed above. Follow-ups inside the
-   same design: the reduced-scale JPEG IDCTs, CCITT G4 (a small decoder),
-   `/ImageMask` stencils, Indexed palettes; JPX and JBIG2 wait for proven
-   Rust decoders.
+2. *Rust raster for image-only pages* — landed above, with its follow-ups
+   (CCITT, stencil masks, Indexed and low-depth palettes, `/Decode` ranges,
+   the reduced-scale JPEG IDCTs). JPX and JBIG2 wait for proven Rust
+   decoders.
 3. *Rust vector + text renderer.* The renderer docling-parse runs: content
    stream interpretation (paths, clipping, transparency groups as docling-parse
    flattens them), glyph outlines from the embedded / bundled fonts (a Rust

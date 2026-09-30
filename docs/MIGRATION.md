@@ -462,8 +462,8 @@ These are deliberate or unavoidable divergences, not bugs.
      rasterized in pure Rust byte-for-byte like pdfium (`raster/`: pdfium's
      stretch engine + a libjpeg-exact JPEG decoder) — pdfium is left with the
      raster of a born-digital page when the docling-parse plugin is absent,
-     the text layer of a file the parser cannot read, and JPX/JBIG2/CCITT
-     scans. Its per-word
+     the text layer of a file the parser cannot read, and JPX/JBIG2 scans.
+     Its per-word
      cells reproduce docling-parse's `word_cells` byte-for-byte (377/377 on
      `2305-pg9`), which is what TableFormer matches against; a char-frequency
      validator (`scripts/test/parser_completeness.py`) confirms nothing is silently
