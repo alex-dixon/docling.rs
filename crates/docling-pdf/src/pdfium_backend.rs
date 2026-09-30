@@ -510,7 +510,14 @@ pub fn render_pages(
                 i + 1,
             )
             .ok()?;
-            rust_bitmap(Some(m), renderer.as_ref(), i as i32, tw as u32, th as u32)
+            rust_bitmap(
+                Some(m),
+                renderer.as_ref(),
+                session.is_some(),
+                i as i32,
+                tw as u32,
+                th as u32,
+            )
         };
         let bitmap = match (&dparse, &session) {
             (Some(dp), _) => {
@@ -561,12 +568,15 @@ fn no_raster(index: i32) -> PdfError {
 /// The pure-Rust bitmap of a page at `width` × `height`: the raster of an
 /// image-only page (`raster::render`, pdfium's bytes) when the page
 /// qualifies, the page renderer (`render`) otherwise — `None` only when the
-/// object model is not loaded or `DOCLING_RS_RENDERER=pdfium` asks for
-/// pdfium's render of a page the raster declines.
+/// object model is not loaded, or when `DOCLING_RS_RENDERER=pdfium` asks for
+/// pdfium's render of a page the raster declines *and* pdfium's page is open
+/// (`pdfium_page`; a build or machine without the library degrades to the
+/// Rust renderer, as [`bind_or_skip`] warned).
 #[cfg(feature = "ml")]
 fn rust_bitmap(
     meta: Option<&crate::pdf_meta::PdfMeta>,
     renderer: Option<&crate::render::Renderer<'_>>,
+    pdfium_page: bool,
     index: i32,
     width: u32,
     height: u32,
@@ -577,7 +587,7 @@ fn rust_bitmap(
     }) {
         return Some(img);
     }
-    if crate::dparse_render::choice() == crate::dparse_render::Choice::Pdfium {
+    if pdfium_page && crate::dparse_render::choice() == crate::dparse_render::Choice::Pdfium {
         return None;
     }
     let renderer = renderer?;
@@ -601,9 +611,15 @@ fn bind_or_skip(meta_ok: bool) -> Result<Option<native::Lib>, PdfError> {
     match native::bind() {
         Ok(p) => Ok(Some(p)),
         Err(e) if meta_ok => {
-            docling_core::debug_log!(
-                "docling-pdf: pdfium unavailable ({e}); rendering with the Rust renderer"
-            );
+            // The library was asked for by name and is not there: say so
+            // once, then degrade — the Rust renderer draws every page.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "docling-pdf: DOCLING_RS_RENDERER=pdfium but the pdfium library could not be \
+                     loaded ({e}); rendering with the Rust renderer"
+                );
+            });
             Ok(None)
         }
         Err(e) => Err(e),
@@ -742,7 +758,7 @@ fn extract_page(
         // (`DOCLING_RS_RENDERER=pdfium`).
         let dw = (width * RENDER_SCALE).round().max(1.0) as u32;
         let dh = (height * RENDER_SCALE).round().max(1.0) as u32;
-        let big = match rust_bitmap(meta, renderer, index, tw as u32, th as u32) {
+        let big = match rust_bitmap(meta, renderer, page.is_some(), index, tw as u32, th as u32) {
             Some(img) => Some(img),
             None if page.is_some() => {
                 let page = page.ok_or_else(|| no_raster(index))?;
@@ -772,7 +788,7 @@ fn extract_page(
     } else if render_image {
         let tw = f64::from(width * 1.5).ceil().max(1.0) as i32;
         let th = f64::from(height * 1.5).ceil().max(1.0) as i32;
-        let big = match rust_bitmap(meta, renderer, index, tw as u32, th as u32) {
+        let big = match rust_bitmap(meta, renderer, page.is_some(), index, tw as u32, th as u32) {
             Some(img) => img,
             None => {
                 let page = page.ok_or_else(|| no_raster(index))?;
