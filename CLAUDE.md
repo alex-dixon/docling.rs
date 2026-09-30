@@ -130,7 +130,12 @@ cargo check -p docling --no-default-features --features pdf-text \
   parallels the standalone-image `DOCLING_RS_MAX_IMAGE_PIXELS` cap of 30000),
   `DOCLING_RS_DJVU_RENDER_PX` (2500; long-side box a scan-only DjVu page is
   rendered into for the OCR fallback, #434 — DjVu decodes in pure Rust via
-  `djvu-rs`, no binary).
+  `djvu-rs`, no binary), `DOCLING_RS_RENDERER` (#478; `pdfium` default |
+  `docling-parse` = render the model inputs with docling-parse's Blend2D
+  renderer through the `dlopen`ed shim `.docling-parse/lib/libdparse_render.so`
+  that `scripts/install/build_docling_parse_render.sh` builds —
+  `DOCLING_PARSE_RENDER_LIB` / `DOCLING_PARSE_RESOURCES` override its and the
+  `pdf_resources` location; missing → pdfium with one warning).
 
 ## Conformance & fixtures
 

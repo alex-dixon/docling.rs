@@ -32,6 +32,8 @@ pub use docling_onnx as ep;
 // Heading-hierarchy stage (#302): PDF font-name style parsing, outline
 // extraction (pure lopdf), and the level-assignment pass. No feature gate on
 // the logic itself — only the glyph style pass needs pdfium (`ml`).
+#[cfg(feature = "ml")]
+pub mod dparse_render;
 mod font_style;
 mod heading_hierarchy;
 pub mod layout;

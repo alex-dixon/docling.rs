@@ -37,6 +37,7 @@ ml = [
     "dep:tar",
     "dep:regex",
     "dep:docling-onnx",
+    "dep:libloading",
 ]
 # GPU execution providers (#74). Each feature makes `ort` link/download an
 # ONNX Runtime binary that contains that provider; which provider actually
@@ -62,6 +63,9 @@ docling-core = { path = "../docling-core", version = "1.76.0" }
 # re-exported as `docling_pdf::ep`.
 docling-onnx = { path = "../docling-onnx", version = "1.76.0", optional = true }
 pdfium-render = { version = "0.8", optional = true }
+# Runtime loading of the opt-in docling-parse renderer plugin (#478,
+# `dparse_render.rs`) — the same mechanism pdfium-render uses for libpdfium.
+libloading = { version = "0.8", optional = true }
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls"], optional = true }
 image = { version = "0.25", optional = true }
 flate2 = { version = "1", optional = true }
