@@ -48,7 +48,8 @@ namespace
 {
   // The ABI version: bump when a signature below changes. The Rust side
   // refuses a library whose `dpr_abi_version()` it does not know.
-  constexpr int DPR_ABI_VERSION = 1;
+  // 2: dpr_render takes the bitmap decode hint separately from the scale.
+  constexpr int DPR_ABI_VERSION = 2;
 
   std::mutex g_mutex; // serializes every call: one renderer state per process
   bool g_initialised = false;
@@ -110,10 +111,15 @@ struct dpr_doc
   // objects mutate while building an outline, so they are never shared.
   std::shared_ptr<pdflib::freetype_font_cache> freetype_cache;
   std::shared_ptr<pdflib::glyph_bbox_cache> glyph_bbox_cache;
-  // Page decoders decoded so far (0-based page index). A page is decoded once,
-  // at the first scale asked for, and rendered at every scale after that —
-  // docling's order (1.0 at decode time, 2.0 for TableFormer later).
-  std::unordered_map<int, std::shared_ptr<pdflib::pdf_decoder<pdflib::PAGE>>> pages;
+  // Page decoders decoded so far, keyed by (0-based page index, bitmap decode
+  // hint). docling decodes a page once, at its `render_scale` (1.0), and
+  // renders that decoder at every later scale (2.0 for TableFormer, 3.0 for
+  // OCR): `bitmap_target_pixels_per_unit` lets the JPEG/JPX decoders reduce
+  // an oversampled scan to the hint's resolution, so docling's TableFormer and
+  // OCR see a 1×-decoded raster upscaled. The caller chooses the hint per
+  // render: docling's for the layout image, full resolution (0) for the
+  // bitmap the OCR and TableFormer crops come from.
+  std::unordered_map<std::string, std::shared_ptr<pdflib::pdf_decoder<pdflib::PAGE>>> pages;
 
   dpr_doc():
     timings(),
@@ -193,9 +199,12 @@ extern "C"
   // RGBA8 buffer, row-major, top to bottom, in display orientation (`/Rotate`
   // applied) — `renderer<BLEND2D>::get_canvas`. The canvas is
   // `ceil(width * scale)` × `ceil(height * scale)` of the crop box, as
-  // docling-parse sizes it. The buffer is malloc'd; free it with `dpr_free`.
-  // Returns 0 on success.
-  int dpr_render(dpr_doc* doc, int page_index, double scale,
+  // docling-parse sizes it. `bitmap_hint` is the decoder's
+  // `bitmap_target_pixels_per_unit`: docling passes its `render_scale`
+  // (1.0), 0 decodes every embedded image at full resolution. A page is
+  // decoded once per distinct hint and re-rendered at any scale after that.
+  // The buffer is malloc'd; free it with `dpr_free`. Returns 0 on success.
+  int dpr_render(dpr_doc* doc, int page_index, double scale, double bitmap_hint,
                  unsigned char** rgba, int* width, int* height,
                  char* err, int err_len)
   {
@@ -208,14 +217,15 @@ extern "C"
     *rgba = nullptr;
     *width = 0;
     *height = 0;
-    if(scale <= 0.0)
+    if(scale <= 0.0 or bitmap_hint < 0.0)
       {
-        set_err(err, err_len, "dpr_render: scale must be > 0");
+        set_err(err, err_len, "dpr_render: scale must be > 0 and bitmap_hint >= 0");
         return 1;
       }
     try
       {
-        auto found = doc->pages.find(page_index);
+        const std::string key = std::to_string(page_index) + "@" + std::to_string(bitmap_hint);
+        auto found = doc->pages.find(key);
         if(found == doc->pages.end())
           {
             // `_compile_decode_config` defaults (docling's `ContentConfig`
@@ -228,7 +238,7 @@ extern "C"
             pdflib::decode_config config;
             config.extract_font_programs = true;
             config.extract_bitmap_pixels = true;
-            config.bitmap_target_pixels_per_unit = scale;
+            config.bitmap_target_pixels_per_unit = bitmap_hint;
             auto page = doc->decoder->make_thread_safe_page_decoder(page_index, config.keep_qpdf_warnings);
             if(not page)
               {
@@ -236,7 +246,7 @@ extern "C"
                 return 1;
               }
             page->decode_page(config);
-            found = doc->pages.emplace(page_index, page).first;
+            found = doc->pages.emplace(key, page).first;
           }
         auto& page = found->second;
 
@@ -285,7 +295,7 @@ extern "C"
       }
   }
 
-  // Drop the cached page decoder of `page_index` (call once every scale of a
+  // Drop the cached page decoders of `page_index` (call once every scale of a
   // page has been rendered; a 2,000-page document would otherwise keep every
   // decoded page alive until `dpr_close`).
   void dpr_release_page(dpr_doc* doc, int page_index)
@@ -293,7 +303,18 @@ extern "C"
     std::lock_guard<std::mutex> lock(g_mutex);
     if(doc != nullptr)
       {
-        doc->pages.erase(page_index);
+        const std::string prefix = std::to_string(page_index) + "@";
+        for(auto it = doc->pages.begin(); it != doc->pages.end();)
+          {
+            if(it->first.compare(0, prefix.size(), prefix) == 0)
+              {
+                it = doc->pages.erase(it);
+              }
+            else
+              {
+                ++it;
+              }
+          }
       }
   }
 

@@ -1264,6 +1264,233 @@ pub fn cluster_cids(regions: &[Region], cells: &[TextCell]) -> Vec<usize> {
 /// An ordered-list enumeration marker at the start of a list item: leading ASCII
 /// digits followed by `.`, e.g. `1. Undo/Redo` → `(1, "Undo/Redo")`. Returns
 /// `None` when the text doesn't start with `digits.`.
+/// docling's `ListItemMarkerProcessor` bullet patterns
+/// (`docling/models/postprocessing/list_marker_processor.py`), one glyph each.
+const LIST_BULLET_MARKERS: &str = "\u{2022}\u{2023}\u{25E6}\u{2043}\u{204C}\u{204D}\u{2219}\u{25AA}\u{25AB}\u{25CF}\u{25CB}-*+•·‣⁃►▶▸➤➢✓✔✗✘";
+
+/// docling's numbered-marker patterns as byte-length scanners over the start
+/// of the text, in its first-wins order (the compound ones first, as they are
+/// the more specific). Each returns the marker's candidate lengths, longest
+/// (greedy) first — the alternatives Python's regex would backtrack through
+/// before the `\s(.+)` tail. Hand-rolled rather than `regex` because this file
+/// is part of the `pdf-text` (wasm) build, where the `regex` crate is not.
+/// `\d` is Unicode-aware in Python, hence `char::is_numeric`; the letters are
+/// ASCII classes in both.
+const LIST_NUMBERED_MARKERS: &[fn(&str) -> Vec<usize>] = &[
+    // `\d+(?:\.\d+)+\.?` — 1.1  1.2.3  1.1.
+    |s| {
+        let mut i = digits(s, 0);
+        if i == 0 {
+            return Vec::new();
+        }
+        let mut groups = 0;
+        while s[i..].starts_with('.') && digits(s, i + 1) > i + 1 {
+            i = digits(s, i + 1);
+            groups += 1;
+        }
+        if groups == 0 {
+            return Vec::new();
+        }
+        if s[i..].starts_with('.') {
+            vec![i + 1, i]
+        } else {
+            vec![i]
+        }
+    },
+    // `\d+\.?[a-zA-Z]\.` — 9a. 3.a.
+    |s| digits_dot_letter(s, 0, '.').into_iter().collect(),
+    // `\d+\.?[a-zA-Z]\)` — 9a) 3.a)
+    |s| digits_dot_letter(s, 0, ')').into_iter().collect(),
+    // `\(\d+\.?[a-zA-Z]\)` — (9a) (3.a)
+    |s| {
+        if !s.starts_with('(') {
+            return Vec::new();
+        }
+        digits_dot_letter(s, 1, ')').into_iter().collect()
+    },
+    // `\d+\.` — 1. 2. 3.
+    |s| digits_then(s, 0, '.').into_iter().collect(),
+    // `\d+\)` — 1) 2) 3)
+    |s| digits_then(s, 0, ')').into_iter().collect(),
+    // `\(\d+\)` — (1) (2) (3)
+    |s| {
+        if !s.starts_with('(') {
+            return Vec::new();
+        }
+        digits_then(s, 1, ')').into_iter().collect()
+    },
+    // `\[\d+\]` — [1] [2] [3]
+    |s| {
+        if !s.starts_with('[') {
+            return Vec::new();
+        }
+        digits_then(s, 1, ']').into_iter().collect()
+    },
+    // `[ivxlcdm]+\.` — i. ii. iii.
+    |s| class_run_then(s, "ivxlcdm", '.').into_iter().collect(),
+    // `[IVXLCDM]+\.` — I. II. III.
+    |s| class_run_then(s, "IVXLCDM", '.').into_iter().collect(),
+    // `[a-z]\.` / `[A-Z]\.` / `[a-z]\)` / `[A-Z]\)`
+    |s| {
+        letter_then(s, char::is_ascii_lowercase, '.')
+            .into_iter()
+            .collect()
+    },
+    |s| {
+        letter_then(s, char::is_ascii_uppercase, '.')
+            .into_iter()
+            .collect()
+    },
+    |s| {
+        letter_then(s, char::is_ascii_lowercase, ')')
+            .into_iter()
+            .collect()
+    },
+    |s| {
+        letter_then(s, char::is_ascii_uppercase, ')')
+            .into_iter()
+            .collect()
+    },
+];
+
+/// Byte offset just past the run of `\d` characters starting at `from`
+/// (`from` itself when there is none).
+fn digits(s: &str, from: usize) -> usize {
+    s[from..]
+        .char_indices()
+        .find(|(_, c)| !c.is_numeric())
+        .map_or(s.len(), |(i, _)| from + i)
+}
+
+/// `\d+<close>` from `from`: the length through `close`, if it matches.
+fn digits_then(s: &str, from: usize, close: char) -> Option<usize> {
+    let end = digits(s, from);
+    (end > from && s[end..].starts_with(close)).then(|| end + close.len_utf8())
+}
+
+/// `\d+\.?[a-zA-Z]<close>` from `from`.
+fn digits_dot_letter(s: &str, from: usize, close: char) -> Option<usize> {
+    let mut i = digits(s, from);
+    if i == from {
+        return None;
+    }
+    if s[i..].starts_with('.') {
+        i += 1;
+    }
+    let letter = s[i..].chars().next().filter(char::is_ascii_alphabetic)?;
+    i += letter.len_utf8();
+    s[i..].starts_with(close).then(|| i + close.len_utf8())
+}
+
+/// `[<class>]+<close>` at the start.
+fn class_run_then(s: &str, class: &str, close: char) -> Option<usize> {
+    let end = s
+        .char_indices()
+        .find(|(_, c)| !class.contains(*c))
+        .map_or(s.len(), |(i, _)| i);
+    (end > 0 && s[end..].starts_with(close)).then(|| end + close.len_utf8())
+}
+
+/// `[<letter class>]<close>` at the start.
+fn letter_then(s: &str, class: fn(&char) -> bool, close: char) -> Option<usize> {
+    let letter = s.chars().next().filter(class)?;
+    let i = letter.len_utf8();
+    s[i..].starts_with(close).then(|| i + close.len_utf8())
+}
+
+/// docling's `ListItemMarkerProcessor.process_list_item`: the item's original
+/// text is matched against `^(marker)\s(.+)` (DOTALL) for the bullet patterns,
+/// then the numbered ones in order; a hit splits it into
+/// `(marker, text, enumerated)`. `\s` is one Unicode whitespace character and
+/// `.+` everything after it, which must be non-empty.
+fn split_list_marker(text: &str) -> Option<(&str, &str, bool)> {
+    let tail_after = |len: usize| -> Option<&str> {
+        let ws = text[len..].chars().next()?;
+        if !ws.is_whitespace() {
+            return None;
+        }
+        let rest = &text[len + ws.len_utf8()..];
+        (!rest.is_empty()).then_some(rest)
+    };
+    let first = text.chars().next()?;
+    if LIST_BULLET_MARKERS.contains(first) {
+        if let Some(rest) = tail_after(first.len_utf8()) {
+            return Some((&text[..first.len_utf8()], rest, false));
+        }
+    }
+    for matcher in LIST_NUMBERED_MARKERS {
+        for len in matcher(text) {
+            if let Some(rest) = tail_after(len) {
+                return Some((&text[..len], rest, true));
+            }
+        }
+    }
+    None
+}
+
+/// A PDF `list_item` region as docling emits it: `ListItemMarkerProcessor`
+/// splits the marker off (see [`split_list_marker`]), and docling-core's
+/// Markdown list serializer (default `orig_list_item_marker_mode = AUTO`,
+/// `ensure_valid_list_item_marker`) prints it as `N. text` for an `N.` marker
+/// (`case_already_valid`: the marker verbatim); as `- text` for a bullet glyph
+/// (no letter or digit in the marker: only the `-` the serializer adds); and
+/// as `- a) text` / `- 1.2 text` / `- [3] text` for any other marker
+/// (`case_auto`: the serializer's `-`, then the original marker) — spelled
+/// here as a bullet item whose text carries the marker, the way the DOCX and
+/// DOC backends already spell theirs. An item without a recognizable marker is
+/// a plain bullet. The symbol-font bullets docling-parse filters out of its
+/// cells (`•◦▪·*` glued to the text) are stripped before the match, as before.
+fn list_item_node(text: &str, loc: [u16; 4], first_in_list: bool) -> Node {
+    // docling's match runs on the text as docling-parse hands it over; the
+    // glued symbol-font bullets it never sees are stripped only when the raw
+    // text matches no marker (`•Text` → `Text`, but `• Text` → marker `•`).
+    let stripped = text
+        .trim_start_matches(['•', '◦', '▪', '·', '*'])
+        .trim_start();
+    let split = split_list_marker(text).or_else(|| split_list_marker(stripped));
+    let bullet = |text: String, marker: &str| Node::ListItem {
+        ordered: false,
+        number: 0,
+        first_in_list,
+        text: md_escape(&text),
+        level: 0,
+        // docling keeps the marker as the DocLang list marker
+        // (`<ldiv><marker>·</marker></ldiv>`); Markdown prints its own `-`.
+        marker: Some(marker.to_string()),
+        location: Some(loc),
+        dclx: None,
+        href: None,
+        layer: None,
+    };
+    // docling-core's `case_already_valid` is a *full* `\d+\.` match: `3.a.`
+    // and `1.2` are `case_auto` markers (`- 3.a. text`), not item numbers.
+    let is_number_dot = |m: &str| {
+        m.strip_suffix('.')
+            .is_some_and(|d| !d.is_empty() && d.chars().all(char::is_numeric))
+    };
+    match split {
+        Some((marker, body, true)) if is_number_dot(marker) => {
+            let number = parse_ordered_marker(marker).map_or(0, |(n, _)| n);
+            Node::ListItem {
+                ordered: true,
+                number,
+                first_in_list,
+                text: md_escape(body),
+                level: 0,
+                marker: Some(marker.to_string()),
+                location: Some(loc),
+                dclx: None,
+                href: None,
+                layer: None,
+            }
+        }
+        // `case_auto`: a marker holding a letter or digit rides in the text.
+        Some((marker, body, true)) => bullet(format!("{marker} {body}"), marker),
+        Some((marker, body, false)) => bullet(body.to_string(), marker),
+        None => bullet(stripped.to_string(), "·"),
+    }
+}
+
 fn parse_ordered_marker(s: &str) -> Option<(u64, String)> {
     let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
@@ -2770,48 +2997,14 @@ pub fn assemble_page(
                     text: md_escape(&text),
                 },
             )),
-            // docling drops the rendered bullet glyph; the Markdown serializer
-            // adds its own `- ` marker. An item whose text opens with an `N.`
-            // enumeration marker is an ordered item (rendered `N. text`).
-            // A leading dash stays: it is an ordinary text glyph that
-            // docling-parse keeps, and docling's items carry it into the
-            // Markdown (2305's OTSL list renders `- -"C" cell …`) — only the
-            // symbol-font bullets docling-parse filters out are stripped.
-            "list_item" => {
-                let stripped = text
-                    .trim_start_matches(['•', '◦', '▪', '·', '*'])
-                    .trim_start()
-                    .to_string();
-                if let Some((number, rest)) = parse_ordered_marker(&stripped) {
-                    nodes.push(Node::ListItem {
-                        ordered: true,
-                        number,
-                        first_in_list: false,
-                        text: md_escape(&rest),
-                        level: 0,
-                        marker: None,
-                        location: Some(loc),
-                        dclx: None,
-                        href: None,
-                        layer: None,
-                    });
-                } else {
-                    nodes.push(Node::ListItem {
-                        ordered: false,
-                        number: 0,
-                        first_in_list: false,
-                        text: md_escape(&stripped),
-                        level: 0,
-                        // docling keeps the bullet as the DocLang list marker
-                        // (`<ldiv><marker>·</marker></ldiv>`); Markdown ignores it.
-                        marker: Some("·".into()),
-                        location: Some(loc),
-                        dclx: None,
-                        href: None,
-                        layer: None,
-                    });
-                }
-            }
+            // docling's `ListItemMarkerProcessor.process_list_item` runs on
+            // every PDF list item: a leading bullet glyph or enumeration marker
+            // followed by whitespace is split off into the item's `marker`, and
+            // docling-core's Markdown then prints `- text` for a bullet, `N. text`
+            // for an `N.` marker and `- a) text` for any other marker holding a
+            // letter or digit (see [`list_item_node`]). The symbol-font bullets
+            // docling-parse filters out of its cells are stripped first.
+            "list_item" => nodes.push(list_item_node(&text, loc, false)),
             // TableFormer structure (cells + spans, text matched from word cells)
             // when available; otherwise geometric grid reconstruction; finally a
             // single cell.
@@ -3050,22 +3243,9 @@ fn picture_child_node(region: &Region, text: &str, loc: [u16; 4]) -> Option<Node
             },
         ),
         // docling-core's `add_list_item` under a non-list parent opens a
-        // list group per item, so every child item starts its own list.
-        "list_item" => Node::ListItem {
-            ordered: false,
-            number: 0,
-            first_in_list: true,
-            text: md_escape(
-                text.trim_start_matches(['•', '◦', '▪', '·', '*'])
-                    .trim_start(),
-            ),
-            level: 0,
-            marker: Some("·".into()),
-            location: Some(loc),
-            dclx: None,
-            href: None,
-            layer: None,
-        },
+        // list group per item, so every child item starts its own list;
+        // `_add_child_elements` runs the marker processor on it too.
+        "list_item" => list_item_node(text, loc, true),
         "page_header" | "page_footer" => Node::PageFurniture {
             footer: region.label == "page_footer",
             location: loc,
@@ -4080,6 +4260,107 @@ mod tests {
             ["table", "text"]
         );
         assert_eq!(regions[1].t, 200.0, "the table-free panel still demotes");
+    }
+
+    /// docling's `ListItemMarkerProcessor` + docling-core's Markdown list rules
+    /// (see `list_item_node`): a bullet glyph or `-` is split off and the
+    /// serializer's own `-` printed (2305's OTSL list reads `- "C" cell`, not
+    /// `- - "C" cell`); `N.` is an ordered item; any other marker with a letter
+    /// or digit stays in the text behind the bullet; no marker → plain bullet.
+    #[test]
+    fn list_item_markers_split_like_docling() {
+        let text_of = |n: &Node| match n {
+            Node::ListItem {
+                ordered,
+                number,
+                text,
+                marker,
+                ..
+            } => (*ordered, *number, text.clone(), marker.clone()),
+            other => panic!("{other:?}"),
+        };
+        let loc = [0, 0, 100, 10];
+        assert_eq!(
+            text_of(&super::list_item_node(
+                "- \"C\" cell - a new table cell",
+                loc,
+                false
+            )),
+            (
+                false,
+                0,
+                "\"C\" cell - a new table cell".into(),
+                Some("-".into())
+            )
+        );
+        assert_eq!(
+            text_of(&super::list_item_node("• Bullet text", loc, false)),
+            (false, 0, "Bullet text".into(), Some("•".into()))
+        );
+        assert_eq!(
+            text_of(&super::list_item_node("3. Third step", loc, false)),
+            (true, 3, "Third step".into(), Some("3.".into()))
+        );
+        assert_eq!(
+            text_of(&super::list_item_node("a) Option", loc, false)),
+            (false, 0, "a) Option".into(), Some("a)".into()))
+        );
+        assert_eq!(
+            text_of(&super::list_item_node("1.2 Nested outline", loc, false)),
+            (false, 0, "1.2 Nested outline".into(), Some("1.2".into()))
+        );
+        // 2203's `3.a. If all IOU scores…`: a compound marker is not an item
+        // number — docling prints `- 3.a. If all…`.
+        assert_eq!(
+            text_of(&super::list_item_node("3.a. If all IOU scores", loc, false)),
+            (
+                false,
+                0,
+                "3.a. If all IOU scores".into(),
+                Some("3.a.".into())
+            )
+        );
+        // A glued symbol-font bullet is stripped, a spaced one is the marker.
+        assert_eq!(
+            text_of(&super::list_item_node("•Glued", loc, false)),
+            (false, 0, "Glued".into(), Some("·".into()))
+        );
+        // No whitespace after the glyph → not a marker (docling's `\s` is required).
+        assert_eq!(
+            text_of(&super::list_item_node("-5 degrees", loc, false)),
+            (false, 0, "-5 degrees".into(), Some("·".into()))
+        );
+        // The remaining numbered shapes, first-wins like docling's list.
+        for (input, marker, body) in [
+            ("1.2.3. Deep", "1.2.3.", "Deep"),
+            ("9a) Nine-a", "9a)", "Nine-a"),
+            ("(3.a) Paren", "(3.a)", "Paren"),
+            ("12) Twelve", "12)", "Twelve"),
+            ("(4) Four", "(4)", "Four"),
+            ("[7] Seven", "[7]", "Seven"),
+            ("iv. Roman", "iv.", "Roman"),
+            ("IX. Roman", "IX.", "Roman"),
+            ("b. Letter", "b.", "Letter"),
+            ("B) Letter", "B)", "Letter"),
+        ] {
+            assert_eq!(
+                super::split_list_marker(input),
+                Some((marker, body, true)),
+                "{input}"
+            );
+        }
+        // A `1.2.` whose optional dot would eat the separator backtracks like
+        // Python's regex; a marker with nothing after the whitespace is none.
+        assert_eq!(
+            super::split_list_marker("1.2.\tx"),
+            Some(("1.2.", "x", true))
+        );
+        assert_eq!(super::split_list_marker("1. "), None);
+        assert_eq!(super::split_list_marker("• "), None);
+        assert_eq!(
+            text_of(&super::list_item_node("Plain item", loc, false)),
+            (false, 0, "Plain item".into(), Some("·".into()))
+        );
     }
 
     #[test]

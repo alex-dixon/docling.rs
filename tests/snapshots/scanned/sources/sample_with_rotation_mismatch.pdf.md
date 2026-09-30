@@ -4,9 +4,9 @@
 
 SAPORSLANE-BOOLE.DORSET-BH258ER
 
-TELEPHONEB0OLE(94513)51617-TELEX123456
+TELEPHONEB0OLE(94513）51617-TELEX123456
 
-OurRef.35O/PJC/EAC
+OurRef.350/PJC/EAC
 
 Dr.P.N.Cundall, Mining Surveys Ltd., Holroyd Road, Reading, Berks.
 
@@ -22,10 +22,10 @@ Probably you have uses for this facility in your organisation.
 
 Yours sincerely,
 
+<!-- image -->
+
 P.J.CROSS Group Leader - Facsimile Research
 
 <!-- image -->
 
-<!-- image -->
-
-18th January,1972.
+18thJanuary,1972.

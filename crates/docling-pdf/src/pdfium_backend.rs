@@ -602,26 +602,38 @@ fn extract_page(
         }
     }
 
-    // The opt-in docling-parse renderer (#478, `dparse_render.rs`): both model
-    // inputs come from docling-parse's Blend2D canvas, requested in docling's
-    // order — the scale-1.0 layout image first (docling decodes the page at its
-    // `render_scale` of 1.0, which fixes the bitmap decode resolution), then
-    // the scale-2.0 image TableFormer/OCR crop from (`_render_image_at_scale`
-    // on the same page decoder). The canvases are `ceil`-sized where pdfium's
-    // are `round`ed; every consumer maps points through `RENDER_SCALE`, not
-    // through the image size, so the extra row/column is harmless.
+    // The docling-parse renderer (#478, `dparse_render.rs`): the model inputs
+    // come from docling-parse's Blend2D canvas, requested in docling's order
+    // and with its decode hint — the scale-1.0 layout image (docling decodes
+    // the page once, at its `render_scale` of 1.0), then the scale-2.0 bitmap
+    // TableFormer crops from (`_render_image_at_scale` on the same decoder,
+    // hence the same hint). One deliberate exception: a *scanned* page — no
+    // text layer, the OCR path — keeps pdfium's bitmap. docling's 2.0/3.0
+    // re-renders draw the raster its decoders reduced to 72 dpi, and Blend2D's
+    // blit of a scan differs from pdfium's render + downscale in a way the
+    // `ch` conformance recognizer feels (`scanned/ocr_test.pdf` read `JsON` for
+    // `JSON` from either docling-parse raster, hint 1.0 or full resolution);
+    // pdfium's raster is the one the scanned groundtruth was matched with, so
+    // OCR keeps it (recorded in PDF_CONFORMANCE.md). The canvases are
+    // `ceil`-sized where pdfium's are `round`ed; every consumer maps points
+    // through `RENDER_SCALE`, not through the image size, so the extra
+    // row/column is harmless.
+    let scanned = cells.is_empty() && word_cells.is_empty() && code_cells.is_empty();
     let (mut dp_image, mut dp_layout) = (None, None);
     if let (true, Some(dp)) = (render_image, dparse) {
         let io_err = |e: String| PdfiumError::IoError(std::io::Error::other(e));
-        let layout =
-            crate::timing::timed("dparse.render_layout", || dp.render(index as usize, 1.0))
-                .map_err(io_err)?;
-        let full = crate::timing::timed("dparse.render", || {
-            dp.render(index as usize, f64::from(RENDER_SCALE))
+        let layout = crate::timing::timed("dparse.render_layout", || {
+            dp.render(index as usize, 1.0, 1.0)
         })
         .map_err(io_err)?;
+        if !scanned {
+            let full = crate::timing::timed("dparse.render", || {
+                dp.render(index as usize, f64::from(RENDER_SCALE), 1.0)
+            })
+            .map_err(io_err)?;
+            dp_image = Some(full);
+        }
         dp.release_page(index as usize);
-        dp_image = Some(full);
         dp_layout = Some(layout);
     }
     let image = if let Some(img) = dp_image.take() {
@@ -704,7 +716,6 @@ fn extract_page(
     // 90° steps), `width`/`height` swap to the upright box, and the display
     // rotation is recorded so assembly can rotate the finished geometry back
     // into display space (docling reports rotated pages in display coords).
-    let scanned = cells.is_empty() && word_cells.is_empty() && code_cells.is_empty();
     let mut page = PdfPage {
         width,
         height,

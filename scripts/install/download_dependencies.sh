@@ -225,6 +225,30 @@ else
     echo "  ! pdfium-$PDFIUM_OS-$PDFIUM_ARCH.tgz not fetched (offline?) — PDF rasterization stays unavailable"
   fi
 fi
+# docling-parse's page renderer as a runtime plugin (#478): the raster docling
+# 2.123+ feeds its models, which the pipeline prefers over pdfium whenever the
+# library is present (DOCLING_RS_RENDERER=auto). Built by
+# .github/workflows/docling-parse-render.yml into the models release as
+# docling-parse-render-<os>-<arch>.tar.gz (lib/ + pdf_resources/); a tag that
+# does not host it yet, or a platform without a build, keeps pdfium — build it
+# locally with scripts/install/build_docling_parse_render.sh.
+if [ -n "$PDFIUM_ARCH" ]; then
+  DPR_ASSET="docling-parse-render-$PDFIUM_OS-$PDFIUM_ARCH.tar.gz"
+  if [ "$FORCE" = false ] && ls .docling-parse/lib/libdparse_render.* >/dev/null 2>&1; then
+    echo "  = .docling-parse/lib/libdparse_render (already present)"
+  else
+    mkdir -p .docling-parse
+    # shellcheck disable=SC2086
+    if curl -fsSL $CURL_TIMEOUTS -o .docling-parse/plugin.tgz "$BASE_URL/$DPR_ASSET" 2>/dev/null; then
+      tar xzf .docling-parse/plugin.tgz -C .docling-parse
+      rm -f .docling-parse/plugin.tgz
+      echo "  > .docling-parse/lib + pdf_resources ($DPR_ASSET)"
+    else
+      rm -f .docling-parse/plugin.tgz
+      echo "  ($DPR_ASSET not hosted for this tag/platform — the model inputs render with pdfium; scripts/install/build_docling_parse_render.sh builds the plugin locally)"
+    fi
+  fi
+fi
 fetch "$BASE_URL/layout_heron.onnx" .models/layout_heron.onnx
 fetch "$BASE_URL/ocr_rec.onnx" .models/ocr_rec.onnx
 fetch "$BASE_URL/ppocr_keys_v1.txt" .models/ppocr_keys_v1.txt

@@ -26,9 +26,27 @@ export DOCLING_OCR_DET_ONNX="${DOCLING_OCR_DET_ONNX:-$(pwd)/.models/ocr_det.onnx
 export DOCLING_TABLEFORMER_ENCODER="${DOCLING_TABLEFORMER_ENCODER:-$(pwd)/.models/tableformer/encoder.onnx}"
 export DOCLING_TABLEFORMER_DECODER="${DOCLING_TABLEFORMER_DECODER:-$(pwd)/.models/tableformer/decoder.onnx}"
 export DOCLING_TABLEFORMER_BBOX="${DOCLING_TABLEFORMER_BBOX:-$(pwd)/.models/tableformer/bbox.onnx}"
+# The model inputs are rendered by docling-parse's renderer (#478), like the
+# docling that wrote the groundtruth (its default backend since 2.123). The
+# baselines are that renderer's, so its absence is an error here, not the
+# quiet pdfium fallback the `auto` default gives a plain checkout; run with
+# DOCLING_RS_RENDERER=pdfium to score the pdfium path against the same files.
+export DOCLING_RS_RENDERER="${DOCLING_RS_RENDERER:-docling-parse}"
+export DOCLING_PARSE_RENDER_LIB="${DOCLING_PARSE_RENDER_LIB:-$(pwd)/.docling-parse/lib}"
+if [ "$DOCLING_RS_RENDERER" = docling-parse ]; then
+  for f in "$DOCLING_PARSE_RENDER_LIB"/libdparse_render.*; do
+    [ -e "$f" ] || { echo "MISSING: $DOCLING_PARSE_RENDER_LIB/libdparse_render.so  (run scripts/install/build_docling_parse_render.sh, or DOCLING_RS_RENDERER=pdfium)"; exit 1; }
+  done
+fi
 
 cargo build --release --quiet -p docling-cli
 BIN=./target/release/docling-rs
+# Upstream generates tests/data/pdf/groundtruth with `do_ocr=False`
+# (tests/test_e2e_conversion.py: layout + TableFormer with cell matching, no
+# OCR) and serializes it with `export_to_markdown(compact_tables=True)`
+# (tests/verify_utils.py), so the pipeline runs the same way — layout and
+# tables, never OCR, unpadded `| - |` tables.
+BIN_ARGS=(--skip-ocr --compact-tables)
 
 # Collapse whitespace runs to a single space (and trim) so a spacing-only diff —
 # e.g. docling's spurious double space in amt's `up to  1 / 4`, where our
@@ -45,7 +63,7 @@ for gt in tests/data/pdf/groundtruth/*.md; do
   src="tests/data/pdf/sources/$stem.pdf"
   [[ -f "$src" ]] || continue
   total=$((total + 1))
-  out="$("$BIN" "$src" 2>/dev/null || echo '<ERROR>')"
+  out="$("$BIN" "${BIN_ARGS[@]}" "$src" 2>/dev/null || echo '<ERROR>')"
   # Strict comparison, trailing-newline-insensitive; one changed line counts as 2.
   d="$(diff <(printf '%s' "$out") <(printf '%s' "$(cat "$gt")") | grep -cE '^[<>]' || true)"
   # Whitespace-normalized comparison.

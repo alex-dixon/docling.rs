@@ -99,6 +99,10 @@ pub(crate) struct StreamSettings {
     /// [`DocumentConverter::page_break_placeholder`] for the streamer — the
     /// PDF path never builds a `DoclingDocument` to carry it.
     pub page_break_placeholder: Option<String>,
+    /// [`DocumentConverter::compact_tables`] for the streamer, for the same
+    /// reason: the buffered PDF path sets it on the document it builds, the
+    /// streaming path has no document.
+    pub compact_tables: bool,
 }
 
 /// Spawn the background conversion and return the chunk iterator.
@@ -154,13 +158,13 @@ fn run_pdf(
     image_mode: ImageMode,
     tx: &std::sync::mpsc::SyncSender<Result<String, ConversionError>>,
 ) {
-    // The PDF pipeline builds its document from `DoclingDocument::new` defaults, so
-    // tables use the padded GitHub serializer (compact_tables = false), matching the
-    // buffered PDF path.
+    // Tables use the padded GitHub serializer unless the converter asked for
+    // compact ones — the same knob the buffered PDF path carries on its
+    // document (`--compact-tables` used to reach only `--no-stream`).
     let mut streamer = MarkdownStreamer::with_artifacts(
         settings.strict,
         image_mode,
-        false,
+        settings.compact_tables,
         &settings.artifacts_dir,
     )
     .with_page_break_placeholder(settings.page_break_placeholder.clone());

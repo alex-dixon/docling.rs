@@ -1542,14 +1542,15 @@ directly: `DOCLING_LAYOUT_ONNX`, `DOCLING_OCR_REC_ONNX`, `DOCLING_OCR_DICT`,
 `DOCLING_TABLEFORMER_{ENCODER,DECODER,BBOX}`, `DOCLING_CODE_FORMULA_DIR`
 (enrichment models), `PDFIUM_DYNAMIC_LIB_PATH` — an
 env var always wins over the `./models` / `./.pdfium` default. Other
-process-wide knobs: `DOCLING_RS_RENDERER` (`pdfium`, the default, or
-`docling-parse` to render the layout/TableFormer/OCR page images with
-docling-parse's own Blend2D renderer — the raster docling 2.123+ feeds its
-models, #478 — through the small shared library
-`scripts/install/build_docling_parse_render.sh` builds into
-`.docling-parse/`; `DOCLING_PARSE_RENDER_LIB` / `DOCLING_PARSE_RESOURCES`
-point at it explicitly, and a missing library falls back to pdfium with one
-warning), `DOCLING_RS_PDF_THREADS` (total thread budget;
+process-wide knobs: `DOCLING_RS_RENDERER` (`auto`, the default: the
+layout/TableFormer/OCR page images come from docling-parse's own Blend2D
+renderer — the raster docling 2.123+ feeds its models, #478 — whenever the
+small plugin library `download_dependencies.sh` fetches into
+`.docling-parse/` (or `scripts/install/build_docling_parse_render.sh`
+builds) is present, and from pdfium otherwise; `docling-parse` requires the
+plugin and warns once when it is missing, `pdfium` never loads it;
+`DOCLING_PARSE_RENDER_LIB` / `DOCLING_PARSE_RESOURCES` point at it
+explicitly), `DOCLING_RS_PDF_THREADS` (total thread budget;
 `_WORKERS`/`_INTRA` below split it), `DOCLING_RS_TIMING=1` (per-stage
 timings on stderr), `DOCLING_RS_MAX_IMAGE_PIXELS` (image-input decompression
 cap), `DOCLING_RS_MAX_HTML_DEPTH`, `DOCLING_RS_MAX_PART_BYTES` (HTML/OOXML

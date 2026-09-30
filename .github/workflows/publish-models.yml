@@ -264,6 +264,9 @@ jobs:
           gh release view "$TAG" --repo "${{ github.repository }}" \
             --json assets --jq '.assets[].name' |
           while IFS= read -r asset; do
+            # docling-parse-render.yml publishes its per-platform tarballs
+            # into the same release; they are not staged here, so keep them.
+            case "$asset" in docling-parse-render-*) continue ;; esac
             if [ ! -f "release-assets/$asset" ]; then
               echo "pruning stale asset: $asset"
               gh release delete-asset "$TAG" "$asset" --repo "${{ github.repository }}" --yes

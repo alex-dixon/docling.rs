@@ -840,6 +840,7 @@ impl DocumentConverter {
             ocr_scale: self.ocr_scale_choice(),
             artifacts_dir: self.artifacts_dir.clone(),
             page_break_placeholder: self.page_break_placeholder.clone(),
+            compact_tables: self.compact_tables,
         }
     }
 
