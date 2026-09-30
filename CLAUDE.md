@@ -154,7 +154,10 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   render, docling's pypdfium2 chain, only with the `pdfium` cargo feature.
   `DOCLING_RS_FONT_DIRS`
   adds host font directories for fonts without a program (`.models/fonts`,
-  Liberation/DejaVu/URW/Noto system dirs are scanned by default).
+  Liberation/DejaVu/URW/Noto system dirs are scanned by default; a font-less
+  host — slim container, bare runner — gets them from
+  `download_dependencies.sh --with-fonts` or the `fonts-liberation` +
+  `fonts-dejavu-core` packages, which the Dockerfiles install).
   `DOCLING_PARSE_RENDER_LIB` /
   `DOCLING_PARSE_RESOURCES` override the library and `pdf_resources`
   locations. The PDF baselines — `tests/snapshots`, the groundtruth table —

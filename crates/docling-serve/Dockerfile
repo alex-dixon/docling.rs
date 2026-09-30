@@ -110,7 +110,13 @@ RUN if [ "$FETCH_ASSETS" = "1" ]; then sh scripts/install/download_dependencies.
 # Stage: runtime (CPU base, Debian Trixie slim)
 # ------------------------------------------------------------------------------
 FROM debian:trixie-slim AS runtime
+# fonts-liberation + fonts-dejavu-core: the faces the pure-Rust page renderer
+# substitutes for fonts a PDF does not embed (the base-14 Helvetica/Times/
+# Courier references of most office exports) — without any font on the
+# system those glyphs draw as placeholder boxes and the layout model sees a
+# different page.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg tesseract-ocr curl \
+       fonts-liberation fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=assets /src/.models ./.models
@@ -120,6 +126,7 @@ COPY --from=assets /src/.models ./.models
 # ------------------------------------------------------------------------------
 FROM nvidia/cuda:12.6.2-cudnn-runtime-ubuntu24.04 AS runtime-cuda
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg tesseract-ocr curl \
+       fonts-liberation fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=assets /src/.models ./.models

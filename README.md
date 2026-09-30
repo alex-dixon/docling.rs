@@ -1319,6 +1319,19 @@ docling-parse renderer plugin (the conformance oracle) is fetched only with
 `--with-docling-parse`; a build with the opt-in `pdfium` cargo feature looks
 for `libpdfium` under `PDFIUM_DYNAMIC_LIB_PATH` / `.pdfium/lib`.
 
+**Fonts.** The pure-Rust page renderer draws fonts a PDF does not embed —
+the base-14 Helvetica / Times / Courier most office exports reference — from
+the host's font directories (Liberation / DejaVu / URW / Noto on Linux, the
+system fonts on macOS and Windows), so a desktop needs nothing extra. A host
+with no fonts at all (a slim container, a bare CI runner) renders those
+glyphs as placeholder boxes and the layout model sees a different page:
+install `fonts-liberation` + `fonts-dejavu-core` (what the published Docker
+images do), or `download_dependencies.sh --with-fonts`
+(`DOCLING_RS_WITH_FONTS=1`) to drop both families into `.models/fonts/`
+(Liberation from Debian's package — needs `ar` — and DejaVu from its GitHub
+release, licence texts alongside). `DOCLING_RS_FONT_DIRS` names further
+directories at runtime.
+
 #### Whisper models for audio/ASR
 
 The default run already fetches **Whisper tiny** (multilingual) into

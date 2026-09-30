@@ -374,7 +374,10 @@ asked for by name) — in docling-parse's frame:
   embedded in `cmap.rs`, `/CIDToGIDMap`); fonts without a program draw
   from a host face (`fallback.rs`: `.models/fonts`, then the Liberation /
   DejaVu / URW / Noto directories, `DOCLING_RS_FONT_DIRS` adds more; the
-  style from the base-font name and descriptor flags).
+  style from the base-font name and descriptor flags. A host without fonts
+  draws each glyph's box instead — `download_dependencies.sh --with-fonts`
+  fetches Liberation + DejaVu into `.models/fonts`, and the Docker images
+  install the same two families as packages).
 * **Images** (`render/image.rs`): the phase-2 decoders (`raster::filters`,
   `raster::jpeg` — now 4-component YCCK/CMYK too — `raster::fax`) behind a
   general sample reader (1–16 bpc, any colour space above, `/Decode`,

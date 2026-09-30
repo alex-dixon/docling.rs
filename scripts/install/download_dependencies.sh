@@ -67,6 +67,14 @@
 # itself never loads it. Building the models from source: see
 # scripts/install/pdf_setup.sh.
 #
+# --with-fonts drops the Liberation and DejaVu families into .models/fonts —
+# the faces the pure-Rust page renderer substitutes for fonts a PDF does not
+# embed (the base-14 Helvetica/Times/Courier of most office exports). Only
+# needed where the host has no fonts of its own: a slim container, a bare
+# CI runner. Linux desktops, macOS and Windows already carry fonts the
+# renderer scans (`fonts-liberation`/`fonts-dejavu-core` packages, Arial /
+# Times / Courier); DOCLING_RS_FONT_DIRS adds more directories at runtime.
+#
 # Idempotent: skips files already on disk. Pass --force to re-fetch everything.
 set -eu
 
@@ -93,6 +101,7 @@ WITH_CHUNK=true
 WITH_ENRICH=false
 WITH_EMBED=false
 WITH_DPARSE="${DOCLING_RS_WITH_DOCLING_PARSE:-false}"
+WITH_FONTS="${DOCLING_RS_WITH_FONTS:-false}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -105,9 +114,10 @@ for arg in "$@"; do
     --enrich) WITH_ENRICH=true ;;
     --embed) WITH_EMBED=true ;;
     --with-docling-parse) WITH_DPARSE=true ;;
+    --with-fonts) WITH_FONTS=true ;;
 
     *)
-      echo "usage: download_dependencies.sh [--force] [--no-asr] [--asr-model=<preset>] [--no-int8] [--no-chunk] [--enrich] [--embed] [--with-docling-parse]" >&2
+      echo "usage: download_dependencies.sh [--force] [--no-asr] [--asr-model=<preset>] [--no-int8] [--no-chunk] [--enrich] [--embed] [--with-docling-parse] [--with-fonts]" >&2
       echo "  ASR presets: whisper_tiny_en whisper_base_en whisper_small_en whisper_distil_small_en" >&2
       exit 2
       ;;
@@ -227,6 +237,54 @@ if [ "$WITH_DPARSE" = true ]; then
         echo "  ($DPR_ASSET not hosted for this tag/platform — scripts/install/build_docling_parse_render.sh builds the plugin locally)"
       fi
     fi
+  fi
+fi
+# Fallback fonts for the Rust renderer (--with-fonts / DOCLING_RS_WITH_FONTS=1):
+# Liberation (metric-compatible with Arial / Times New Roman / Courier New,
+# SIL OFL 1.1) from Debian's binary package — upstream publishes 2.x only as
+# FontForge sources — and DejaVu (Bitstream Vera licence) from its GitHub
+# release. Fetched straight from those hosts, not re-hosted: they are stable
+# and the files are not ours to redistribute under the models release's
+# notice. The licence texts land next to the faces.
+if [ "$WITH_FONTS" = true ]; then
+  FONTS_DIR=.models/fonts
+  LIBERATION_DEB="https://deb.debian.org/debian/pool/main/f/fonts-liberation/fonts-liberation_2.1.5-3_all.deb"
+  DEJAVU_TBZ="https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2"
+  if [ "$FORCE" = false ] && [ -f "$FONTS_DIR/liberation/LiberationSans-Regular.ttf" ]; then
+    echo "  = $FONTS_DIR/liberation (already present)"
+  elif ! command -v ar >/dev/null 2>&1; then
+    echo "  (skipping Liberation: unpacking the Debian package needs \`ar\` (binutils); install fonts-liberation from your distribution instead)"
+  else
+    FONTS_TMP="$(mktemp -d)"
+    # shellcheck disable=SC2086
+    if curl -fsSL $CURL_TIMEOUTS -o "$FONTS_TMP/liberation.deb" "$LIBERATION_DEB"; then
+      (cd "$FONTS_TMP" && ar x liberation.deb data.tar.xz && tar xJf data.tar.xz)
+      rm -rf "$FONTS_DIR/liberation"
+      mkdir -p "$FONTS_DIR/liberation"
+      cp "$FONTS_TMP"/usr/share/fonts/truetype/liberation/*.ttf "$FONTS_DIR/liberation/"
+      cp "$FONTS_TMP"/usr/share/doc/fonts-liberation/copyright "$FONTS_DIR/liberation/LICENSE"
+      echo "  > $FONTS_DIR/liberation (12 faces)"
+    else
+      echo "  ! Liberation unavailable from $LIBERATION_DEB" >&2
+    fi
+    rm -rf "$FONTS_TMP"
+  fi
+  if [ "$FORCE" = false ] && [ -f "$FONTS_DIR/dejavu/DejaVuSans.ttf" ]; then
+    echo "  = $FONTS_DIR/dejavu (already present)"
+  else
+    FONTS_TMP="$(mktemp -d)"
+    # shellcheck disable=SC2086
+    if curl -fsSL $CURL_TIMEOUTS -o "$FONTS_TMP/dejavu.tar.bz2" "$DEJAVU_TBZ"; then
+      tar xjf "$FONTS_TMP/dejavu.tar.bz2" -C "$FONTS_TMP"
+      rm -rf "$FONTS_DIR/dejavu"
+      mkdir -p "$FONTS_DIR/dejavu"
+      cp "$FONTS_TMP"/dejavu-fonts-ttf-*/ttf/*.ttf "$FONTS_DIR/dejavu/"
+      cp "$FONTS_TMP"/dejavu-fonts-ttf-*/LICENSE "$FONTS_DIR/dejavu/LICENSE"
+      echo "  > $FONTS_DIR/dejavu ($(ls "$FONTS_DIR/dejavu"/*.ttf | wc -l | tr -d ' ') faces)"
+    else
+      echo "  ! DejaVu unavailable from $DEJAVU_TBZ" >&2
+    fi
+    rm -rf "$FONTS_TMP"
   fi
 fi
 fetch "$BASE_URL/layout_heron.onnx" .models/layout_heron.onnx

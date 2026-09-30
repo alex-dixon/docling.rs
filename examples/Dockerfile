@@ -149,8 +149,12 @@ RUN mkdir -p /artifacts \
 # ----------------------------------------------------------------------------
 FROM debian:trixie-slim AS runtime
 
+# fonts-liberation + fonts-dejavu-core: the fallback faces the pure-Rust page
+# renderer draws non-embedded (base-14) fonts with; a font-less image would
+# render them as placeholder boxes.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libstdc++6 libgomp1 \
+       fonts-liberation fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /artifacts/ /tmp/artifacts/
