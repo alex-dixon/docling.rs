@@ -602,20 +602,23 @@ fn extract_page(
         }
     }
 
-    // The docling-parse renderer (#478, `dparse_render.rs`): both model inputs
-    // come from docling-parse's Blend2D canvas. The scale-1.0 layout image is
-    // docling's exactly — decoded with its `render_scale` hint of 1.0, which
-    // lets the JPEG/JPX decoders reduce an oversampled scan to 72 dpi. The
-    // scale-2.0 bitmap the OCR and TableFormer crops come from is decoded at
-    // full resolution instead (hint 0): docling re-renders its 1×-decoded page
-    // for those stages too, so its OCR reads a 75-dpi scan upscaled, and the
-    // `ch` conformance recognizer then misreads `JSON` as `JsON` on
-    // `scanned/ocr_test.pdf` — a quality regression this pipeline does not
-    // take over (a deliberate deviation, recorded in PDF_CONFORMANCE.md; the
-    // vector content of a born-digital page is identical either way). The
-    // canvases are `ceil`-sized where pdfium's are `round`ed; every consumer
-    // maps points through `RENDER_SCALE`, not through the image size, so the
-    // extra row/column is harmless.
+    // The docling-parse renderer (#478, `dparse_render.rs`): the model inputs
+    // come from docling-parse's Blend2D canvas, requested in docling's order
+    // and with its decode hint — the scale-1.0 layout image (docling decodes
+    // the page once, at its `render_scale` of 1.0), then the scale-2.0 bitmap
+    // TableFormer crops from (`_render_image_at_scale` on the same decoder,
+    // hence the same hint). One deliberate exception: a *scanned* page — no
+    // text layer, the OCR path — keeps pdfium's bitmap. docling's 2.0/3.0
+    // re-renders draw the raster its decoders reduced to 72 dpi, and Blend2D's
+    // blit of a scan differs from pdfium's render + downscale in a way the
+    // `ch` conformance recognizer feels (`scanned/ocr_test.pdf` read `JsON` for
+    // `JSON` from either docling-parse raster, hint 1.0 or full resolution);
+    // pdfium's raster is the one the scanned groundtruth was matched with, so
+    // OCR keeps it (recorded in PDF_CONFORMANCE.md). The canvases are
+    // `ceil`-sized where pdfium's are `round`ed; every consumer maps points
+    // through `RENDER_SCALE`, not through the image size, so the extra
+    // row/column is harmless.
+    let scanned = cells.is_empty() && word_cells.is_empty() && code_cells.is_empty();
     let (mut dp_image, mut dp_layout) = (None, None);
     if let (true, Some(dp)) = (render_image, dparse) {
         let io_err = |e: String| PdfiumError::IoError(std::io::Error::other(e));
@@ -623,12 +626,14 @@ fn extract_page(
             dp.render(index as usize, 1.0, 1.0)
         })
         .map_err(io_err)?;
-        let full = crate::timing::timed("dparse.render", || {
-            dp.render(index as usize, f64::from(RENDER_SCALE), 0.0)
-        })
-        .map_err(io_err)?;
+        if !scanned {
+            let full = crate::timing::timed("dparse.render", || {
+                dp.render(index as usize, f64::from(RENDER_SCALE), 1.0)
+            })
+            .map_err(io_err)?;
+            dp_image = Some(full);
+        }
         dp.release_page(index as usize);
-        dp_image = Some(full);
         dp_layout = Some(layout);
     }
     let image = if let Some(img) = dp_image.take() {
@@ -711,7 +716,6 @@ fn extract_page(
     // 90° steps), `width`/`height` swap to the upright box, and the display
     // rotation is recorded so assembly can rotate the finished geometry back
     // into display space (docling reports rotated pages in display coords).
-    let scanned = cells.is_empty() && word_cells.is_empty() && code_cells.is_empty();
     let mut page = PdfPage {
         width,
         height,

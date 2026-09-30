@@ -164,20 +164,21 @@ the knob is exactly docling 2.129's input. With it:
   and the `multi_page` 54 (exact against its committed groundtruth) show how
   far live 2.129 itself has moved from the corpus groundtruth.
 
-**One deliberate deviation inside the plugin path — the bitmap decode hint.**
-docling decodes a page once, at its `render_scale` (1.0), and re-renders that
-decoder at 2.0 for TableFormer and 3.0 for OCR; docling-parse's
+**One deliberate deviation inside the plugin path — scanned pages keep pdfium's
+bitmap.** docling decodes a page once, at its `render_scale` (1.0), and
+re-renders that decoder at 2.0 for TableFormer and 3.0 for OCR; docling-parse's
 `bitmap_target_pixels_per_unit` lets the JPEG/JPX decoders reduce an
 oversampled scan to the hint's resolution (`codec_reduction_shift`), so
-docling's TableFormer and OCR see a 300-dpi scan decoded at 75 dpi and
-upscaled. Fed that raster, the `ch` conformance recognizer reads `JsON` where
-it read `JSON` from pdfium's full-resolution render
-(`crates/docling/tests/scanned.rs`, `ocr_test.pdf`). The layout image keeps
-docling's hint (it is docling's input, byte for byte); the scale-2.0 bitmap
-the OCR and TableFormer crops come from is decoded with hint 0 — full
-resolution — instead (`dpr_render`'s `bitmap_hint`, one decoder per distinct
-hint). Born-digital pages are identical either way; only embedded rasters
-differ, and there this pipeline keeps the sharper input.
+docling's OCR sees a 300-dpi scan decoded at 75 dpi and upscaled. Fed
+docling-parse's raster of `scanned/ocr_test.pdf` — at docling's hint *or*
+decoded at full resolution (`dpr_render`'s `bitmap_hint`, one decoder per
+hint) — the `ch` conformance recognizer reads `JsON` where it reads `JSON`
+from pdfium's render + downscale, which the scanned groundtruth was matched
+with (`crates/docling/tests/scanned.rs`): Blend2D's blit of a scan and
+pdfium's differ in a way the recognizer feels. So a page without a text layer
+— the OCR path — keeps pdfium's scale-2.0 bitmap, while its layout image is
+still docling-parse's; born-digital pages take both images from docling-parse
+with docling's hint, byte-identical to its inputs.
 
 So the renderer explains a measurable but modest share of the corpus residual
 (the issue's 1,962-page manual, with whole tables flipping label, is the
