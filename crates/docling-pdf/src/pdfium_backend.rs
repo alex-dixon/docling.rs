@@ -654,7 +654,6 @@ fn no_raster(index: i32) -> PdfiumError {
     )))
 }
 
-#[cfg(feature = "ml")]
 /// The pure-Rust raster of an image-only page at `width` × `height`
 /// (`raster::render`), when the object model is loaded and the page
 /// qualifies; timed like the pdfium render it replaces.
@@ -671,6 +670,7 @@ fn rust_raster(
     })
 }
 
+#[cfg(feature = "ml")]
 /// Everything pdfium contributes to a conversion when it is present: the
 /// document, its page handles, and the raw text FFI. Absent (`None`) when the
 /// library is not installed and the conversion can do without it — the page
