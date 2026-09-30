@@ -235,15 +235,15 @@ The DOI will be expanded to the URL https://doi.org/&lt;DOI&gt; in accordance wi
 
 The llncs document class contains several class options that have become obsolete over the years. We only mention them for completeness:
 
-- - The llncs document class changes the formatting of vectors coded with orivec \vec to boldface italics. If you absolutely need the original L A T E X design for vectors, i.e. an arrow above the related variable, you can restore it with the orivec option.
+- The llncs document class changes the formatting of vectors coded with orivec \vec to boldface italics. If you absolutely need the original L A T E X design for vectors, i.e. an arrow above the related variable, you can restore it with the orivec option.
 
 envcountsame
 
-- - All theorem-like environments share one counter, i.e. Theorem 1, Lemma 2, Corollary 3, etc.
+- All theorem-like environments share one counter, i.e. Theorem 1, Lemma 2, Corollary 3, etc.
 
 envcountreset envcountsect openbib oribibl
 
-- - All theorem-like environments are numbered per section, i.e. the related counters are reset to 1 in every section.
-- - All theorem-like environments are numbered per section, and the section number added to the individual counter, i.e. Theorem 1.2, Lemma 2.2, etc.
-- - This option produces the 'open' bibliography style, in which each block starts on a new line, and succeeding lines in a block are indented by \bibindent .
-- - This option restores the original L A T E X definitions for the bibliography and the \cite mechanism that some Bib T E X applications rely on.
+- All theorem-like environments are numbered per section, i.e. the related counters are reset to 1 in every section.
+- All theorem-like environments are numbered per section, and the section number added to the individual counter, i.e. Theorem 1.2, Lemma 2.2, etc.
+- This option produces the 'open' bibliography style, in which each block starts on a new line, and succeeding lines in a block are indented by \bibindent .
+- This option restores the original L A T E X definitions for the bibliography and the \cite mechanism that some Bib T E X applications rely on.

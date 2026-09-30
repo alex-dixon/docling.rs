@@ -1326,21 +1326,23 @@ fn split_list_marker(text: &str) -> Option<(&str, &str, bool)> {
 /// A PDF `list_item` region as docling emits it: `ListItemMarkerProcessor`
 /// splits the marker off (see [`split_list_marker`]), and docling-core's
 /// Markdown list serializer (default `orig_list_item_marker_mode = AUTO`,
-/// `ensure_valid_list_item_marker`) prints it as
-/// - `N. text` for an `N.` marker (`case_already_valid`: the marker verbatim),
-/// - `- text` for a bullet glyph (no letter or digit in the marker: only the
-///   `-` the serializer adds),
-/// - `- a) text` / `- 1.2 text` / `- [3] text` for any other marker
-///   (`case_auto`: the serializer's `-`, then the original marker) — spelled
-///   here as a bullet item whose text carries the marker, the way the DOCX and
-///   DOC backends already spell theirs.
-/// An item without a recognizable marker is a plain bullet. The symbol-font
-/// bullets docling-parse filters out of its cells (`•◦▪·*` glued to the text)
-/// are stripped before the match, as before.
+/// `ensure_valid_list_item_marker`) prints it as `N. text` for an `N.` marker
+/// (`case_already_valid`: the marker verbatim); as `- text` for a bullet glyph
+/// (no letter or digit in the marker: only the `-` the serializer adds); and
+/// as `- a) text` / `- 1.2 text` / `- [3] text` for any other marker
+/// (`case_auto`: the serializer's `-`, then the original marker) — spelled
+/// here as a bullet item whose text carries the marker, the way the DOCX and
+/// DOC backends already spell theirs. An item without a recognizable marker is
+/// a plain bullet. The symbol-font bullets docling-parse filters out of its
+/// cells (`•◦▪·*` glued to the text) are stripped before the match, as before.
 fn list_item_node(text: &str, loc: [u16; 4], first_in_list: bool) -> Node {
+    // docling's match runs on the text as docling-parse hands it over; the
+    // glued symbol-font bullets it never sees are stripped only when the raw
+    // text matches no marker (`•Text` → `Text`, but `• Text` → marker `•`).
     let stripped = text
         .trim_start_matches(['•', '◦', '▪', '·', '*'])
         .trim_start();
+    let split = split_list_marker(text).or_else(|| split_list_marker(stripped));
     let bullet = |text: String, marker: &str| Node::ListItem {
         ordered: false,
         number: 0,
@@ -1355,25 +1357,30 @@ fn list_item_node(text: &str, loc: [u16; 4], first_in_list: bool) -> Node {
         href: None,
         layer: None,
     };
-    match split_list_marker(stripped) {
-        Some((marker, body, true)) => {
-            if let Some((number, _)) = parse_ordered_marker(marker) {
-                Node::ListItem {
-                    ordered: true,
-                    number,
-                    first_in_list,
-                    text: md_escape(body),
-                    level: 0,
-                    marker: Some(marker.to_string()),
-                    location: Some(loc),
-                    dclx: None,
-                    href: None,
-                    layer: None,
-                }
-            } else {
-                bullet(format!("{marker} {body}"), marker)
+    // docling-core's `case_already_valid` is a *full* `\d+\.` match: `3.a.`
+    // and `1.2` are `case_auto` markers (`- 3.a. text`), not item numbers.
+    let is_number_dot = |m: &str| {
+        m.strip_suffix('.')
+            .is_some_and(|d| !d.is_empty() && d.chars().all(char::is_numeric))
+    };
+    match split {
+        Some((marker, body, true)) if is_number_dot(marker) => {
+            let number = parse_ordered_marker(marker).map_or(0, |(n, _)| n);
+            Node::ListItem {
+                ordered: true,
+                number,
+                first_in_list,
+                text: md_escape(body),
+                level: 0,
+                marker: Some(marker.to_string()),
+                location: Some(loc),
+                dclx: None,
+                href: None,
+                layer: None,
             }
         }
+        // `case_auto`: a marker holding a letter or digit rides in the text.
+        Some((marker, body, true)) => bullet(format!("{marker} {body}"), marker),
         Some((marker, body, false)) => bullet(body.to_string(), marker),
         None => bullet(stripped.to_string(), "·"),
     }
@@ -4196,6 +4203,22 @@ mod tests {
         assert_eq!(
             text_of(&super::list_item_node("1.2 Nested outline", loc, false)),
             (false, 0, "1.2 Nested outline".into(), Some("1.2".into()))
+        );
+        // 2203's `3.a. If all IOU scores…`: a compound marker is not an item
+        // number — docling prints `- 3.a. If all…`.
+        assert_eq!(
+            text_of(&super::list_item_node("3.a. If all IOU scores", loc, false)),
+            (
+                false,
+                0,
+                "3.a. If all IOU scores".into(),
+                Some("3.a.".into())
+            )
+        );
+        // A glued symbol-font bullet is stripped, a spaced one is the marker.
+        assert_eq!(
+            text_of(&super::list_item_node("•Glued", loc, false)),
+            (false, 0, "Glued".into(), Some("·".into()))
         );
         // No whitespace after the glyph → not a marker (docling's `\s` is required).
         assert_eq!(
