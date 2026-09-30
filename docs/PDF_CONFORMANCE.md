@@ -85,13 +85,69 @@ fp32 does not move them — the labels follow the image.
 
 Nothing in the corpus baselines moves with this note (snapshots 97/97,
 groundtruth as in the table above); it changes what "exact" means for a model
-*input*. What would close the gap is a port of that renderer for the model
-inputs — ~4,300 lines of Blend2D drawing code, a 2,200-line font resolver
-with the bundled fallback faces, FreeType outline extraction, and a
+*input*. What would close the gap for good is a port of that renderer for the
+model inputs — ~4,300 lines of Blend2D drawing code, a 2,200-line font
+resolver with the bundled fallback faces, FreeType outline extraction, and a
 rasterizer whose 8-bit coverage matches Blend2D's, or the borderline scores
-still move — or linking the C++ (Blend2D generates its pipelines with a JIT;
-neither route runs in wasm). That is model-level work, item 5 of the blocker
-list below; the pdfium chain stays the reference until then.
+still move (Blend2D generates its pipelines with a JIT; none of it runs in
+wasm). That is model-level work, item 5 of the blocker list below; the pdfium
+chain stays the reference.
+
+**The docling-parse renderer as an opt-in plugin (measured).** To put a
+number on the gap without making a C++ tree a build dependency, docling-parse's
+renderer is loadable at runtime: `scripts/install/build_docling_parse_render.sh`
+builds docling-parse v7.22.1 with one extra target — a C ABI over
+`pdf_decoder<DOCUMENT>` + `renderer<BLEND2D>`
+(`crates/docling-pdf/ffi/docling-parse-render/dparse_render.cpp`, reproducing
+`docling_threaded_renderer::worker_loop` step for step) — into
+`.docling-parse/lib/libdparse_render.so` + `pdf_resources/`, and
+`DOCLING_RS_RENDERER=docling-parse` makes `pdfium_backend::extract_page` take
+the scale-1.0 layout image and the scale-2.0 TableFormer/OCR bitmap from it
+(`dparse_render.rs`, `dlopen` like pdfium; missing library → pdfium with one
+warning). `scripts/conformance/dparse_render_check.py` compares the shim with
+the Python package's `PageParseResult.get_image`: **176/176 corpus renders
+(88 pages × scales 1.0 and 2.0) byte-identical**, so what the models see under
+the knob is exactly docling 2.129's input. With it:
+
+* *Snapshots:* 34 of 97 fixtures drift (2203 63, redp5110 103, 2206 11,
+  table_mislabeled 48 lines, the OCR'd scans 2–20, the LaTeX figure PDFs up to
+  139) — every ML-borderline decision moves once, as expected.
+* *Committed groundtruth* gets **worse**: 2203 51→84, 2206 56→61,
+  normal_4pages 28→30, redp5110 70→171, table_mislabeled 66→96 (9/17 strict,
+  10/17 normalized either way; identical under `DOCLING_RS_FP32=1`). Not a
+  regression of the render: the committed groundtruths of the ML-dependent
+  fixtures are an older, pypdfium2-era docling's, so that metric rewards
+  pdfium. redp5110's TOC is the illustration — with the docling-parse render
+  TableFormer recovers the two-column `title | page` grid the groundtruth (and
+  live docling) has, and the 171 lines are its padded cells wrapping
+  differently; the pdfium render collapses it to one column.
+* *Live docling 2.129* (default `DocumentConverter`: threaded docling-parse
+  backend, heron, TableFormer, RapidOCR; 16 of the 17 fixtures — 2203's OCR
+  needs a RapidOCR model the container could not download), Markdown diff
+  lines, strict / whitespace-normalized:
+
+  | fixture | pdfium render | docling-parse render |
+  |---|---:|---:|
+  | table_mislabeled_as_picture | 79 / 79 | **51 / 51** |
+  | redp5110_sampled | 304 / 248 | **297 / 237** |
+  | 2206.01062 | 145 / 121 | **138 / 114** |
+  | normal_4pages | 46 / 36 | **44 / 34** |
+  | right_to_left_03 | 32 / 22 | **30 / 20** |
+  | 2305.03393v1 · -pg9 · multi_page · amt · the exact ones | unchanged | unchanged |
+  | **total (16 files)** | **796 / 672** | **750 / 622** |
+
+  −46 strict / −50 normalized lines (−6 % / −7 %), no fixture worse. The
+  remaining residual against live docling is not the renderer: RapidOCR vs
+  PP-OCRv3, torch fp32 vs int8 ONNX, TableFormer/heron weight generations,
+  and the `multi_page` 54 (exact against its committed groundtruth) show how
+  far live 2.129 itself has moved from the corpus groundtruth.
+
+So the renderer explains a measurable but modest share of the corpus residual
+(the issue's 1,962-page manual, with whole tables flipping label, is the
+heavier case), and the corpus baselines were produced against a pdfium-era
+docling. The plugin therefore stays opt-in: snapshots and the groundtruth
+table are pdfium's, and a switch of the default would come with a baseline
+regeneration against live docling, not against the committed groundtruth.
 
 ### Region-scoped OCR reads overlapping regular regions once
 
@@ -934,10 +990,14 @@ model-level (or by-design) residual each issue closed with:
    pixels — the anti-aliasing of every glyph edge and hairline — and on
    borderline regions heron labels a whole table the other way (measured in
    "The layout input is pypdfium2-exact, not docling-parse-exact" above).
-   Closing it means porting or linking that renderer to the 8-bit coverage
-   value; until then the pdfium chain is the reference, and every byte-exact
-   claim about a model *input* in this document is exactness against the
-   pypdfium2 backend.
+   The renderer is available as a runtime plugin
+   (`DOCLING_RS_RENDERER=docling-parse`, byte-identical to the Python
+   package's canvas; measured there: −6 % Markdown diff lines against live
+   docling 2.129 on the corpus, more on table-heavy manuals). Closing it for
+   the default build means porting that renderer to the 8-bit coverage value;
+   until then the pdfium chain is the reference, and every byte-exact claim
+   about a model *input* in this document is exactness against the pypdfium2
+   backend.
 
 ---
 
