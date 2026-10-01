@@ -67,6 +67,9 @@
 # itself never loads it. Building the models from source: see
 # scripts/install/pdf_setup.sh.
 #
+# --with-onnxruntime fetches the ONNX Runtime shared library for IBM Z into
+# .models/onnxruntime/ (#504; automatic on an s390x host, where no prebuilt
+# runtime is linked in and the `ort-load-dynamic` build dlopens this one).
 # --with-fonts drops the Liberation and DejaVu families into .models/fonts —
 # the faces the pure-Rust page renderer substitutes for fonts a PDF does not
 # embed (the base-14 Helvetica/Times/Courier of most office exports). Only
@@ -102,6 +105,11 @@ WITH_ENRICH=false
 WITH_EMBED=false
 WITH_DPARSE="${DOCLING_RS_WITH_DOCLING_PARSE:-false}"
 WITH_FONTS="${DOCLING_RS_WITH_FONTS:-false}"
+case "$(uname -m)" in
+  s390x) WITH_ORT_DEFAULT=true ;;
+  *) WITH_ORT_DEFAULT=false ;;
+esac
+WITH_ORT="${DOCLING_RS_WITH_ONNXRUNTIME:-$WITH_ORT_DEFAULT}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -115,9 +123,11 @@ for arg in "$@"; do
     --embed) WITH_EMBED=true ;;
     --with-docling-parse) WITH_DPARSE=true ;;
     --with-fonts) WITH_FONTS=true ;;
+    --with-onnxruntime) WITH_ORT=true ;;
+    --no-onnxruntime) WITH_ORT=false ;;
 
     *)
-      echo "usage: download_dependencies.sh [--force] [--no-asr] [--asr-model=<preset>] [--no-int8] [--no-chunk] [--enrich] [--embed] [--with-docling-parse] [--with-fonts]" >&2
+      echo "usage: download_dependencies.sh [--force] [--no-asr] [--asr-model=<preset>] [--no-int8] [--no-chunk] [--enrich] [--embed] [--with-docling-parse] [--with-fonts] [--with-onnxruntime|--no-onnxruntime]" >&2
       echo "  ASR presets: whisper_tiny_en whisper_base_en whisper_small_en whisper_distil_small_en" >&2
       exit 2
       ;;
@@ -238,6 +248,39 @@ if [ "$WITH_DPARSE" = true ]; then
       fi
     fi
   fi
+fi
+# ONNX Runtime for IBM Z (#504; --with-onnxruntime / DOCLING_RS_WITH_ONNXRUNTIME=1,
+# on by default on an s390x host): pyke's `ort` links a prebuilt runtime on
+# x86_64/aarch64 only, so the s390x build of docling.rs (`ort-load-dynamic`)
+# dlopens libonnxruntime.so — `ORT_DYLIB_PATH`, then this directory through
+# the models-dir resolution, then the library search path. Built from source
+# by .github/workflows/onnxruntime-s390x.yml (scripts/install/build_onnxruntime_s390x.sh)
+# into the models release as onnxruntime-linux-s390x.tar.gz, which unpacks
+# into .models/onnxruntime/ as is. Only the s390x build exists: on another
+# arch the flag is a no-op with a note (the runtime is linked in there).
+if [ "$WITH_ORT" = true ]; then
+  case "$(uname -m)" in
+    s390x)
+      ORT_ASSET="onnxruntime-linux-s390x.tar.gz"
+      if [ "$FORCE" = false ] && [ -f .models/onnxruntime/libonnxruntime.so ]; then
+        echo "  = .models/onnxruntime/libonnxruntime.so (already present)"
+      else
+        mkdir -p .models/onnxruntime
+        # shellcheck disable=SC2086
+        if curl -fsSL $CURL_TIMEOUTS -o .models/onnxruntime/ort.tgz "$BASE_URL/$ORT_ASSET" 2>/dev/null; then
+          tar xzf .models/onnxruntime/ort.tgz -C .models/onnxruntime
+          rm -f .models/onnxruntime/ort.tgz
+          echo "  > .models/onnxruntime/libonnxruntime.so ($ORT_ASSET, ONNX Runtime $(cat .models/onnxruntime/VERSION 2>/dev/null))"
+        else
+          rm -f .models/onnxruntime/ort.tgz
+          echo "  ($ORT_ASSET not hosted for this tag — scripts/install/build_onnxruntime_s390x.sh builds it; without it the ML stages are unavailable on this host)"
+        fi
+      fi
+      ;;
+    *)
+      echo "  (--with-onnxruntime: only the s390x build exists; on $(uname -m) the runtime is linked into the binary)"
+      ;;
+  esac
 fi
 # Fallback fonts for the Rust renderer (--with-fonts / DOCLING_RS_WITH_FONTS=1):
 # Liberation (metric-compatible with Arial / Times New Roman / Courier New,

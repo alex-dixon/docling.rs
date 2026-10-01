@@ -95,6 +95,32 @@ RUN cargo build --release -p docling-serve -p docling-cli --features cuda --lock
     && test $(find target/release -maxdepth 1 -name "libonnxruntime_providers_*.so" | wc -l) -ge 2 \
     && find target/release -maxdepth 1 -name "libonnxruntime_providers_*.so" -exec cp -av {} /src/cuda-dylibs/ \;
 # ------------------------------------------------------------------------------
+# Stage: IBM Z (s390x) cross build (#504)
+#
+# Runs on the *build* platform (--platform=$BUILDPLATFORM) with the distro
+# cross toolchain: an s390x `rust` stage would compile the whole workspace
+# under QEMU for hours. pyke's `ort` has no prebuilt ONNX Runtime for the
+# target, so the binaries are built with `ort-load-dynamic` and dlopen the
+# libonnxruntime.so the assets stage fetches into .models/onnxruntime/
+# (download_dependencies.sh does so on an s390x host). No cargo-chef here:
+# the planner stage is a target-platform stage, i.e. QEMU again.
+# ------------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM rust:1.96-trixie AS build-s390x
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-s390x-linux-gnu g++-s390x-linux-gnu \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add s390x-unknown-linux-gnu
+ENV CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER=s390x-linux-gnu-gcc \
+    CC_s390x_unknown_linux_gnu=s390x-linux-gnu-gcc \
+    CXX_s390x_unknown_linux_gnu=s390x-linux-gnu-g++ \
+    AR_s390x_unknown_linux_gnu=s390x-linux-gnu-ar
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked -p docling-serve -p docling-cli \
+    --features docling-serve/ort-load-dynamic,docling-cli/ort-load-dynamic \
+    --target s390x-unknown-linux-gnu
+
+# ------------------------------------------------------------------------------
 # Stage: assets (the ONNX models, shared across CPU and CUDA)
 # ------------------------------------------------------------------------------
 FROM debian:trixie-slim AS assets
@@ -155,6 +181,27 @@ EXPOSE 5001
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=3 \
     CMD curl -f http://localhost:5001/ready || exit 1
 # Liveness: GET /health; readiness: GET /ready (503 until --warmup finishes).
+CMD ["docling-serve", "--addr", "0.0.0.0:5001", "--warmup"]
+
+# ==============================================================================
+# Final targets: IBM Z (s390x, #504) — the CPU runtime stage for linux/s390x
+# (Debian ships ffmpeg, tesseract and the fonts for it), the cross-built
+# binaries, and the ONNX Runtime the assets stage put in .models/onnxruntime/.
+# ==============================================================================
+
+# --- ghcr.io/docling-project/docling-rs (linux/s390x): the CLI ----------------
+FROM runtime AS cli-s390x
+COPY --from=build-s390x /src/target/s390x-unknown-linux-gnu/release/docling-rs /usr/local/bin/docling-rs
+ENV DOCLING_RS_MODELS_DIR=/app/.models
+WORKDIR /data
+ENTRYPOINT ["docling-rs"]
+
+# --- ghcr.io/docling-project/docling-rs-serve (linux/s390x): the HTTP API -----
+FROM runtime AS serve-s390x
+COPY --from=build-s390x /src/target/s390x-unknown-linux-gnu/release/docling-serve /usr/local/bin/docling-serve
+EXPOSE 5001
+HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=3 \
+    CMD curl -f http://localhost:5001/ready || exit 1
 CMD ["docling-serve", "--addr", "0.0.0.0:5001", "--warmup"]
 
 # ==============================================================================
