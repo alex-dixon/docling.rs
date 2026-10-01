@@ -21,6 +21,8 @@
 # build with `--build-arg FETCH_ASSETS=0` and mount them:
 #   docker run -p 5001:5001 docling-rs-serve
 #   docker run -p 5001:5001 -v ./models:/app/.models docling-rs-serve
+# Speech recognition beyond the default Whisper tiny: bake more presets in
+# with `--build-arg ASR_MODELS="parakeet_tdt_0.6b_v3 whisper_small_en"`.
 #
 # GPU run: pass --gpus all to expose the host NVIDIA GPU:
 #   docker run --gpus all -p 5001:5001 docling-rs-serve-cuda
@@ -129,7 +131,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /src
 COPY scripts/install/download_dependencies.sh scripts/install/download_dependencies.sh
 ARG FETCH_ASSETS=1
-RUN if [ "$FETCH_ASSETS" = "1" ]; then sh scripts/install/download_dependencies.sh; \
+# Extra speech-recognition presets to bake in (#508), space- or comma-separated
+# `--asr-model` names of download_dependencies.sh — e.g.
+# `--build-arg ASR_MODELS=parakeet_tdt_0.6b_v3` (~650 MB int8 + the Silero
+# VAD) or `whisper_small_en`. Whisper tiny, the default model, is always
+# fetched; requests pick a preset with the `asr_model` option.
+ARG ASR_MODELS=""
+RUN if [ "$FETCH_ASSETS" = "1" ]; then \
+      set -- ; for m in $(echo "$ASR_MODELS" | tr ',' ' '); do set -- "$@" "--asr-model=$m"; done; \
+      sh scripts/install/download_dependencies.sh "$@"; \
     else mkdir -p .models; fi
 
 # ------------------------------------------------------------------------------

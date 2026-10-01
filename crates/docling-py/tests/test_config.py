@@ -333,6 +333,111 @@ def test_ensure_env_still_respects_explicit_ocr_pins(tmp_path, monkeypatch):
     assert os.environ["DOCLING_OCR_DICT"] == "/custom/dict.txt"
 
 
+# --- #508: ASR model downloads ----------------------------------------------
+
+
+def _record_fetches(monkeypatch, m, hosted=lambda url: True):
+    """Replace the network fetch with a recorder: ``hosted(url)`` decides
+    whether a URL "exists"; fetched files are written as stubs."""
+    calls = []
+
+    def fake(url, dest, optional, progress, force=False):
+        calls.append((url, dest))
+        if not hosted(url):
+            if optional:
+                return False
+            raise OSError(f"404 {url}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"stub")
+        return True
+
+    monkeypatch.setattr(m, "_fetch", fake)
+    return calls
+
+
+def test_download_models_fetches_asr_presets_into_the_engine_layout(tmp_path, monkeypatch):
+    """``asr_model`` fetches the files the engine resolves under
+    ``DOCLING_RS_MODELS_DIR`` (= ``<cache>/models``), mirroring
+    ``download_dependencies.sh --asr-model=…``; ``pdf_models=False`` skips the
+    PDF stack."""
+    from docling_rs import models as m
+
+    monkeypatch.delenv("DOCLING_RS_FP32", raising=False)
+    calls = _record_fetches(monkeypatch, m)
+    m.download_models(
+        tmp_path,
+        progress=False,
+        asr_model=["parakeet_tdt_0.6b_v3", "whisper_tiny_en"],
+        pdf_models=False,
+    )
+    got = sorted(str(dest.relative_to(tmp_path)) for _, dest in calls)
+    assert got == sorted(
+        [
+            "models/asr/parakeet_tdt_0.6b_v3/encoder-model.int8.onnx",
+            "models/asr/parakeet_tdt_0.6b_v3/decoder_joint-model.int8.onnx",
+            "models/asr/parakeet_tdt_0.6b_v3/vocab.txt",
+            "models/asr/parakeet_tdt_0.6b_v3/config.json",
+            "models/asr/vad/silero_vad.onnx",
+            "models/asr/whisper_tiny_en/encoder_model.onnx",
+            "models/asr/whisper_tiny_en/decoder_model.onnx",
+            "models/asr/whisper_tiny_en/vocab.json",
+            "models/asr/whisper_tiny_en/added_tokens.json",
+        ]
+    )
+    assert any("istupakov/parakeet-tdt-0.6b-v3-onnx" in url for url, _ in calls)
+
+    # DOCLING_RS_FP32 fetches the full-precision graphs (encoder weights in a
+    # .data sidecar) instead of the int8 ones.
+    monkeypatch.setenv("DOCLING_RS_FP32", "1")
+    calls = _record_fetches(monkeypatch, m)
+    m.download_models(tmp_path / "fp32", progress=False, asr_model="parakeet_tdt_0.6b_v3", pdf_models=False)
+    names = {dest.name for _, dest in calls}
+    assert {"encoder-model.onnx", "encoder-model.onnx.data", "decoder_joint-model.onnx"} <= names
+    assert not any("int8" in n for n in names)
+
+
+def test_download_models_whisper_tiny_falls_back_to_hugging_face(tmp_path, monkeypatch):
+    """The default Whisper tiny comes from the release mirror (``asr_*``) and
+    falls back to Hugging Face when the release doesn't host it; it lands in
+    ``models/asr/`` itself, where the engine's default looks."""
+    from docling_rs import models as m
+
+    monkeypatch.delenv("DOCLING_RS_ASR_MODELS_URL", raising=False)
+    calls = _record_fetches(monkeypatch, m, hosted=lambda url: "huggingface.co" in url)
+    m.download_models(tmp_path, progress=False, asr_model="whisper_tiny", pdf_models=False)
+    for name in ("encoder_model.onnx", "decoder_model.onnx", "vocab.json"):
+        assert (tmp_path / "models/asr" / name).exists()
+        urls = [url for url, dest in calls if dest.name == name]
+        assert urls[0].endswith(f"/asr_{name}") and "huggingface.co" in urls[-1]
+
+
+def test_download_models_rejects_unknown_asr_presets_before_fetching(tmp_path, monkeypatch):
+    from docling_rs import models as m
+
+    calls = _record_fetches(monkeypatch, m)
+    with pytest.raises(ValueError, match="parakeet_tdt_0.6b_v3"):
+        m.download_models(tmp_path, progress=False, asr_model="parakeet_v2")
+    assert calls == []
+    assert "parakeet_tdt_0.6b_v3" in m.ASR_MODELS and "whisper_tiny" in m.ASR_MODELS
+
+
+def test_asr_model_kwarg_reaches_the_engine(tmp_path):
+    """An unknown ``asr_model`` is passed through and named by the engine's
+    error on an audio input (the kwarg is not silently dropped)."""
+    import wave
+
+    from docling_rs import ConversionError, DocumentConverter
+
+    wav = tmp_path / "silence.wav"
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\0\0" * 1600)
+    with pytest.raises((ConversionError, RuntimeError, ValueError), match="no_such_preset"):
+        DocumentConverter(asr_model="no_such_preset").convert(wav)
+
+
 # --- #304: remote VLM pipeline ----------------------------------------------
 
 # 1x1 red PNG: the VLM image leg needs no models.

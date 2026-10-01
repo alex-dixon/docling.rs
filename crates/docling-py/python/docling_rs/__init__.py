@@ -192,6 +192,15 @@ class DocumentConverter:
       not a kwarg of this wrapper.
     * ``allowed_formats`` — restrict conversion to these :class:`InputFormat`\\ s
       (docling's converter arg); a source of any other format raises.
+    * ``asr_model`` — the speech-recognition model for audio/video, by preset
+      name (docling's ``asr_model_specs``): ``None`` / ``"whisper_tiny"``
+      (default, multilingual Whisper tiny), ``"whisper_tiny_en"``,
+      ``"whisper_base_en"``, ``"whisper_small_en"``,
+      ``"whisper_distil_small_en"``, or ``"parakeet_tdt_0.6b_v3"`` (NVIDIA
+      Parakeet TDT 0.6B v3: 25 European languages detected per utterance,
+      ``asr_lang`` does not apply). Fetch the files once with
+      ``download_models(asr_model=…)``; an unknown name, or a preset whose
+      files are missing, fails the conversion with a message naming them.
     * ``asr_lang`` — transcription language for audio/video: a Whisper code
       (``"en"``, ``"de"``, …) or ``"auto"`` (default) to detect it from the
       first 30 seconds (docling 2.116 parity).
@@ -240,6 +249,7 @@ class DocumentConverter:
         ocr_engine: Optional[str] = None,
         skip_empty_cells: bool = False,
         compact_tables: bool = False,
+        asr_model: Optional[str] = None,
         asr_lang: Optional[str] = None,
         encoding: Optional[str] = None,
         pipeline: Optional[str] = None,
@@ -381,6 +391,7 @@ class DocumentConverter:
             ocr_engine=ocr_engine,
             skip_empty_cells=skip_empty_cells,
             compact_tables=compact_tables,
+            asr_model=asr_model,
             asr_lang=asr_lang,
             encoding=encoding,
             pipeline=pipeline,
