@@ -856,4 +856,28 @@ mod cache_guard_tests {
             }
         }
     }
+
+    /// `load-dynamic` with no library on the machine: a plain error naming
+    /// the lookup, never `ort`'s panic — what every ML stage degrades on
+    /// (#504). The first call pins the process-wide result, so this is the
+    /// only test that touches `runtime_library`.
+    #[cfg(feature = "load-dynamic")]
+    #[test]
+    fn missing_runtime_library_is_an_error_not_a_panic() {
+        std::env::set_var(
+            "ORT_DYLIB_PATH",
+            "/nonexistent/docling-rs/libonnxruntime.so",
+        );
+        let err = super::runtime_library().expect_err("no library at that path");
+        assert!(err.contains("ONNX Runtime library unavailable"), "{err}");
+        assert!(
+            err.contains("/nonexistent/docling-rs/libonnxruntime.so"),
+            "{err}"
+        );
+        assert!(err.contains("ORT_DYLIB_PATH"), "{err}");
+        let err2 = super::session_builder()
+            .err()
+            .expect("builder goes through the loader");
+        assert_eq!(err, err2);
+    }
 }
