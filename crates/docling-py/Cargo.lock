@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "docling"
-version = "1.84.0"
+version = "1.85.0"
 dependencies = [
  "calamine",
  "csv",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "docling-asr"
-version = "1.84.0"
+version = "1.85.0"
 dependencies = [
  "docling-core",
  "docling-onnx",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "docling-core"
-version = "1.84.0"
+version = "1.85.0"
 dependencies = [
  "pulldown-cmark",
  "serde_json",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "docling-onnx"
-version = "1.84.0"
+version = "1.85.0"
 dependencies = [
  "docling-core",
  "ort",
@@ -824,14 +824,14 @@ dependencies = [
 
 [[package]]
 name = "docling-pdf"
-version = "1.84.0"
+version = "1.85.0"
 dependencies = [
  "docling-core",
  "docling-onnx",
  "fast_image_resize",
  "flate2",
  "image",
- "libloading",
+ "libloading 0.8.9",
  "lopdf",
  "ort",
  "regex",
@@ -1631,6 +1631,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2014,6 +2024,7 @@ version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4336a1e2b38848325241c72889086886004e589b7c74f335e60a8e8db5138a0b"
 dependencies = [
+ "libloading 0.9.0",
  "ndarray",
  "ort-sys",
  "smallvec",

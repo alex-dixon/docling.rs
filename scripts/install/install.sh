@@ -11,7 +11,7 @@
 #
 # What it does:
 #   0. Tries the prebuilt CLI binary from the latest GitHub Release first
-#      (Linux x64/arm64) — no toolchain, no build. Falls back to source on any
+#      (Linux x64/arm64/s390x) — no toolchain, no build. Falls back to source on any
 #      mismatch; DOCLING_RS_FROM_SOURCE=1 skips the fast path.
 #   1. Checks for a Rust toolchain (>= 1.82 for the PDF crate); installs one
 #      via rustup (non-interactive) if `cargo` is missing.
@@ -55,7 +55,7 @@ fi
 
 # --- 0. Prebuilt binary (fast path) -------------------------------------------
 # GitHub Releases carry prebuilt CLI binaries (.github/workflows/cli-binaries.yml)
-# for Linux x64/arm64 and Windows x64 — downloading one skips the Rust toolchain
+# for Linux x64/arm64/s390x and Windows x64 — downloading one skips the Rust toolchain
 # and the multi-minute source build entirely. Any failure (no matching asset,
 # old release, no network to the API) quietly falls back to building from
 # source. DOCLING_RS_FROM_SOURCE=1 forces the source build.
@@ -64,6 +64,10 @@ if [ "${DOCLING_RS_FROM_SOURCE:-0}" != "1" ] && [ "$(uname -s)" = "Linux" ]; the
   case "$(uname -m)" in
     x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
     aarch64 | arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+    # IBM Z (#504): the binary loads ONNX Runtime at run time (ORT_DYLIB_PATH
+    # or .models/onnxruntime/libonnxruntime.so); without it the ML stages are
+    # unavailable, every other format converts.
+    s390x) TARGET="s390x-unknown-linux-gnu" ;;
     *) TARGET="" ;;
   esac
   if [ -n "$TARGET" ]; then

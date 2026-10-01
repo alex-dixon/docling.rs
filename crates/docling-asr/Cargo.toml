@@ -21,6 +21,8 @@ coreml = ["docling-onnx/coreml"]
 # self-built runtime (`ORT_LIB_LOCATION`, onnxruntime built with
 # `--use_xnnpack`).
 xnnpack = ["docling-onnx/xnnpack"]
+# ONNX Runtime loaded at run time instead of linked (#504); see docling-onnx.
+ort-load-dynamic = ["docling-onnx/load-dynamic", "ort/load-dynamic"]
 
 [dependencies]
 docling-core = { path = "../docling-core", version = "1.85.0" }

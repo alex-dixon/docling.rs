@@ -1665,6 +1665,39 @@ reproduce with `scripts/test/gpu_benchmark.sh`.
 >    CUDA) from the system — correct, since glibc is backwards-compatible,
 >    but fragile: anything run without that interpreter/rpath fails cryptically.
 
+### IBM Z (s390x) and other targets without a prebuilt ONNX Runtime — `ort-load-dynamic`
+
+docling.rs builds for `s390x-unknown-linux-gnu` (#504). The code is
+endian-clean — s390x is big-endian, and the docling-core, HTML-export and
+pure-Rust PDF renderer/raster suites pass as s390x binaries under
+`qemu-user` — so every declarative format and the PDF text layer work out of
+the box. What pyke's `ort` cannot provide there is a prebuilt ONNX Runtime
+(it ships binaries for x86_64/aarch64 only; upstream ONNX Runtime builds and
+runs on s390x — IBM contributes the port — but publishes no s390x release).
+The `ort-load-dynamic` cargo feature (CLI, serve, lib, Python, Node, RAG)
+therefore `dlopen`s the runtime at the first ML session instead of linking
+it:
+
+```bash
+# on the mainframe, or cross-compiled with gcc-s390x-linux-gnu as the release workflow does
+cargo build --release -p docling-cli --features ort-load-dynamic --target s390x-unknown-linux-gnu
+```
+
+The library is looked up as `ORT_DYLIB_PATH` (a path), then
+`.models/onnxruntime/libonnxruntime.so` (through the models-dir resolution,
+so `DOCLING_RS_MODELS_DIR` covers it), then the dynamic linker's search path
+(`LD_LIBRARY_PATH`, a distro package); ONNX Runtime 1.17 or newer, any
+build — a `pip install onnxruntime`'s `capi/libonnxruntime.so.1.x.y` works
+on x86_64, a self-built `build/Linux/Release/libonnxruntime.so` on s390x.
+Without it the ML stages degrade exactly like a missing model: PDF
+conversion fails with a message naming the library and the lookup, OCR and
+enrichment warn and skip, DOCX/HTML/XLSX/… and `docling-rs --to md` on a
+DOCX never touch it. The release workflow attaches the cross-compiled
+`docling-rs-<tag>-s390x-unknown-linux-gnu.tar.gz` (and the FFI library), and
+`install.sh` picks it on an s390x host. A prebuilt s390x ONNX Runtime in the
+models release, the `linux/s390x` container image and the s390x wheels /
+npm package follow once that library build is in place.
+
 Then either:
 
 ```bash

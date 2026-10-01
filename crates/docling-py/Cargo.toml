@@ -38,6 +38,7 @@ serde_json = "1"
 # (or `AcceleratorOptions(device="cpu")`) forces CPU. The provider libraries
 # ship next to the native module inside the wheel.
 cuda = ["docling/cuda"]
+ort-load-dynamic = ["docling/ort-load-dynamic"]
 
 [profile.release]
 lto = "thin"

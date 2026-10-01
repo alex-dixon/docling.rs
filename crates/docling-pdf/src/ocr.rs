@@ -301,7 +301,7 @@ impl OcrModel {
             .unwrap_or(lanes)
             .clamp(1, 8);
         let open = || -> Result<Session, String> {
-            let builder = Session::builder()
+            let builder = docling_onnx::session_builder()
                 .map_err(|e| format!("ocr: builder: {e}"))?
                 .with_intra_threads(1)
                 .map_err(|e| format!("ocr: intra_threads: {e}"))?;

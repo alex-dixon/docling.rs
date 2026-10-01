@@ -61,6 +61,9 @@ coreml = ["ml", "docling-onnx/coreml"]
 # CPU-class XNNPACK (#324) — see docling-onnx's note: self-built ONNX Runtime
 # only, never in a download-binaries CI matrix.
 xnnpack = ["ml", "docling-onnx/xnnpack"]
+# ONNX Runtime loaded at run time instead of linked (#504): targets without
+# pyke's prebuilt binaries (s390x) or a self-built runtime; see docling-onnx.
+ort-load-dynamic = ["ml", "docling-onnx/load-dynamic", "ort/load-dynamic"]
 
 [dependencies]
 # ~1.0: keeps libheif-sys on the 2.x line, which links libheif 1.16–1.17 —

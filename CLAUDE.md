@@ -47,7 +47,7 @@ validated for byte-for-byte conformance against upstream Python docling.
 | `crates/docling-core` | `DoclingDocument` model, Markdown/JSON/DCLX serializers, `MarkdownStreamer`, chunkers; `tree::ItemTree` — docling's item tree a backend can hand the JSON export when the flat nodes cannot express upstream's structure (HTML via `html_tree.rs`, DOCX via `docx_tree.rs`) |
 | `crates/docling` | `DocumentConverter` (format routing), declarative backends (`src/backend/`), streaming (`src/stream.rs`), video (`src/video.rs`) |
 | `crates/docling-pdf` | ML pipeline: lopdf object model + pure-Rust page renderer (`render/`) / raster (`raster/`) + RT-DETR layout + TableFormer + PP-OCRv3 + enrichment (`ml` feature; pdfium only behind the opt-in `pdfium` feature); pure-Rust text-layer path compiles for wasm without it |
-| `crates/docling-onnx` | Shared ONNX Runtime execution-provider selection (`DOCLING_RS_EP`, `cuda`/`tensorrt`/`directml`/`coreml`/`xnnpack` features) for docling-pdf/docling-asr/docling-rag |
+| `crates/docling-onnx` | Shared ONNX Runtime execution-provider selection (`DOCLING_RS_EP`, `cuda`/`tensorrt`/`directml`/`coreml`/`xnnpack` features) and the one `session_builder()` every session starts from (`load-dynamic` feature, #504: ORT `dlopen`ed at run time — `ORT_DYLIB_PATH`, `.models/onnxruntime/`, search path — for s390x and self-built runtimes) for docling-pdf/docling-asr/docling-rag |
 | `crates/docling-asr` | Whisper ASR: symphonia decode (audio + video containers) → log-mel → ONNX encoder/decoder |
 | `crates/docling-cli` | `docling-rs` binary (also `serve` subcommand behind `--features serve`) |
 | `crates/docling-serve` | axum HTTP conversion API (+ Dockerfile with ffmpeg) |
@@ -117,7 +117,10 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   (parallel single-thread OCR lanes; byte-identical output),
   `DOCLING_RS_MAX_MEMORY_MB` + `DOCLING_RS_MEMORY_WATERMARK_PCT` (serve
   admission control), `DOCLING_RS_FP32`,
-  `DOCLING_RS_EP` (GPU execution providers), `DOCLING_RS_ASR_LANG`,
+  `DOCLING_RS_EP` (GPU execution providers), `ORT_DYLIB_PATH` (an
+  `ort-load-dynamic` build only, #504: the `libonnxruntime.so` to `dlopen`;
+  unset → `.models/onnxruntime/<soname>` then the library search path; missing
+  → the ML stages degrade like a missing model), `DOCLING_RS_ASR_LANG`,
   `DOCLING_RS_OCR_LANG` (en default; `ch` = the docling-conformance OCR
   model, which conformance scripts pin themselves; BCP-47 tags for either
   language — `en-US`, `zh-Hans` — resolve to the same two, #388),

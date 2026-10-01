@@ -595,7 +595,7 @@ mod session {
             if !std::path::Path::new(&path).exists() {
                 return Err(format!("text detection model not found at {path}"));
             }
-            let builder = Session::builder()
+            let builder = docling_onnx::session_builder()
                 .map_err(|e| format!("ocr-det: builder: {e}"))?
                 .with_intra_threads(intra.max(1))
                 .map_err(|e| format!("ocr-det: intra_threads: {e}"))?;

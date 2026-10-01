@@ -38,6 +38,13 @@ directml = ["docling/directml", "docling-pdf/directml"]
 coreml = ["docling/coreml", "docling-pdf/coreml"]
 # CPU-class XNNPACK (#324): self-built ONNX Runtime only (ORT_LIB_LOCATION).
 xnnpack = ["docling/xnnpack", "docling-pdf/xnnpack"]
+# ONNX Runtime loaded at run time instead of linked (#504); see docling-onnx.
+ort-load-dynamic = [
+    "docling/ort-load-dynamic",
+    "docling-pdf/ort-load-dynamic",
+    "docling-onnx/load-dynamic",
+    "ort?/load-dynamic",
+]
 remote-sources = ["dep:suppaftp", "dep:ssh2"]
 rabbitmq = ["dep:lapin", "dep:futures-lite"]
 redis = ["dep:redis", "dep:futures-lite"]
