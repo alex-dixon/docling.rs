@@ -873,14 +873,7 @@ fn s(cs: &[char]) -> String {
 }
 
 fn starts_with(cs: &[char], i: usize, lit: &str) -> bool {
-    let mut j = i;
-    for c in lit.chars() {
-        if cs.get(j) != Some(&c) {
-            return false;
-        }
-        j += 1;
-    }
-    true
+    (i..).zip(lit.chars()).all(|(j, c)| cs.get(j) == Some(&c))
 }
 
 fn skip(cs: &[char], mut i: usize, pred: impl Fn(char) -> bool) -> usize {
