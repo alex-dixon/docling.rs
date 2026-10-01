@@ -1688,15 +1688,31 @@ The library is looked up as `ORT_DYLIB_PATH` (a path), then
 so `DOCLING_RS_MODELS_DIR` covers it), then the dynamic linker's search path
 (`LD_LIBRARY_PATH`, a distro package); ONNX Runtime 1.17 or newer, any
 build — a `pip install onnxruntime`'s `capi/libonnxruntime.so.1.x.y` works
-on x86_64, a self-built `build/Linux/Release/libonnxruntime.so` on s390x.
-Without it the ML stages degrade exactly like a missing model: PDF
-conversion fails with a message naming the library and the lookup, OCR and
-enrichment warn and skip, DOCX/HTML/XLSX/… and `docling-rs --to md` on a
-DOCX never touch it. The release workflow attaches the cross-compiled
-`docling-rs-<tag>-s390x-unknown-linux-gnu.tar.gz` (and the FFI library), and
-`install.sh` picks it on an s390x host. A prebuilt s390x ONNX Runtime in the
-models release, the `linux/s390x` container image and the s390x wheels /
-npm package follow once that library build is in place.
+on x86_64. Without it the ML stages degrade exactly like a missing model:
+PDF conversion fails with a message naming the library and the lookup, OCR
+and enrichment warn and skip, DOCX/HTML/XLSX/… and `docling-rs --to md` on a
+DOCX never touch it.
+
+**The s390x runtime itself** ships in the models release as
+`onnxruntime-linux-s390x.tar.gz`: ONNX Runtime 1.28.0 (the version behind
+`ort`'s prebuilt binaries) cross-compiled from source by
+`.github/workflows/onnxruntime-s390x.yml` with
+`scripts/install/build_onnxruntime_s390x.sh` — the distro
+`gcc-s390x-linux-gnu` toolchain, a host `protoc`, `--build_shared_lib`,
+Eigen's ZVector kernels disabled (they do not compile with GCC 13;
+ORT's s390x SIMD lives in MLAS) — about 35 minutes on four cores where
+upstream's own s390x CI compiles natively under QEMU for hours.
+`download_dependencies.sh` fetches it into `.models/onnxruntime/`
+automatically on an s390x host (`--with-onnxruntime` / `--no-onnxruntime`
+elsewhere), so the usual install flow covers the mainframe too; the
+workflow's smoke test runs the s390x CLI under `qemu-user` against the fresh
+library, a DOCX and then a one-page PDF through the layout model. The
+release workflow attaches the cross-compiled
+`docling-rs-<tag>-s390x-unknown-linux-gnu.tar.gz` (and the FFI library),
+`install.sh` picks it on an s390x host, and the container images publish a
+`linux/s390x` variant (binaries cross-built on the build platform, the
+runtime fetched into the image). Not yet: the s390x Python wheels and npm
+package.
 
 Then either:
 

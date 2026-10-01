@@ -120,7 +120,10 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   `DOCLING_RS_EP` (GPU execution providers), `ORT_DYLIB_PATH` (an
   `ort-load-dynamic` build only, #504: the `libonnxruntime.so` to `dlopen`;
   unset → `.models/onnxruntime/<soname>` then the library search path; missing
-  → the ML stages degrade like a missing model), `DOCLING_RS_ASR_LANG`,
+  → the ML stages degrade like a missing model; the s390x library is
+  `onnxruntime-linux-s390x.tar.gz` in the models release —
+  `onnxruntime-s390x.yml` / `build_onnxruntime_s390x.sh` cross-build it,
+  `download_dependencies.sh` fetches it on an s390x host), `DOCLING_RS_ASR_LANG`,
   `DOCLING_RS_OCR_LANG` (en default; `ch` = the docling-conformance OCR
   model, which conformance scripts pin themselves; BCP-47 tags for either
   language — `en-US`, `zh-Hans` — resolve to the same two, #388),
