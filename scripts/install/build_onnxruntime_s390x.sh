@@ -108,6 +108,15 @@ if [ ! -d "$SRC/.git" ]; then
   git clone --depth 1 --branch "$ORT_TAG" --recurse-submodules --shallow-submodules https://github.com/microsoft/onnxruntime.git "$SRC"
 fi
 
+# clang (zig) wants a builtin type after `__vector` where gcc also takes a
+# typedef: MLAS's s390x quantized kernels spell `__vector int32_t`. Patched
+# in place (idempotent; `int32_t` is `int` on s390x). gcc builds take it too.
+if [ "$ORT_TOOLCHAIN" = zig ]; then
+  sed -i -E 's/__vector int32_t\b/__vector int/g' \
+    "$SRC/onnxruntime/core/mlas/lib/qlmul.cpp" \
+    "$SRC/onnxruntime/core/mlas/lib/s390x/qgemm_kernel_zvector.cpp"
+fi
+
 # --skip_tests only skips *running* the tests; onnxruntime_BUILD_UNIT_TESTS=OFF
 # keeps build.py from compiling them too (onnxruntime_test_all alone is
 # thousands of objects — a third of the wall time — and drags googletest in).
