@@ -241,15 +241,24 @@ pub fn to_html(
         );
         (html, ser.artifacts)
     };
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .name("docling-html".into())
-            .stack_size(256 << 20)
-            .spawn_scoped(scope, render)
-            .expect("spawn the html serializer thread")
-            .join()
-            .expect("html serializer thread panicked")
-    })
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .name("docling-html".into())
+                .stack_size(256 << 20)
+                .spawn_scoped(scope, render)
+                .expect("spawn the html serializer thread")
+                .join()
+                .expect("html serializer thread panicked")
+        })
+    }
+    // wasm32-unknown-unknown has no threads (`spawn` fails, and `expect`
+    // would abort the `"html"` output kind): render on the caller's stack.
+    #[cfg(target_arch = "wasm32")]
+    {
+        render()
+    }
 }
 
 /// Python's `html.escape(s, quote)`.
