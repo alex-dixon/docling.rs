@@ -344,7 +344,8 @@ multi-arch images (`linux/amd64`, `linux/arm64`) publish to GHCR:
 "$PWD:/data" ghcr.io/docling-project/docling-rs report.pdf --to md`), both
 built from [`crates/docling-serve/Dockerfile`](./crates/docling-serve/Dockerfile)
 with the models baked in (or mountable with `--build-arg
-FETCH_ASSETS=0`). Docker
+FETCH_ASSETS=0`; extra speech-recognition presets with `--build-arg
+ASR_MODELS=parakeet_tdt_0.6b_v3`). Docker
 Compose setups are in [`examples/docker-compose/`](./examples/docker-compose/) and
 the full guide is in [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
 URL inputs are **off by default** (SSRF surface): pass `--allow-url-fetch` to
@@ -1477,6 +1478,28 @@ encoder quantizes its activations dynamically, so its output — and the odd
 word — shifts with the ONNX Runtime build (1.28 linked here, 1.30 in
 onnx-asr's wheel), the same way it does between two onnx-asr installs.
 About 0.2× real time on four CPU cores (int8, a 10 s clip in ~2 s).
+
+**Python and Docker.** The Python wheel fetches no ASR models by default;
+`download_models(asr_model=…)` takes one preset or a list (`"whisper_tiny"`
+for the default model, any name above), writing the same layout into its
+cache — `DOCLING_RS_FP32=1` picks Parakeet's fp32 graphs, and
+`pdf_models=False` skips the PDF stack for an audio-only install:
+
+```python
+import docling_rs
+from docling_rs import DocumentConverter
+
+docling_rs.download_models(asr_model="parakeet_tdt_0.6b_v3", pdf_models=False)
+doc = DocumentConverter(asr_model="parakeet_tdt_0.6b_v3").convert("interview_de.mp3").document
+```
+
+The container images always carry Whisper tiny; bake further presets in at
+build time with the `ASR_MODELS` build arg (space- or comma-separated):
+
+```bash
+docker build -f crates/docling-serve/Dockerfile --target serve \
+  --build-arg ASR_MODELS=parakeet_tdt_0.6b_v3 -t docling-rs-serve .
+```
 
 ### Enrichment models (picture classification, code, formulas)
 

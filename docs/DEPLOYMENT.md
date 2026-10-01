@@ -212,6 +212,25 @@ The container image is fully self-contained by default. If you need to build a c
 docker build -f crates/docling-serve/Dockerfile --build-arg FETCH_ASSETS=0 -t docling-serve-slim .
 ```
 
+### Baking in more speech-recognition models (`ASR_MODELS`)
+
+The image always carries Whisper tiny, the default audio/video model. Named
+presets (`whisper_tiny_en`, `whisper_base_en`, `whisper_small_en`,
+`whisper_distil_small_en`, `parakeet_tdt_0.6b_v3`) are added with the
+`ASR_MODELS` build arg — space- or comma-separated `--asr-model` names of
+`download_dependencies.sh` — and picked per request with the `asr_model`
+option:
+
+```bash
+docker build -f crates/docling-serve/Dockerfile \
+  --build-arg ASR_MODELS="parakeet_tdt_0.6b_v3 whisper_small_en" -t docling-serve-asr .
+curl -F files=@interview_de.mp3 -F asr_model=parakeet_tdt_0.6b_v3 \
+  http://localhost:5001/v1/convert
+```
+
+Parakeet TDT 0.6B v3 adds ~670 MB (int8 encoder + decoder-joint + the Silero
+VAD).
+
 ### Running with Mounted Assets
 
 ```bash

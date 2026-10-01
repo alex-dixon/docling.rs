@@ -171,6 +171,11 @@ impl PyDocumentConverter {
     ///   (#271; docling.rs extension, off by default).
     /// * `compact_tables` — unpadded `| a | b |` Markdown tables, all
     ///   formats (#271; docling.rs extension, off by default).
+    /// * `asr_model` — audio/video speech-recognition preset: `None` /
+    ///   `"whisper_tiny"` (default), the Whisper presets
+    ///   (`"whisper_tiny_en"`, `"whisper_base_en"`, `"whisper_small_en"`,
+    ///   `"whisper_distil_small_en"`) or `"parakeet_tdt_0.6b_v3"` (#508;
+    ///   `asr_lang` does not apply to it).
     /// * `asr_lang` — transcription language for audio/video: a Whisper code
     ///   (`"en"`, `"de"`, …) or `"auto"` (default) to detect it from the
     ///   first 30 seconds (docling 2.116 parity).

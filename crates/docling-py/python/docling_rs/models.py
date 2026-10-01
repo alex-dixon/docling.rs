@@ -12,6 +12,8 @@ Usage::
 
     import docling_rs
     docling_rs.download_models()          # once; idempotent, skips present files
+    # audio/video: the speech-recognition models are opt-in, per preset
+    docling_rs.download_models(asr_model="parakeet_tdt_0.6b_v3", pdf_models=False)
 
 ``DocumentConverter`` calls :func:`ensure_env` automatically, so after the
 one-time download no configuration is needed at all. Local assets outrank the
@@ -32,6 +34,7 @@ import sys
 import tarfile
 import urllib.request
 from pathlib import Path
+from typing import Iterable
 
 BASE_URL = os.environ.get(
     "DOCLING_RS_MODELS_URL",
@@ -122,6 +125,50 @@ _FALLBACK_URLS = {
         "https://huggingface.co/docling-project/DocumentFigureClassifier-v2.5/resolve/main/model.onnx"
     ),
 }
+# Speech recognition (audio/video), opt-in per preset via
+# ``download_models(asr_model=…)`` — the same files and layout as
+# ``download_dependencies.sh --asr-model=<preset>``, so the converter's
+# ``asr_model`` kwarg finds them through ``DOCLING_RS_MODELS_DIR``.
+#
+# "whisper_tiny" is docling's default (multilingual Whisper tiny, the model a
+# converter without ``asr_model`` uses) and lives in ``models/asr/`` itself;
+# the release mirrors it as ``asr_*``, Hugging Face is the fallback host
+# (``$DOCLING_RS_ASR_MODELS_URL`` replaces both, like the script).
+_ASR_RELEASE_PREFIX = "asr_"
+_WHISPER_TINY_URL = os.environ.get(
+    "DOCLING_RS_ASR_MODELS_URL", "https://huggingface.co/onnx-community/whisper-tiny/resolve/main"
+)
+# The named Whisper presets (docling's English-only / Distil-Whisper specs with
+# public ONNX exports): onnx-community repo per preset, each in
+# ``models/asr/<preset>/``.
+_WHISPER_PRESETS = {
+    "whisper_tiny_en": "whisper-tiny.en",
+    "whisper_base_en": "whisper-base.en",
+    "whisper_small_en": "whisper-small.en",
+    "whisper_distil_small_en": "distil-small.en",
+}
+# NVIDIA Parakeet TDT 0.6B v3 (#508; CC-BY-4.0), the onnx-asr export: the int8
+# encoder (~650 MB) + decoder-joint by default, the fp32 graphs (~2.5 GB, the
+# encoder weights in a .data sidecar) when DOCLING_RS_FP32 is set — the engine
+# loads whichever is present, int8 first unless fp32 is forced. The Silero VAD
+# (v5, MIT, ~2 MB) segments long recordings; optional at run time (without it
+# an energy-based splitter takes over), fetched alongside.
+_PARAKEET_PRESETS = ("parakeet_tdt_0.6b_v3",)
+_PARAKEET_URL = os.environ.get(
+    "DOCLING_RS_PARAKEET_MODELS_URL",
+    "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main",
+)
+_VAD_URL = os.environ.get(
+    "DOCLING_RS_VAD_MODEL_URL",
+    "https://huggingface.co/istupakov/silero-vad-onnx/resolve/main/silero_vad.onnx",
+)
+_VAD = "models/asr/vad/silero_vad.onnx"
+
+#: Every value ``download_models(asr_model=…)`` and
+#: ``DocumentConverter(asr_model=…)`` accept.
+ASR_MODELS = ("whisper_tiny", *_WHISPER_PRESETS, *_PARAKEET_PRESETS)
+
+
 def cache_dir() -> Path:
     """The asset cache root (``$DOCLING_RS_CACHE_DIR`` or ``~/.cache/docling.rs``)."""
     if env := os.environ.get("DOCLING_RS_CACHE_DIR"):
@@ -150,7 +197,11 @@ def _fetch(url: str, dest: Path, optional: bool, progress: bool, force: bool = F
 
 
 def download_models(
-    dest: "str | Path | None" = None, progress: bool = True, force: bool = False
+    dest: "str | Path | None" = None,
+    progress: bool = True,
+    force: bool = False,
+    asr_model: "str | Iterable[str] | None" = None,
+    pdf_models: bool = True,
 ) -> Path:
     """Fetch the PDF/image pipeline's models into the cache (idempotent).
 
@@ -161,10 +212,24 @@ def download_models(
     stamp, so this is how a stale cache picks up re-published model assets
     (e.g. the dynamic-batch layout graph or the hoisted-KV TableFormer
     decoder).
+
+    ``asr_model`` adds speech-recognition models for audio/video — one preset
+    name or several (see :data:`ASR_MODELS`): ``"whisper_tiny"`` (the
+    converter's default model), the Whisper presets, or
+    ``"parakeet_tdt_0.6b_v3"`` (NVIDIA Parakeet TDT 0.6B v3, 25 European
+    languages, plus the Silero VAD). None are fetched by default. Select the
+    model at conversion time with ``DocumentConverter(asr_model=…)``.
+    ``pdf_models=False`` skips the PDF/image models (~700 MB), e.g. for an
+    audio-only install.
     """
+    presets = _asr_presets(asr_model)
     root = Path(dest) if dest else cache_dir()
     if progress:
         print(f"docling.rs: fetching models to {root}", file=sys.stderr, flush=True)
+    for preset in presets:
+        _fetch_asr(root, preset, progress=progress, force=force)
+    if not pdf_models:
+        return root
     for name, rel in _REQUIRED.items():
         _fetch(f"{BASE_URL}/{name}", root / rel, optional=False, progress=progress, force=force)
     for name, rel in {**_OPTIONAL, **_ENRICH}.items():
@@ -181,6 +246,65 @@ def download_models(
     if platform.machine() == "s390x":
         _fetch_onnxruntime(root, progress=progress, force=force)
     return root
+
+
+def _asr_presets(asr_model: "str | Iterable[str] | None") -> "list[str]":
+    """Normalize ``asr_model`` to a list of known preset names; an unknown one
+    raises before anything is downloaded."""
+    if asr_model is None:
+        return []
+    names = [asr_model] if isinstance(asr_model, str) else list(asr_model)
+    unknown = [n for n in names if n not in ASR_MODELS]
+    if unknown:
+        raise ValueError(
+            f"unknown asr_model {', '.join(map(repr, unknown))} (available: {', '.join(ASR_MODELS)})"
+        )
+    return list(dict.fromkeys(names))
+
+
+def _fp32() -> bool:
+    # Same truthiness vocabulary as Rust's docling_core::env::flag.
+    return os.environ.get("DOCLING_RS_FP32", "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _fetch_asr(root: Path, preset: str, progress: bool, force: bool) -> None:
+    """Fetch one ASR preset into ``root/models/asr/…`` — the layout
+    ``download_dependencies.sh --asr-model=<preset>`` writes under ``.models/``."""
+    get = lambda url, rel, optional=False: _fetch(  # noqa: E731
+        url, root / rel, optional=optional, progress=progress, force=force
+    )
+    if preset == "whisper_tiny":
+        mirrored = "DOCLING_RS_ASR_MODELS_URL" not in os.environ
+        for name, upstream in (
+            ("encoder_model.onnx", "onnx/encoder_model.onnx"),
+            ("decoder_model.onnx", "onnx/decoder_model.onnx"),
+            ("vocab.json", "vocab.json"),
+            ("added_tokens.json", "added_tokens.json"),
+        ):
+            rel = f"models/asr/{name}"
+            optional = name == "added_tokens.json"
+            if mirrored and get(f"{BASE_URL}/{_ASR_RELEASE_PREFIX}{name}", rel, optional=True):
+                continue
+            get(f"{_WHISPER_TINY_URL}/{upstream}", rel, optional=optional)
+    elif preset in _WHISPER_PRESETS:
+        base = f"https://huggingface.co/onnx-community/{_WHISPER_PRESETS[preset]}/resolve/main"
+        d = f"models/asr/{preset}"
+        get(f"{base}/onnx/encoder_model.onnx", f"{d}/encoder_model.onnx")
+        get(f"{base}/onnx/decoder_model.onnx", f"{d}/decoder_model.onnx")
+        get(f"{base}/vocab.json", f"{d}/vocab.json")
+        # English-only exports keep their special tokens here; required for
+        # the shifted token layout to resolve.
+        get(f"{base}/added_tokens.json", f"{d}/added_tokens.json")
+    else:  # Parakeet
+        d = f"models/asr/{preset}"
+        if _fp32():
+            files = ["encoder-model.onnx", "encoder-model.onnx.data", "decoder_joint-model.onnx"]
+        else:
+            files = ["encoder-model.int8.onnx", "decoder_joint-model.int8.onnx"]
+        for name in files + ["vocab.txt"]:
+            get(f"{_PARAKEET_URL}/{name}", f"{d}/{name}")
+        get(f"{_PARAKEET_URL}/config.json", f"{d}/config.json", optional=True)
+        get(_VAD_URL, _VAD)
 
 
 def _fetch_onnxruntime(root: Path, progress: bool, force: bool) -> bool:
@@ -244,8 +368,7 @@ def ensure_env(dest: "str | Path | None" = None) -> Path:
     converter will fail with its usual clear "model not found" message)."""
     # Absolute paths in the env: a later os.chdir() must not orphan them.
     root = (Path(dest) if dest else cache_dir()).expanduser().resolve()
-    # Same truthiness vocabulary as Rust's docling_core::env::flag.
-    fp32 = os.environ.get("DOCLING_RS_FP32", "").strip().lower() not in ("", "0", "false", "no", "off")
+    fp32 = _fp32()
     m = root / "models"
 
     layout_chain = ["models/layout_heron.onnx"]
