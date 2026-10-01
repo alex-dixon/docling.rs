@@ -5,10 +5,14 @@
 # scripts/install/download_dependencies.sh fetches it into .models/onnxruntime/
 # on an s390x host (or anywhere with --with-onnxruntime).
 #
-# Cross-compiled on the x86_64 runner with the distro GNU toolchain by
-# scripts/install/build_onnxruntime_s390x.sh (~1 h on 4 cores; upstream's own
-# s390x CI compiles natively under QEMU for many hours instead). The tarball
-# onnxruntime-linux-s390x.tar.gz unpacks straight into .models/onnxruntime/:
+# Cross-compiled on the x86_64 runner by scripts/install/build_onnxruntime_s390x.sh
+# with zig as the compiler (`zig cc -target s390x-linux-gnu.2.28 -march=z13`),
+# ~45 min on 4 cores where upstream's own s390x CI compiles natively under
+# QEMU for many hours. zig gives the library a glibc 2.28 floor and a
+# statically linked libc++, so it loads on RHEL 8/9 era mainframe Linux; the
+# distro gcc cross toolchain would pin it to glibc 2.38 and GCC 13's
+# libstdc++. The tarball onnxruntime-linux-s390x.tar.gz unpacks straight into
+# .models/onnxruntime/:
 #   libonnxruntime.so, libonnxruntime.so.1, libonnxruntime.so.<version>
 #   LICENSE, VERSION
 # The smoke test runs the s390x docling-rs CLI under qemu-user against it:
@@ -52,19 +56,21 @@ jobs:
       TAG: ${{ inputs.tag }}
       ORT_TAG: ${{ inputs.ort_tag }}
       CARGO_INCREMENTAL: 0
-      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER: s390x-linux-gnu-gcc
-      CC_s390x_unknown_linux_gnu: s390x-linux-gnu-gcc
-      CXX_s390x_unknown_linux_gnu: s390x-linux-gnu-g++
-      AR_s390x_unknown_linux_gnu: s390x-linux-gnu-ar
     steps:
       - uses: actions/checkout@v7
 
-      - name: Cross toolchain, cmake, ninja, qemu
+      # zig + cargo-zigbuild as wheels (the build script finds zig through the
+      # ziglang module; the smoke-test CLI builds with cargo-zigbuild for the
+      # same glibc 2.28 floor the release binaries have); the target's binutils
+      # for strip/objdump; qemu-user to run the result.
+      - name: zig, cargo-zigbuild, cmake, ninja, binutils, qemu
         run: |
+          python3 -m pip install --user --break-system-packages ziglang cargo-zigbuild
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-s390x-linux-gnu g++-s390x-linux-gnu cmake ninja-build python3 qemu-user-static
+            cmake ninja-build python3 binutils-s390x-linux-gnu qemu-user-static
           cmake --version | head -1
+          python3 -m ziglang version
 
       - name: Build ONNX Runtime for s390x
         run: |
@@ -100,7 +106,7 @@ jobs:
       # big-endian; a DOCX first, which never touches it.
       - name: Smoke test under qemu
         run: |
-          cargo build --release --locked -p docling-cli --features ort-load-dynamic --target s390x-unknown-linux-gnu
+          cargo zigbuild --release --locked -p docling-cli --features ort-load-dynamic --target s390x-unknown-linux-gnu.2.28
           bash scripts/install/download_dependencies.sh --no-asr --no-chunk
           bin=target/s390x-unknown-linux-gnu/release/docling-rs
           run="qemu-s390x-static -L /usr/s390x-linux-gnu $bin"
@@ -108,6 +114,7 @@ jobs:
           DOCLING_RS_DEBUG=1 $run tests/data/pdf/sources/base14_fonts.pdf --to md > out.md 2> err.txt || { cat err.txt; exit 1; }
           grep -q "ONNX Runtime loaded from .models/onnxruntime/libonnxruntime.so" err.txt
           test -s out.md && head -n 5 out.md
+          echo "glibc floor of the library: $(s390x-linux-gnu-objdump -T .models/onnxruntime/libonnxruntime.so.*.*.* | grep -o 'GLIBC_2\.[0-9]*' | sort -t. -k2 -n | uniq | tail -1)"
 
       - name: Publish into the models release
         if: inputs.publish

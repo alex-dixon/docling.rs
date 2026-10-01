@@ -1697,11 +1697,16 @@ DOCX never touch it.
 `onnxruntime-linux-s390x.tar.gz`: ONNX Runtime 1.28.0 (the version behind
 `ort`'s prebuilt binaries) cross-compiled from source by
 `.github/workflows/onnxruntime-s390x.yml` with
-`scripts/install/build_onnxruntime_s390x.sh` — the distro
-`gcc-s390x-linux-gnu` toolchain, a host `protoc`, `--build_shared_lib`,
-Eigen's ZVector kernels disabled (they do not compile with GCC 13;
-ORT's s390x SIMD lives in MLAS) — about 35 minutes on four cores where
-upstream's own s390x CI compiles natively under QEMU for hours.
+`scripts/install/build_onnxruntime_s390x.sh` — zig as the compiler
+(`zig cc -target s390x-linux-gnu.2.28 -march=z13`: a glibc 2.28 floor and
+its own libc++, so the library loads on RHEL 8/9 era mainframe Linux, where
+the distro `gcc-s390x-linux-gnu` toolchain would pin it to glibc 2.38 and
+GCC 13's libstdc++; `ORT_TOOLCHAIN=gcc` still builds that way), a host
+`protoc`, `--build_shared_lib`, Eigen's ZVector kernels disabled (they do
+not compile with GCC 13; ORT's s390x SIMD lives in MLAS) — about 45 minutes
+on four cores where upstream's own s390x CI compiles natively under QEMU
+for hours. Every s390x artifact (CLI tarball, FFI library, wheel, npm
+addon, this runtime) has the same glibc 2.28 floor.
 `download_dependencies.sh` fetches it into `.models/onnxruntime/`
 automatically on an s390x host (`--with-onnxruntime` / `--no-onnxruntime`
 elsewhere), so the usual install flow covers the mainframe too; the

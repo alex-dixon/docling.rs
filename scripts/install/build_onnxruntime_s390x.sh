@@ -4,16 +4,21 @@
 # pyke's `ort` ships prebuilt runtimes for x86_64/aarch64 only and Microsoft
 # publishes no s390x release, so the `ort-load-dynamic` build of docling.rs
 # dlopens a libonnxruntime.so that has to come from somewhere: this script
-# builds it from source — cross-compiled on an x86_64 host with the distro
-# GNU toolchain (minutes), not natively under QEMU (hours, how upstream's own
-# s390x CI does it). .github/workflows/onnxruntime-s390x.yml runs it and
-# publishes the result into the models release as onnxruntime-linux-s390x.tar.gz,
-# which scripts/install/download_dependencies.sh fetches into
-# .models/onnxruntime/ on an s390x host (or with --with-onnxruntime).
+# builds it from source — cross-compiled on an x86_64 host (minutes), not
+# natively under QEMU (hours, how upstream's own s390x CI does it). The
+# default compiler is zig (`zig cc -target s390x-linux-gnu.2.28`): the
+# library then needs glibc 2.28 and carries its own libc++, so it loads on
+# RHEL 8/9 era mainframe Linux, where the distro gcc cross toolchain
+# (ORT_TOOLCHAIN=gcc) pins it to glibc 2.38 and GCC 13's libstdc++.
+# .github/workflows/onnxruntime-s390x.yml runs it and publishes the result
+# into the models release as onnxruntime-linux-s390x.tar.gz, which
+# scripts/install/download_dependencies.sh fetches into .models/onnxruntime/
+# on an s390x host (or with --with-onnxruntime).
 #
-# Host prerequisites (Ubuntu 24.04): gcc-s390x-linux-gnu g++-s390x-linux-gnu
-# cmake (>= 3.28) ninja-build python3 curl git, plus qemu-user-static if the
-# result is to be run here.
+# Host prerequisites (Ubuntu 24.04): cmake (>= 3.28) ninja-build python3 curl
+# git binutils-s390x-linux-gnu (strip), and either zig on PATH (`pip install
+# ziglang` provides one — the script links it) or, for ORT_TOOLCHAIN=gcc,
+# gcc-s390x-linux-gnu g++-s390x-linux-gnu; qemu-user-static to run the result.
 #
 #   scripts/install/build_onnxruntime_s390x.sh
 #   ORT_TAG=v1.28.0 JOBS=8 OUT_DIR=$PWD/onnxruntime-s390x scripts/install/build_onnxruntime_s390x.sh
@@ -22,6 +27,7 @@
 #   ORT_TAG              ONNX Runtime tag to build (default v1.28.0 — the version
 #                        behind pyke's prebuilt binaries for ort 2.0.0-rc.13, so a
 #                        dynamically loaded s390x runtime matches the linked one).
+#   ORT_TOOLCHAIN        zig (default) | gcc — see above.
 #   ORT_SRC_DIR          an existing checkout to build instead of cloning.
 #   JOBS                 parallel compile jobs (default: nproc).
 #   OUT_DIR              where lib/, LICENSE and VERSION land (default ./onnxruntime-s390x).
@@ -33,18 +39,47 @@
 set -euo pipefail
 
 ORT_TAG="${ORT_TAG:-v1.28.0}"
+ORT_TOOLCHAIN="${ORT_TOOLCHAIN:-zig}"
 JOBS="${JOBS:-$(nproc)}"
 OUT_DIR="${OUT_DIR:-$PWD/onnxruntime-s390x}"
 WORK="${WORK_DIR:-$PWD/.onnxruntime-build}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-TOOLCHAIN="$HERE/cmake/s390x-linux-gnu.toolchain.cmake"
 PROTOC_VERSION=21.12
 
-for tool in s390x-linux-gnu-gcc s390x-linux-gnu-g++ cmake ninja python3 curl git; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool is required (apt-get install gcc-s390x-linux-gnu g++-s390x-linux-gnu cmake ninja-build python3 curl git)" >&2; exit 1; }
+for tool in cmake ninja python3 curl git; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool is required (apt-get install cmake ninja-build python3 curl git)" >&2; exit 1; }
 done
-
 mkdir -p "$WORK" "$OUT_DIR"
+
+TOOLCHAIN_DEFINES=()
+case "$ORT_TOOLCHAIN" in
+  zig)
+    # `zig` from PATH, else the ziglang wheel's binary (pip/pipx/uv installs).
+    ZIG="$(command -v zig || true)"
+    if [ -z "$ZIG" ]; then
+      ZIG="$(python3 -c 'import ziglang,os;print(os.path.join(os.path.dirname(ziglang.__file__),"zig"))' 2>/dev/null || true)"
+    fi
+    [ -n "$ZIG" ] && [ -x "$ZIG" ] || { echo "error: zig is required for ORT_TOOLCHAIN=zig (pip install ziglang, or put zig on PATH); ORT_TOOLCHAIN=gcc uses the distro cross toolchain" >&2; exit 1; }
+    # Wrapper scripts: cmake wants a compiler path, zig wants its target.
+    ZIGW="$WORK/zigw"; mkdir -p "$ZIGW"
+    printf '#!/bin/sh\nexec "%s" cc -target s390x-linux-gnu.2.28 -march=z13 "$@"\n' "$ZIG" > "$ZIGW/zig-cc"
+    printf '#!/bin/sh\nexec "%s" c++ -target s390x-linux-gnu.2.28 -march=z13 "$@"\n' "$ZIG" > "$ZIGW/zig-cxx"
+    printf '#!/bin/sh\nexec "%s" ar "$@"\n' "$ZIG" > "$ZIGW/zig-ar"
+    printf '#!/bin/sh\nexec "%s" ranlib "$@"\n' "$ZIG" > "$ZIGW/zig-ranlib"
+    chmod +x "$ZIGW"/zig-*
+    "$ZIGW/zig-cc" --version | head -1
+    TOOLCHAIN="$HERE/cmake/s390x-linux-gnu-zig.toolchain.cmake"
+    TOOLCHAIN_DEFINES=("ZIG_WRAPPER_DIR=$ZIGW")
+    ;;
+  gcc)
+    for tool in s390x-linux-gnu-gcc s390x-linux-gnu-g++; do
+      command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool is required for ORT_TOOLCHAIN=gcc (apt-get install gcc-s390x-linux-gnu g++-s390x-linux-gnu)" >&2; exit 1; }
+    done
+    TOOLCHAIN="$HERE/cmake/s390x-linux-gnu.toolchain.cmake"
+    ;;
+  *) echo "error: ORT_TOOLCHAIN must be zig or gcc" >&2; exit 1 ;;
+esac
+STRIP="$(command -v s390x-linux-gnu-strip || true)"
 
 # ONNX Runtime pins protobuf 21.12; the host needs a protoc of that series.
 if [ -z "${PROTOC:-}" ]; then
@@ -81,16 +116,20 @@ cd "$SRC"
   --compile_no_warning_as_error \
   --path_to_protoc_exe "$PROTOC" \
   --cmake_extra_defines "CMAKE_TOOLCHAIN_FILE=$TOOLCHAIN" onnxruntime_CROSS_COMPILING=ON \
-    onnxruntime_USE_KLEIDIAI=OFF onnxruntime_BUILD_UNIT_TESTS=OFF ${CMAKE_EXTRA_DEFINES:-}
+    onnxruntime_USE_KLEIDIAI=OFF onnxruntime_BUILD_UNIT_TESTS=OFF \
+    "${TOOLCHAIN_DEFINES[@]}" ${CMAKE_EXTRA_DEFINES:-}
 
 BUILD="$SRC/build/Linux/Release"
 rm -rf "$OUT_DIR/lib" && mkdir -p "$OUT_DIR/lib"
 # libonnxruntime.so.<ver> plus the unversioned name ort dlopens; the SONAME
 # keeps the versioned one resolvable from the same directory.
 cp -a "$BUILD"/libonnxruntime.so* "$OUT_DIR/lib/"
-s390x-linux-gnu-strip --strip-unneeded "$OUT_DIR"/lib/libonnxruntime.so.*.*.* 2>/dev/null || true
+[ -n "$STRIP" ] && "$STRIP" --strip-unneeded "$OUT_DIR"/lib/libonnxruntime.so.*.*.* || echo "(no s390x-linux-gnu-strip on the host — the library is left unstripped)"
 cp "$SRC/LICENSE" "$OUT_DIR/LICENSE"
 tr -d '\n' < "$SRC/VERSION_NUMBER" > "$OUT_DIR/VERSION"; echo >> "$OUT_DIR/VERSION"
-echo "built ONNX Runtime $(cat "$OUT_DIR/VERSION") for s390x:"
+echo "built ONNX Runtime $(cat "$OUT_DIR/VERSION") for s390x ($ORT_TOOLCHAIN toolchain):"
 ls -la "$OUT_DIR/lib"
 file "$OUT_DIR"/lib/libonnxruntime.so.*.*.* | sed 's/,.*//'
+if command -v s390x-linux-gnu-objdump >/dev/null 2>&1; then
+  echo "glibc floor: $(s390x-linux-gnu-objdump -T "$OUT_DIR"/lib/libonnxruntime.so.*.*.* | grep -o 'GLIBC_2\.[0-9]*' | sort -t. -k2 -n | uniq | tail -1)"
+fi
