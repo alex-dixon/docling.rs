@@ -51,8 +51,8 @@ pub use stream::MarkdownStream;
 pub use docling_core::base64;
 pub use docling_core::chunker;
 pub use docling_core::{
-    ConfidenceReport, DocItemLabel, DoclingDocument, ImageMode, MarkdownStreamer, Node,
-    PictureImage, QualityGrade, Table,
+    ConfidenceReport, ContentLayer, ContentLayers, DocItemLabel, DoclingDocument,
+    HtmlExportOptions, ImageMode, MarkdownStreamer, Node, PictureImage, QualityGrade, Table,
 };
 
 // The reusable PDF/image pipeline (models loaded once, reused across documents),

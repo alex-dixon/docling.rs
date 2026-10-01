@@ -40,7 +40,7 @@
 
 use serde_json::Value;
 
-use crate::document::DoclingDocument;
+use crate::document::{ContentLayers, DoclingDocument, HtmlExportOptions};
 use crate::markdown::ImageMode;
 
 /// docling-core's `_get_css_for_single_column()`, verbatim.
@@ -211,22 +211,23 @@ const CSS_SINGLE_COLUMN: &str = r##"<style>
     }
 </style>"##;
 
-/// Serialize `doc` to a complete HTML document. Pictures follow
-/// `image_mode`; in [`ImageMode::Referenced`] the returned artifacts are
-/// `(path, bytes)` pairs named `<artifacts_dir>/image_NNNNNN.<ext>` exactly
-/// as the Markdown export names them, and the `<img src>` points at them.
-/// No trailing newline — upstream returns the joined parts as is.
+/// Serialize `doc` to a complete HTML document per `options`. Pictures
+/// follow its `image_mode`; in [`ImageMode::Referenced`] the returned
+/// artifacts are `(path, bytes)` pairs named
+/// `<artifacts_dir>/image_NNNNNN.<ext>` exactly as the Markdown export names
+/// them, and the `<img src>` points at them. Only items on the option's
+/// content `layers` render (#499). No trailing newline — upstream returns
+/// the joined parts as is.
 pub fn to_html(
     doc: &DoclingDocument,
-    image_mode: ImageMode,
-    artifacts_dir: &str,
+    options: &HtmlExportOptions,
 ) -> (String, Vec<(String, Vec<u8>)>) {
     let json = doc.export_to_json_value();
     // The walk recurses per nesting level (an item renders its children
     // inside itself), and an XBRL instance nests thousands deep — more than
     // a 2 MB test-thread stack holds — so it runs on a thread of its own.
     let render = || {
-        let mut ser = Serializer::new(&json, image_mode, artifacts_dir);
+        let mut ser = Serializer::new(&json, options);
         let body = ser.serialize_body();
         let name = json.get("name").and_then(Value::as_str).unwrap_or_default();
         let title = if name.is_empty() {
@@ -388,6 +389,8 @@ struct Serializer<'a> {
     json: &'a Value,
     image_mode: ImageMode,
     artifacts_dir: String,
+    /// The content layers rendered (`HTMLParams.layers`).
+    layers: ContentLayers,
     artifacts: Vec<(String, Vec<u8>)>,
     pic_index: usize,
     /// Refs already rendered (upstream's `visited`), so the body traversal
@@ -400,7 +403,7 @@ struct Serializer<'a> {
 }
 
 impl<'a> Serializer<'a> {
-    fn new(json: &'a Value, image_mode: ImageMode, artifacts_dir: &str) -> Self {
+    fn new(json: &'a Value, options: &HtmlExportOptions) -> Self {
         let mut captions = std::collections::HashSet::new();
         let mut footnotes = std::collections::HashSet::new();
         for bucket in [
@@ -432,8 +435,9 @@ impl<'a> Serializer<'a> {
         }
         Self {
             json,
-            image_mode,
-            artifacts_dir: artifacts_dir.to_string(),
+            image_mode: options.image_mode,
+            artifacts_dir: options.artifacts_dir.clone(),
+            layers: options.layers,
             artifacts: Vec::new(),
             pic_index: 0,
             visited: std::collections::HashSet::new(),
@@ -480,17 +484,20 @@ impl<'a> Serializer<'a> {
         Self::self_ref(item).starts_with("#/groups/")
     }
 
-    /// Upstream's `get_excluded_refs` for the default params: items off the
-    /// `body` content layer are excluded (labels and pages are unrestricted).
-    fn excluded(item: &Value) -> bool {
-        item.get("content_layer")
+    /// Upstream's `get_excluded_refs`: items off the chosen content layers
+    /// are excluded (labels and pages are unrestricted). An item without a
+    /// `content_layer` is on the body layer, as in docling's model default.
+    fn excluded(&self, item: &Value) -> bool {
+        let layer = item
+            .get("content_layer")
             .and_then(Value::as_str)
-            .is_some_and(|l| l != "body")
+            .unwrap_or("body");
+        !self.layers.contains_name(layer)
     }
 
     /// Upstream's `_iterate_items(with_groups=True, traverse_pictures=False)`
     /// from `root`: the subtree in depth-first pre-order. Only items on the
-    /// `body` layer are yielded, but the walk descends through the others;
+    /// chosen layers are yielded, but the walk descends through the others;
     /// under a picture only its own caption items are visited. `root` itself
     /// is not yielded.
     fn descendants(&self, root: &'a Value, out: &mut Vec<&'a Value>) {
@@ -514,7 +521,7 @@ impl<'a> Serializer<'a> {
             let Some(child) = self.resolve(cref) else {
                 continue;
             };
-            if !Self::excluded(child) {
+            if !self.excluded(child) {
                 out.push(child);
             }
             self.descendants(child, out);
@@ -575,7 +582,7 @@ impl<'a> Serializer<'a> {
             {
                 return String::new();
             }
-            if Self::excluded(item) {
+            if self.excluded(item) {
                 String::new()
             } else {
                 self.text_item(item, inline)
@@ -805,7 +812,7 @@ impl<'a> Serializer<'a> {
             else {
                 continue;
             };
-            if !Self::self_ref(cap).starts_with("#/texts/") || Self::excluded(cap) {
+            if !Self::self_ref(cap).starts_with("#/texts/") || self.excluded(cap) {
                 continue;
             }
             let text = Self::text(cap);
@@ -868,7 +875,7 @@ impl<'a> Serializer<'a> {
         if !cap.is_empty() {
             res_parts.push(cap);
         }
-        if !Self::excluded(item) {
+        if !self.excluded(item) {
             if let Some(data) = item.get("data") {
                 let body = self.table_body(data);
                 if !body.is_empty() {
@@ -950,7 +957,7 @@ impl<'a> Serializer<'a> {
         if !cap.is_empty() {
             res_parts.push(cap);
         }
-        if !Self::excluded(item) {
+        if !self.excluded(item) {
             let uri = item
                 .get("image")
                 .and_then(|i| i.get("uri"))
@@ -1004,7 +1011,7 @@ impl<'a> Serializer<'a> {
         let Some(meta) = item.get("meta").and_then(Value::as_object) else {
             return String::new();
         };
-        if Self::excluded(item) {
+        if self.excluded(item) {
             return String::new();
         }
         const ORDER: [&str; 10] = [
@@ -1183,7 +1190,7 @@ impl<'a> Serializer<'a> {
     /// `graph` (`_HTMLGraphDataSerializer`), then its captions.
     fn graph_item(&mut self, item: &'a Value, class: &str) -> String {
         let mut res_parts: Vec<String> = Vec::new();
-        if !Self::excluded(item) {
+        if !self.excluded(item) {
             if let Some(graph) = item.get("graph") {
                 let g = Self::graph(graph, class);
                 if !g.is_empty() {
@@ -1368,12 +1375,104 @@ mod tests {
     #[test]
     fn empty_document_skeleton() {
         let doc = crate::DoclingDocument::new("empty");
-        let (html, artifacts) = to_html(&doc, ImageMode::Placeholder, "artifacts");
+        let (html, artifacts) = to_html(&doc, &HtmlExportOptions::default());
         assert!(artifacts.is_empty());
         assert!(html.starts_with(
             "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"UTF-8\"/>\n<title>empty</title>\n"
         ));
         assert!(html.ends_with("<body>\n<div class='page'>\n\n</div>\n</body>\n</html>"));
         assert_eq!(html, doc.export_to_html());
+    }
+
+    /// A body paragraph, a furniture-layer running header (a PDF
+    /// `page_header`, body-parented like docling writes it) and a reviewer
+    /// comment (notes layer): the default export is body only, each extra
+    /// layer adds its items through the ordinary text serializer, and `NONE`
+    /// renders nothing — the way docling-core reads `HTMLParams.layers`
+    /// (#499).
+    #[test]
+    fn layers_select_what_renders() {
+        use crate::document::{ContentLayer, ContentLayers, Node};
+        let mut doc = crate::DoclingDocument::new("layers");
+        doc.push(Node::PageFurniture {
+            footer: false,
+            location: [0, 0, 0, 0],
+            text: "Running header".into(),
+        });
+        doc.push(Node::Paragraph {
+            text: "Body text".into(),
+        });
+        doc.push(Node::CommentSection {
+            name: "comment-1".into(),
+            text: "A reviewer note".into(),
+            refs_note_text: false,
+            grouped: true,
+        });
+        let page = |html: &str| {
+            let start = html.find("<div class='page'>\n").unwrap() + "<div class='page'>\n".len();
+            let end = html.rfind("\n</div>\n</body>").unwrap();
+            html[start..end].to_string()
+        };
+
+        let body_only = doc.export_to_html();
+        assert_eq!(page(&body_only), "<p>Body text</p>");
+        assert_eq!(
+            body_only,
+            doc.export_to_html_with_layers(ContentLayers::BODY),
+            "the default export is the body-only set"
+        );
+        assert_eq!(
+            body_only,
+            doc.export_to_html_with(&HtmlExportOptions::default()).0
+        );
+
+        let with_furniture =
+            doc.export_to_html_with_layers(ContentLayers::BODY.with(ContentLayer::Furniture));
+        assert_eq!(
+            page(&with_furniture),
+            "<p>Running header</p>\n<p>Body text</p>"
+        );
+        let with_notes =
+            doc.export_to_html_with_layers(ContentLayers::BODY.with(ContentLayer::Notes));
+        assert_eq!(
+            page(&with_notes),
+            "<p>Body text</p>\n<p>A reviewer note</p>"
+        );
+        assert_eq!(
+            page(&doc.export_to_html_with_layers(ContentLayers::ALL)),
+            "<p>Running header</p>\n<p>Body text</p>\n<p>A reviewer note</p>"
+        );
+        assert_eq!(
+            page(
+                &doc.export_to_html_with_layers(ContentLayers::NONE.with(ContentLayer::Furniture))
+            ),
+            "<p>Running header</p>",
+            "a set without `body` drops the main content, as upstream's does"
+        );
+        assert_eq!(
+            page(&doc.export_to_html_with_layers(ContentLayers::NONE)),
+            ""
+        );
+    }
+
+    #[test]
+    fn content_layers_parse_list() {
+        use crate::document::{ContentLayer, ContentLayers};
+        assert_eq!(ContentLayers::parse_list("body"), Ok(ContentLayers::BODY));
+        assert_eq!(
+            ContentLayers::parse_list(" body , furniture,notes "),
+            Ok(ContentLayers::BODY
+                .with(ContentLayer::Furniture)
+                .with(ContentLayer::Notes))
+        );
+        assert_eq!(ContentLayers::parse_list("all"), Ok(ContentLayers::ALL));
+        assert_eq!(ContentLayers::parse_list(""), Ok(ContentLayers::NONE));
+        assert!(ContentLayers::parse_list("body,header")
+            .unwrap_err()
+            .contains("header"));
+        assert!(ContentLayers::default().contains(None));
+        assert!(!ContentLayers::default().contains(Some(ContentLayer::Notes)));
+        assert!(ContentLayers::ALL.contains_name("invisible"));
+        assert!(!ContentLayers::ALL.contains_name("other"));
     }
 }
