@@ -175,7 +175,7 @@
 <div class='page'>
 <h2>Issue 4: Missing \log command</h2>
 <p>The equation below uses &lt;m:func&gt; with fName='log'.<br>Expected LaTeX: y = \log(x)<br>Docling produces: y = l o g(x)  (letters rendered as italic variables)<br>and emits a warning about an unrecognized function name.<br><br>The &lt;m:fName&gt; element contains a plain-text run with style 'p' (upright).</p>
-<pre>y = \log(\left(x\right))</pre>
+<div><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>y</mi><mo>&#x0003D;</mo><mi>log</mi><mo stretchy="false">&#x00028;</mo><mrow><mo stretchy="true" fence="true" form="prefix">&#x00028;</mo><mi>x</mi><mo stretchy="true" fence="true" form="postfix">&#x00029;</mo></mrow><mo stretchy="false">&#x00029;</mo></mrow><annotation encoding="TeX">y = \log(\left(x\right))</annotation></math></div>
 </div>
 </body>
 </html>

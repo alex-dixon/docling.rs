@@ -175,7 +175,7 @@
 <div class='page'>
 <h2>Issue 2: Text-mode escapes in math context</h2>
 <p>The equation below uses U+2013 EN DASH as minus and U+005E as caret.<br>Expected LaTeX: x - y^2<br>Docling produces: x \text{ \textendash } y\text{ \textasciicircum }2<br><br>Both characters appear inside &lt;m:r&gt;&lt;m:t&gt; math runs but are escaped as text-mode LaTeX macros instead of kept as math operators.</p>
-<pre>x - y^2</pre>
+<div><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>x</mi><mo>&#x02212;</mo><msup><mi>y</mi><mn>2</mn></msup></mrow><annotation encoding="TeX">x - y^2</annotation></math></div>
 </div>
 </body>
 </html>
