@@ -19,7 +19,9 @@ needed to use the package:
 npm install docling.rs   # or: bun add docling.rs
 ```
 
-Prebuilt platforms: Linux x64 / arm64 (glibc) and Windows x64. (macOS isn't
+Prebuilt platforms: Linux x64 / arm64 / s390x (glibc) and Windows x64 — on
+IBM Z the addon loads ONNX Runtime at run time from the library
+`download_dependencies.sh` fetches (#504). (macOS isn't
 prebuilt — build from source, see below.) The right binary is pulled in
 automatically as a platform-specific `optionalDependency` (`docling.rs-<triple>`). Releases are published to npm
 automatically by the `npm publish` workflow

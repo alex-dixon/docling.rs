@@ -304,14 +304,16 @@ jobs:
 
   # IBM Z (#504): cross-check the s390x target — the only big-endian Tier 2
   # target, so a byte-order assumption anywhere in the serializers or the PDF
-  # raster shows up here — and run docling-core's unit tests as s390x
-  # binaries under qemu-user (seconds of run time; the compile is the cost).
-  # The CLI is checked with `ort-load-dynamic`: pyke ships no ONNX Runtime
-  # for s390x, so that build dlopens the library at run time. The same
-  # feature is then exercised natively: docling-onnx's loader test fails
-  # with the lookup message instead of ort's panic when no runtime is on
-  # the machine, and the CLI converts a DOCX in that state (a PDF would
-  # stop at the missing models first — CI has none).
+  # raster shows up here. On a pull request that is all this job does (two
+  # `cargo check`s, a couple of minutes with a warm cache). On a master push
+  # or a manual run it also runs docling-core's unit tests as s390x binaries
+  # under qemu-user and builds the CLI natively with `ort-load-dynamic` —
+  # pyke ships no ONNX Runtime for s390x, so that build dlopens the library
+  # at run time — to show the feature degrades: docling-onnx's loader test
+  # fails with the lookup message instead of ort's panic when no runtime is
+  # on the machine, and the CLI converts a DOCX in that state (a PDF would
+  # stop at the missing models first — CI has none). Those two steps are
+  # the slow part (a cold debug build of the whole CLI), hence not per PR.
   s390x:
     name: s390x (cross-check · qemu tests · ort-load-dynamic)
     runs-on: ubuntu-24.04
@@ -349,9 +351,11 @@ jobs:
         run: cargo check -p docling-cli --features ort-load-dynamic --target s390x-unknown-linux-gnu --locked
 
       - name: docling-core unit tests as s390x binaries (qemu)
+        if: github.event_name != 'pull_request'
         run: cargo test -p docling-core --lib --target s390x-unknown-linux-gnu --locked
 
       - name: ort-load-dynamic degrades without a runtime (native)
+        if: github.event_name != 'pull_request'
         run: |
           cargo test -p docling-onnx --features load-dynamic --locked
           cargo build -p docling-cli --features ort-load-dynamic --locked

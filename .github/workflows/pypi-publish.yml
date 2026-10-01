@@ -169,6 +169,57 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
+  # IBM Z wheel (#504): cross-compiled on the x86_64 runner with maturin's
+  # zig mode — the manylinux_2_28_s390x container would compile the whole
+  # workspace under QEMU for hours, and the distro cross toolchain links
+  # against its glibc 2.39 sysroot (maturin's audit then rejects the
+  # manylinux_2_28 tag: exp@GLIBC_2.29, dlopen@GLIBC_2.34, pidfd_spawnp@2.39…),
+  # while zig targets glibc 2.28 directly, so the wheel installs on RHEL 8/9
+  # era mainframe Linux. abi3 means one wheel. Built with `ort-load-dynamic`:
+  # pyke ships no ONNX Runtime for s390x, so the module dlopens the library
+  # `download_models()` fetches into the cache on an s390x host
+  # (onnxruntime-linux-s390x.tar.gz from the models release).
+  wheel-s390x:
+    name: wheel s390x (cross, zig)
+    needs: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download sdist
+        uses: actions/download-artifact@v8
+        with:
+          name: sdist
+          path: sdist
+
+      - name: Unpack sdist
+        shell: bash
+        run: |
+          mkdir pkg
+          tar -xzf sdist/*.tar.gz -C pkg --strip-components=1
+
+      - name: Install Rust (stable + s390x target)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add s390x-unknown-linux-gnu
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel
+        working-directory: pkg
+        run: |
+          python -m pip install "maturin>=1.5,<2" ziglang
+          maturin build --release --zig --target s390x-unknown-linux-gnu --manylinux 2_28 \
+            --features ort-load-dynamic -i python3.11 --out ../wheelhouse
+          ls -la ../wheelhouse
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-s390x
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
   # CUDA wheel (PyPI `docling-rs-cuda`): the same sdist built with
   # `--features cuda`, Linux x86_64 only — the renamed package installs the
   # same `docling_rs` module (mutually exclusive with `docling-rs`) and
@@ -257,10 +308,10 @@ jobs:
 
   publish:
     name: publish to PyPI
-    needs: [sdist, wheels, wheel-cuda]
+    needs: [sdist, wheels, wheel-cuda, wheel-s390x]
     # wheel-cuda is optional (gated on the cuda_wheel input): publish when it
     # succeeded or was skipped, never when anything actually failed.
-    if: ${{ !cancelled() && needs.sdist.result == 'success' && needs.wheels.result == 'success' && (needs.wheel-cuda.result == 'success' || needs.wheel-cuda.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.sdist.result == 'success' && needs.wheels.result == 'success' && needs.wheel-s390x.result == 'success' && (needs.wheel-cuda.result == 'success' || needs.wheel-cuda.result == 'skipped') }}
     runs-on: ubuntu-latest
     # Trusted Publishing (OIDC): no token secret. `id-token: write` lets the job
     # mint the OIDC token PyPI verifies against its trusted-publisher config; the

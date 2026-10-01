@@ -21,12 +21,14 @@
 # scripts/install/download_dependencies.sh — exactly as with a cargo install;
 # the CLI prints that instruction when they are missing.
 #
-# s390x (IBM Z, #504) is cross-compiled from the x86_64 runner with the
-# distro's `gcc-s390x-linux-gnu` and built with `ort-load-dynamic`: pyke
-# ships no ONNX Runtime for the target, so the binary `dlopen`s a
-# `libonnxruntime.so` found on the machine (ORT_DYLIB_PATH,
-# .models/onnxruntime/, the library search path) and, without one, converts
-# every format but the ML stages (PDF layout/tables/OCR, ASR).
+# s390x (IBM Z, #504) is cross-compiled from the x86_64 runner with
+# cargo-zigbuild against glibc 2.28 (the distro cross toolchain would pin
+# the binaries to its 2.39 sysroot and shut out RHEL 8/9 mainframes) and
+# built with `ort-load-dynamic`: pyke ships no ONNX Runtime for the target,
+# so the binary `dlopen`s a `libonnxruntime.so` found on the machine
+# (ORT_DYLIB_PATH, .models/onnxruntime/, the library search path) and,
+# without one, converts every format but the ML stages (PDF
+# layout/tables/OCR, ASR).
 
 name: cli-binaries
 
@@ -64,11 +66,12 @@ jobs:
             host: ubuntu-24.04-arm
           - target: x86_64-pc-windows-msvc
             host: windows-latest
-          # IBM Z: no native runner, cross-compiled (see the header). `cross`
-          # is the GNU toolchain prefix the linker/strip/cc env derive from.
+          # IBM Z: no native runner, cross-compiled with cargo-zigbuild (see
+          # the header). `cross` is the binutils prefix used to strip.
           - target: s390x-unknown-linux-gnu
             host: ubuntu-24.04
             cross: s390x-linux-gnu
+            zig: true
             features: ort-load-dynamic
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -86,19 +89,14 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
-      - name: Install the cross toolchain
-        if: matrix.cross
+      - name: Install cargo-zigbuild and the target binutils
+        if: matrix.zig
         shell: bash
         run: |
+          python3 -m pip install --user --break-system-packages ziglang cargo-zigbuild
+          cargo zigbuild --help >/dev/null
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-${{ matrix.cross }} g++-${{ matrix.cross }}
-          triple_env=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
-          {
-            echo "CARGO_TARGET_${triple_env}_LINKER=${{ matrix.cross }}-gcc"
-            echo "CC_${{ matrix.target }}=${{ matrix.cross }}-gcc"
-            echo "CXX_${{ matrix.target }}=${{ matrix.cross }}-g++"
-            echo "AR_${{ matrix.target }}=${{ matrix.cross }}-ar"
-          } >> "$GITHUB_ENV"
+          sudo apt-get install -y --no-install-recommends binutils-${{ matrix.cross }}
 
       - uses: actions/cache@v6
         with:
@@ -114,10 +112,15 @@ jobs:
         shell: bash
         run: |
           features="${{ matrix.features }}"
-          cargo build --release --locked -p docling-cli --target ${{ matrix.target }} ${features:+--features $features}
+          if [ -n "${{ matrix.zig }}" ]; then
+            build="cargo zigbuild"; target="${{ matrix.target }}.2.28"
+          else
+            build="cargo build"; target="${{ matrix.target }}"
+          fi
+          $build --release --locked -p docling-cli --target "$target" ${features:+--features $features}
           # The C ABI shared library (#193) rides the same job: the docling
           # dependency tree is already compiled, only the thin FFI layer adds.
-          cargo build --release --locked -p docling-ffi --target ${{ matrix.target }} ${features:+--features $features}
+          $build --release --locked -p docling-ffi --target "$target" ${features:+--features $features}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
