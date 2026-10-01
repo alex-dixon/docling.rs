@@ -18,7 +18,9 @@
 # Host prerequisites (Ubuntu 24.04): cmake (>= 3.28) ninja-build python3 curl
 # git binutils-s390x-linux-gnu (strip), and either zig on PATH (`pip install
 # ziglang` provides one — the script links it) or, for ORT_TOOLCHAIN=gcc,
-# gcc-s390x-linux-gnu g++-s390x-linux-gnu; qemu-user-static to run the result.
+# gcc-s390x-linux-gnu g++-s390x-linux-gnu; qemu-user-static plus
+# libc6-s390x-cross (the target's loader and libc under /usr/s390x-linux-gnu,
+# what `qemu-s390x-static -L` resolves against) to run the result.
 #
 #   scripts/install/build_onnxruntime_s390x.sh
 #   ORT_TAG=v1.28.0 JOBS=8 OUT_DIR=$PWD/onnxruntime-s390x scripts/install/build_onnxruntime_s390x.sh
