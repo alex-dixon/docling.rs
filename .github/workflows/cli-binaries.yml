@@ -20,6 +20,13 @@
 # runtime assets (pdfium + models) stay a separate download —
 # scripts/install/download_dependencies.sh — exactly as with a cargo install;
 # the CLI prints that instruction when they are missing.
+#
+# s390x (IBM Z, #504) is cross-compiled from the x86_64 runner with the
+# distro's `gcc-s390x-linux-gnu` and built with `ort-load-dynamic`: pyke
+# ships no ONNX Runtime for the target, so the binary `dlopen`s a
+# `libonnxruntime.so` found on the machine (ORT_DYLIB_PATH,
+# .models/onnxruntime/, the library search path) and, without one, converts
+# every format but the ML stages (PDF layout/tables/OCR, ASR).
 
 name: cli-binaries
 
@@ -57,6 +64,12 @@ jobs:
             host: ubuntu-24.04-arm
           - target: x86_64-pc-windows-msvc
             host: windows-latest
+          # IBM Z: no native runner, cross-compiled (see the header). `cross`
+          # is the GNU toolchain prefix the linker/strip/cc env derive from.
+          - target: s390x-unknown-linux-gnu
+            host: ubuntu-24.04
+            cross: s390x-linux-gnu
+            features: ort-load-dynamic
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
@@ -73,6 +86,20 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
+      - name: Install the cross toolchain
+        if: matrix.cross
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-${{ matrix.cross }} g++-${{ matrix.cross }}
+          triple_env=$(echo "${{ matrix.target }}" | tr 'a-z-' 'A-Z_')
+          {
+            echo "CARGO_TARGET_${triple_env}_LINKER=${{ matrix.cross }}-gcc"
+            echo "CC_${{ matrix.target }}=${{ matrix.cross }}-gcc"
+            echo "CXX_${{ matrix.target }}=${{ matrix.cross }}-g++"
+            echo "AR_${{ matrix.target }}=${{ matrix.cross }}-ar"
+          } >> "$GITHUB_ENV"
+
       - uses: actions/cache@v6
         with:
           path: |
@@ -86,23 +113,25 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          cargo build --release --locked -p docling-cli --target ${{ matrix.target }}
+          features="${{ matrix.features }}"
+          cargo build --release --locked -p docling-cli --target ${{ matrix.target }} ${features:+--features $features}
           # The C ABI shared library (#193) rides the same job: the docling
           # dependency tree is already compiled, only the thin FFI layer adds.
-          cargo build --release --locked -p docling-ffi --target ${{ matrix.target }}
+          cargo build --release --locked -p docling-ffi --target ${{ matrix.target }} ${features:+--features $features}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          strip="${{ matrix.cross && format('{0}-strip', matrix.cross) || 'strip' }}"
           bin="target/${{ matrix.target }}/release/docling-rs"
-          strip "$bin"
+          "$strip" "$bin"
           tar -czf "docling-rs-$TAG-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" docling-rs
           # FFI: the cdylib + the committed cbindgen header. The staticlib is
           # not shipped (it inlines the whole ONNX runtime; static embedders
           # build from source).
           lib="target/${{ matrix.target }}/release/libdocling_ffi.so"
-          strip "$lib"
+          "$strip" "$lib"
           staging=$(mktemp -d)
           cp "$lib" crates/docling-ffi/include/docling.h "$staging/"
           tar -czf "docling-ffi-$TAG-${{ matrix.target }}.tar.gz" -C "$staging" libdocling_ffi.so docling.h

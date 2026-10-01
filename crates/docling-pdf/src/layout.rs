@@ -170,7 +170,7 @@ impl LayoutModel {
                  converts without models in no-OCR mode (CLI: --no-ocr)"
             ));
         }
-        let mut builder = Session::builder()
+        let mut builder = docling_onnx::session_builder()
             .map_err(|e| format!("layout: builder: {e}"))?
             // Let inference use the available cores (ort otherwise defaults low);
             // a large PDF runs this model once per page.

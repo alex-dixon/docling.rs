@@ -54,3 +54,4 @@ directml = ["docling/directml"]
 coreml = ["docling/coreml"]
 # CPU-class XNNPACK (#324): self-built ONNX Runtime only (ORT_LIB_LOCATION).
 xnnpack = ["docling/xnnpack"]
+ort-load-dynamic = ["docling/ort-load-dynamic"]

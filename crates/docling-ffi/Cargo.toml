@@ -37,3 +37,5 @@ cuda = ["docling/cuda"]
 tensorrt = ["docling/tensorrt"]
 directml = ["docling/directml"]
 coreml = ["docling/coreml"]
+# ONNX Runtime loaded at run time instead of linked (#504) — the s390x build.
+ort-load-dynamic = ["docling/ort-load-dynamic"]

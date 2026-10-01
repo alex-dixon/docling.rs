@@ -302,6 +302,72 @@ jobs:
                  target/release/examples target/release/incremental
           find target/debug target/release -maxdepth 1 -type f ! -name '*.d' -size +5M -exec rm -f {} + 2>/dev/null || true
 
+  # IBM Z (#504): cross-check the s390x target — the only big-endian Tier 2
+  # target, so a byte-order assumption anywhere in the serializers or the PDF
+  # raster shows up here — and run docling-core's unit tests as s390x
+  # binaries under qemu-user (seconds of run time; the compile is the cost).
+  # The CLI is checked with `ort-load-dynamic`: pyke ships no ONNX Runtime
+  # for s390x, so that build dlopens the library at run time. The same
+  # feature is then exercised natively: the CLI converts a DOCX with no
+  # runtime on the machine and fails a PDF with the lookup message instead
+  # of ort's panic.
+  s390x:
+    name: s390x (cross-check · qemu tests · ort-load-dynamic)
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_LINKER: s390x-linux-gnu-gcc
+      CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUNNER: qemu-s390x-static -L /usr/s390x-linux-gnu
+      CC_s390x_unknown_linux_gnu: s390x-linux-gnu-gcc
+      CXX_s390x_unknown_linux_gnu: s390x-linux-gnu-g++
+      AR_s390x_unknown_linux_gnu: s390x-linux-gnu-ar
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (stable + s390x target) and the cross toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add s390x-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-s390x-linux-gnu g++-s390x-linux-gnu qemu-user-static
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-v2-s390x-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-v2-s390x-
+
+      - name: Check docling (pdf-text) for s390x
+        run: cargo check -p docling-core -p docling --no-default-features --features pdf-text --target s390x-unknown-linux-gnu --locked
+
+      - name: Check docling-cli (ort-load-dynamic) for s390x
+        run: cargo check -p docling-cli --features ort-load-dynamic --target s390x-unknown-linux-gnu --locked
+
+      - name: docling-core unit tests as s390x binaries (qemu)
+        run: cargo test -p docling-core --lib --target s390x-unknown-linux-gnu --locked
+
+      - name: ort-load-dynamic degrades without a runtime (native)
+        run: |
+          cargo build -p docling-cli --features ort-load-dynamic --locked
+          export ORT_DYLIB_PATH=/nonexistent/libonnxruntime.so
+          ./target/debug/docling-rs tests/data/docx/sources/word_tables.docx | grep -q "Header 0.0"
+          if ./target/debug/docling-rs tests/data/pdf/sources/2206.01062.pdf 2>err.txt; then
+            echo "expected the PDF conversion to fail without an ONNX Runtime"; exit 1
+          fi
+          grep -q "ONNX Runtime library unavailable" err.txt
+
+      - name: Trim target before cache save
+        if: always()
+        shell: bash
+        run: |
+          rm -rf target/debug/examples target/debug/incremental \
+                 target/release/examples target/release/incremental
+          find target/debug target/release -maxdepth 1 -type f ! -name '*.d' -size +5M -exec rm -f {} + 2>/dev/null || true
+
   publish:
     name: release & publish
     needs: [lint, test]

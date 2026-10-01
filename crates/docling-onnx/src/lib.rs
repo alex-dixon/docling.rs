@@ -54,6 +54,84 @@ use ort::ep::ExecutionProviderDispatch;
 use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::session::Session;
 
+/// The file name ONNX Runtime's shared library carries on this platform —
+/// what `ort` itself opens when `ORT_DYLIB_PATH` is unset.
+#[cfg(feature = "load-dynamic")]
+const RUNTIME_SONAME: &str = if cfg!(target_os = "windows") {
+    "onnxruntime.dll"
+} else if cfg!(any(target_os = "macos", target_os = "ios")) {
+    "libonnxruntime.dylib"
+} else {
+    "libonnxruntime.so"
+};
+
+/// The ONNX Runtime shared library this process loaded (the `load-dynamic`
+/// feature, #504), resolved and opened once at the first session:
+///
+/// 1. `ORT_DYLIB_PATH` — `ort`'s own override, a path to the library;
+/// 2. `.models/onnxruntime/libonnxruntime.so` (`.dylib` / `onnxruntime.dll`)
+///    through the shared asset chain (`docling_core::assets::resolve`: CWD,
+///    `DOCLING_RS_MODELS_DIR`, the executable's directory) — where a
+///    self-built runtime for a target without prebuilt binaries is dropped
+///    next to the models;
+/// 3. the bare soname, i.e. the dynamic linker's search path (a distro
+///    package, `LD_LIBRARY_PATH`).
+///
+/// `Err` names what was tried: a library that is missing, unloadable or
+/// older than the API this build was compiled against (ONNX Runtime 1.17+).
+/// Callers treat it like a missing model — the stage warns and degrades, a
+/// conversion that cannot proceed without it fails with this message, and
+/// nothing outside the ML stages ever asks.
+#[cfg(feature = "load-dynamic")]
+pub fn runtime_library() -> Result<&'static Path, String> {
+    static LIB: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    LIB.get_or_init(|| {
+        let candidate = if let Some(p) = docling_core::env::nonempty("ORT_DYLIB_PATH") {
+            PathBuf::from(p)
+        } else {
+            let bundled =
+                docling_core::assets::resolve(&format!(".models/onnxruntime/{RUNTIME_SONAME}"));
+            if Path::new(&bundled).is_file() {
+                PathBuf::from(bundled)
+            } else {
+                PathBuf::from(RUNTIME_SONAME)
+            }
+        };
+        match ort::init_from(&candidate) {
+            Ok(env) => {
+                // `commit` is false when an environment was configured
+                // before this call — the library is loaded either way.
+                let _ = env.commit();
+                docling_core::debug_log!(
+                    "docling-onnx: ONNX Runtime loaded from {}",
+                    candidate.display()
+                );
+                Ok(candidate)
+            }
+            // `ort`'s error already names the path it tried.
+            Err(e) => Err(format!(
+                "ONNX Runtime library unavailable ({e}) — set ORT_DYLIB_PATH to a libonnxruntime \
+                 (1.17 or newer) built for this platform, or place it under .models/onnxruntime/; \
+                 the ML stages (PDF layout/tables/OCR, ASR, the embedder) need it, every other \
+                 format converts without"
+            )),
+        }
+    })
+    .as_deref()
+    .map_err(Clone::clone)
+}
+
+/// A fresh [`SessionBuilder`] — the one entry point every session in the
+/// workspace starts from. In a `load-dynamic` build it first loads the ONNX
+/// Runtime library ([`runtime_library`]) and returns its error as a plain
+/// message instead of the panic `ort` raises when the library is missing at
+/// the first API call; in a linked build it is `Session::builder()`.
+pub fn session_builder() -> Result<SessionBuilder, String> {
+    #[cfg(feature = "load-dynamic")]
+    runtime_library()?;
+    Session::builder().map_err(|e| e.to_string())
+}
+
 /// The parsed `DOCLING_RS_EP` choice. Named GPU variants are only ever
 /// *selected* (returned by [`choice`]) when their cargo feature is compiled
 /// in; [`parse`] itself is feature-blind so it can be unit-tested everywhere.
@@ -587,6 +665,10 @@ fn graph_cache_path(model_path: &str, variant: &str) -> Option<PathBuf> {
     }
     variant.hash(&mut h);
     ort::MINOR_VERSION.hash(&mut h);
+    // The runtime's own build string (version, commit, flags): the optimized
+    // graph is that build's output, and with `load-dynamic` (#504) the
+    // library under one API version changes with whatever is on the machine.
+    ort::info().hash(&mut h);
     cpu_features().hash(&mut h);
     let stem = Path::new(model_path)
         .file_stem()

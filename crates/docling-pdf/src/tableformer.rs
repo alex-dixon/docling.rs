@@ -204,8 +204,7 @@ impl TableFormer {
         // encoder keeps the shared budget: one 448×448 CNN + transformer pass
         // per table, 680 ms single-threaded vs 165 on four.
         let build = |path: &str, mem_pattern: bool, threads: usize| -> Result<Session, String> {
-            let builder = Session::builder()
-                .map_err(|e| e.to_string())?
+            let builder = docling_onnx::session_builder()?
                 .with_intra_threads(threads)
                 .map_err(|e| e.to_string())?
                 .with_memory_pattern(mem_pattern)

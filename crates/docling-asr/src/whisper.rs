@@ -195,7 +195,7 @@ impl Transcriber {
         }
         let dir = preset_dir(preset);
         let session = |path: std::path::PathBuf| -> Result<Session, String> {
-            let builder = Session::builder()
+            let builder = docling_onnx::session_builder()
                 .map_err(|e| format!("asr: builder: {e}"))?
                 .with_intra_threads(
                     // Quota-aware (#262): a cgroup CPU limit clamps the pool.

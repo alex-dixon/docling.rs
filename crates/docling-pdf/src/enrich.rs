@@ -93,7 +93,11 @@ impl PictureClassifier {
             );
             return None;
         }
-        let builder = Session::builder().ok()?.with_intra_threads(intra).ok()?;
+        let builder = docling_onnx::session_builder()
+            .map_err(|e| eprintln!("docling-pdf: picture classifier: {e}"))
+            .ok()?
+            .with_intra_threads(intra)
+            .ok()?;
         let builder = docling_onnx::apply(builder)
             .map_err(|e| eprintln!("docling-pdf: picture classifier: {e}"))
             .ok()?;
@@ -212,7 +216,11 @@ impl CodeFormula {
             }
         }
         let load = |p: String| {
-            let builder = Session::builder().ok()?.with_intra_threads(intra).ok()?;
+            let builder = docling_onnx::session_builder()
+                .map_err(|e| eprintln!("docling-pdf: CodeFormula: {e}"))
+                .ok()?
+                .with_intra_threads(intra)
+                .ok()?;
             let builder = docling_onnx::apply(builder)
                 .map_err(|e| eprintln!("docling-pdf: CodeFormula: {e}"))
                 .ok()?;

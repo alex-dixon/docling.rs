@@ -27,6 +27,18 @@ coreml = ["ort/coreml", "ort/copy-dylibs"]
 # `--use_xnnpack`) — with `download-binaries` the build fails at link time by
 # design. Keep it out of CI matrices that rely on downloaded binaries.
 xnnpack = ["ort/xnnpack"]
+# Load ONNX Runtime at run time (`dlopen`) instead of linking pyke's prebuilt
+# static library (#504): the build for a target pyke ships no binaries for —
+# IBM Z `s390x-unknown-linux-gnu` first of all, also ppc64le/riscv64 — and
+# for deployments that bring their own `libonnxruntime.so`. `ort`'s
+# `load-dynamic` turns off `ort-sys`'s download/link step entirely, so this
+# feature is additive to the `download-binaries` the workspace declares. The
+# library is located by [`runtime_library`](crate::runtime_library) at the
+# first session: `ORT_DYLIB_PATH`, `.models/onnxruntime/libonnxruntime.so`
+# (the models-dir resolution, #285), then the system search path; a build
+# without it keeps every ML stage unavailable and degrading like a missing
+# model (the declarative formats and the PDF text layer never touch it).
+load-dynamic = ["ort/load-dynamic"]
 
 [dependencies]
 docling-core = { path = "../docling-core", version = "1.85.0" }

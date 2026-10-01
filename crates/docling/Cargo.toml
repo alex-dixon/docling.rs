@@ -60,6 +60,13 @@ tensorrt = ["pdf", "docling-pdf/tensorrt", "docling-asr?/tensorrt"]
 directml = ["pdf", "docling-pdf/directml", "docling-asr?/directml"]
 coreml = ["pdf", "docling-pdf/coreml", "docling-asr?/coreml"]
 xnnpack = ["pdf", "docling-pdf/xnnpack", "docling-asr?/xnnpack"]
+# ONNX Runtime loaded at run time (`dlopen`) instead of linked from pyke's
+# prebuilt binaries (#504): the build for targets they do not cover — IBM Z
+# `s390x-unknown-linux-gnu` — and for deployments bringing their own
+# `libonnxruntime.so`. Without the library the ML stages degrade like a
+# missing model; every declarative format and the PDF text layer are
+# unaffected. See `docling_onnx::runtime_library` for the lookup.
+ort-load-dynamic = ["pdf", "docling-pdf/ort-load-dynamic", "docling-asr?/ort-load-dynamic"]
 
 [dependencies]
 calamine = { version = "0.36", features = ["dates"] }
