@@ -150,6 +150,9 @@ pub struct DocumentConverter {
     /// Directory referenced-mode streaming writes images into (#80).
     /// See [`Self::artifacts_dir`].
     artifacts_dir: String,
+    /// Per-document wall-clock budget for the PDF/image pipeline (docling's
+    /// `document_timeout`, #497). See [`Self::document_timeout`].
+    document_timeout: Option<std::time::Duration>,
 }
 
 /// Default cap on sampled frames per video. Scene changes rarely exceed this
@@ -214,6 +217,7 @@ impl Default for DocumentConverter {
             ocr_lang: None,
             encoding: None,
             artifacts_dir: "artifacts".to_string(),
+            document_timeout: None,
         }
     }
 }
@@ -241,6 +245,26 @@ impl DocumentConverter {
     /// window (they convert whole).
     pub fn page_range(mut self, first: usize, last: usize) -> Self {
         self.page_range = Some((first, last));
+        self
+    }
+
+    /// A wall-clock budget per document for the PDF pipeline — docling's
+    /// `PipelineOptions.document_timeout` (#497); `None` = unlimited, the
+    /// default. The budget starts with the conversion and is checked between
+    /// pages: once spent, no further page is rendered or processed, the pages
+    /// already finished become the document, and the result is a
+    /// [`ConversionStatus::PartialSuccess`] carrying one
+    /// [`ErrorItem`](crate::ErrorItem) (`document_backend` / `pipeline`,
+    /// "document timeout of Ns exceeded after D of S pages …"). A page in
+    /// flight finishes first, so a budget shorter than one page's work still
+    /// yields that page. Only the paginated pipeline has pages to stop
+    /// between: declarative formats (Office, HTML, …) convert whole, as in
+    /// docling, and a single image is never cut. A streaming conversion
+    /// emits the pages that fit and ends with
+    /// [`ConversionError::Timeout`](crate::ConversionError::Timeout) as its
+    /// last item.
+    pub fn document_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.document_timeout = timeout;
         self
     }
 
@@ -278,7 +302,8 @@ impl DocumentConverter {
             .ocr_scale(self.ocr_scale_choice())
             .heading_hierarchy(docling_pdf::HeadingHierarchyOptions::enabled(
                 self.heading_hierarchy,
-            )))
+            ))
+            .document_timeout(self.document_timeout))
     }
 
     /// DjVu (#434): the hidden text layer by default; a scan-only DjVu (no
@@ -841,6 +866,7 @@ impl DocumentConverter {
             artifacts_dir: self.artifacts_dir.clone(),
             page_break_placeholder: self.page_break_placeholder.clone(),
             compact_tables: self.compact_tables,
+            document_timeout: self.document_timeout,
         }
     }
 
@@ -853,6 +879,10 @@ impl DocumentConverter {
         }
         let source = self.with_encoding(source);
 
+        // Problems a conversion survives (docling's `ConversionResult.errors`):
+        // today the PDF pipeline's spent document budget (#497).
+        #[cfg_attr(not(feature = "pdf"), allow(unused_mut))]
+        let mut errors: Vec<crate::ErrorItem> = Vec::new();
         let mut document = match source.format {
             // A legacy APS (Automated Patent System) plain-text patent (`PATN`
             // first record) is reconstructed verbatim, mirroring docling.
@@ -1008,14 +1038,20 @@ impl DocumentConverter {
                 doc
             }
             #[cfg(feature = "pdf")]
-            InputFormat::Pdf => self
-                .ml_pipeline()
-                .map(|p| {
-                    p.force_full_page_ocr(self.force_full_page_ocr)
-                        .pages(self.page_range)
-                })
-                .and_then(|mut p| p.convert(&source.bytes, None, &source.name))
-                .map_err(|e| ConversionError::with_source("pdf", e))?,
+            InputFormat::Pdf => {
+                let converted = self
+                    .ml_pipeline()
+                    .map(|p| {
+                        p.force_full_page_ocr(self.force_full_page_ocr)
+                            .pages(self.page_range)
+                    })
+                    .and_then(|mut p| p.convert_outcome(&source.bytes, None, &source.name))
+                    .map_err(|e| ConversionError::with_source("pdf", e))?;
+                if let Some(message) = converted.completion.message() {
+                    errors.push(crate::ErrorItem::timeout(message));
+                }
+                converted.document
+            }
             // SVG (#212), the ML route: rasterize (resvg, white-backed PNG at
             // ~2048px long side) and ride the image pipeline. `--no-ocr` short-
             // circuits to direct <text> extraction instead — the SVG carries
@@ -1143,11 +1179,17 @@ impl DocumentConverter {
             }
         }
 
+        let status = if errors.is_empty() {
+            ConversionStatus::Success
+        } else {
+            ConversionStatus::PartialSuccess
+        };
         Ok(ConversionResult {
             document,
-            status: ConversionStatus::Success,
+            status,
             input_name: source.name,
             format: source.format,
+            errors,
         })
     }
 }

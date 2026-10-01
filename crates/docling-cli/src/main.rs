@@ -11,7 +11,7 @@
 //! optional features the binary carries (execution providers, `serve`,
 //! chunking) — both answer without models present.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--abort-on-error] <input-file> | SOURCE...
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
 //!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
 //!                      md --to json`): each document converts once and is
 //!                      written in every format named, `<stem>.md` +
@@ -223,7 +223,16 @@ INPUT SELECTION
   --input GLOB|DIR        batch mode: convert everything the glob/directory matches
   --output DIR            where batch (or single-file) results are written
   --jobs N                batch workers (default 1)
-  --abort-on-error        stop the batch at the first failed file (default: skip it)
+  --abort-on-error        stop the batch at the first failed file (default: skip it;
+                          a timed-out document counts as failed under this flag)
+  --output-dirs MODE      where several inputs land under --output (#496): auto
+                          (default: a directory/glob mirrors its tree, a plain file
+                          lands by stem), flat (every output <stem>.<ext> directly in
+                          --output), mirror (every input's path relative to the
+                          current directory, inputs outside it are an error)
+  --document-timeout SECONDS   per-document budget for the PDF pipeline (docling's
+                          document_timeout, #497): checked between pages; once
+                          spent, the pages done so far are the (partial) document
   --pages A-B             convert only PDF pages A..B (1-based, inclusive)
   --scale X               `--to images` render scale, px per PDF point (0.1-4.0, default 2.0)
 
@@ -371,6 +380,8 @@ fn main() -> ExitCode {
     let mut inputs: Vec<String> = Vec::new();
     let mut abort_on_error = false;
     let mut output: Option<String> = None;
+    let mut output_dirs = OutputDirs::Auto;
+    let mut document_timeout: Option<std::time::Duration> = None;
     let mut jobs: usize = 1;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -421,6 +432,28 @@ fn main() -> ExitCode {
             "--enrich-code" => enrich_code = true,
             "--enrich-formula" => enrich_formula = true,
             "--abort-on-error" => abort_on_error = true,
+            "--output-dirs" => match args.next().as_deref().map(OutputDirs::parse) {
+                Some(Some(mode)) => output_dirs = mode,
+                Some(None) => {
+                    eprintln!("error: --output-dirs expects auto, flat or mirror");
+                    return ExitCode::from(2);
+                }
+                None => {
+                    eprintln!("error: --output-dirs needs a mode (auto, flat or mirror)");
+                    return ExitCode::from(2);
+                }
+            },
+            "--document-timeout" => match args.next().as_deref().map(parse_document_timeout) {
+                Some(Ok(t)) => document_timeout = Some(t),
+                Some(Err(e)) => {
+                    eprintln!("error: --document-timeout: {e}");
+                    return ExitCode::from(2);
+                }
+                None => {
+                    eprintln!("error: --document-timeout needs a number of seconds");
+                    return ExitCode::from(2);
+                }
+            },
             "--input" => match args.next() {
                 Some(v) => inputs.push(v),
                 None => {
@@ -750,6 +783,15 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // `--output-dirs` (#496) rewrites every source's base at once: `flat`
+        // drops the trees, `mirror` roots them all at the current directory.
+        let files = match apply_output_dirs(output_dirs, files) {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        };
         if let Err(e) = check_output_collisions(&files, Path::new(&outdir), &to) {
             eprintln!("error: {e}");
             return ExitCode::from(2);
@@ -805,6 +847,7 @@ fn main() -> ExitCode {
             scale,
             chunk: chunk_opts.clone(),
             vlm,
+            document_timeout,
         };
         return run_batch(files, Path::new(&outdir), jobs, abort_on_error, &cfg);
     }
@@ -947,6 +990,7 @@ fn main() -> ExitCode {
     if let Some(s) = ocr_scale {
         converter = converter.ocr_scale(s);
     }
+    converter = converter.document_timeout(document_timeout);
 
     // Stream Markdown by default: print each chunk as the converter produces it
     // (page by page for PDF). Referenced images stream too (#80): each page's
@@ -979,6 +1023,17 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                     wrote_any = wrote_any || !s.is_empty();
+                }
+                // A spent `--document-timeout` (#497) is the stream's last item:
+                // the Markdown printed so far is the partial document (docling's
+                // PARTIAL_SUCCESS), reported on stderr, exit code 0.
+                Err(docling::ConversionError::Timeout(msg)) => {
+                    if let Err(e) = out.flush() {
+                        eprintln!("error: writing output: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    eprintln!("warning: partial document: {msg}");
+                    return ExitCode::SUCCESS;
                 }
                 Err(e) => {
                     let _ = out.flush();
@@ -1014,7 +1069,14 @@ fn main() -> ExitCode {
     }
 
     let document = match converter.convert(source) {
-        Ok(result) => result.document,
+        Ok(result) => {
+            // docling's PARTIAL_SUCCESS (#497): the document is written, the
+            // reason goes to stderr, the exit code stays 0.
+            for problem in &result.errors {
+                eprintln!("warning: partial document: {}", problem.error_message);
+            }
+            result.document
+        }
         Err(e) => {
             if let Some(mut doc) =
                 pdf_no_ocr_fallback(&e.to_string(), is_pdf, no_ocr, strict, &path, pages)
@@ -1141,6 +1203,126 @@ struct BatchCfg {
     /// Per-run `--to chunks` configuration (#256).
     chunk: ChunkOptions,
     vlm: Option<docling::vlm::VlmOptions>,
+    /// `--document-timeout` (#497): the PDF pipeline's per-document budget.
+    document_timeout: Option<std::time::Duration>,
+}
+
+/// `--output-dirs` (#496): how several inputs lay out under `--output`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputDirs {
+    /// Today's rule: a directory or glob mirrors its tree, a plain file lands
+    /// by stem (Python docling's `convert a.docx sub/b.docx --output out/`).
+    Auto,
+    /// Every output `<stem>.<ext>` directly in `--output`; two inputs with
+    /// one stem are rejected before anything is written.
+    Flat,
+    /// Every input's path *relative to the current directory* under
+    /// `--output` — the explicit-file list keeps its folders too, which is
+    /// what a RAG corpus full of `README.md`s needs. An input outside the
+    /// current directory has no such path and is an error.
+    Mirror,
+}
+
+impl OutputDirs {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(Self::Auto),
+            "flat" => Some(Self::Flat),
+            "mirror" => Some(Self::Mirror),
+            _ => None,
+        }
+    }
+}
+
+/// Rewrite the (file, base) pairs the sources expanded to for the chosen
+/// `--output-dirs` mode. `auto` keeps each source's own base; `flat` makes
+/// every file's parent its base (so only the stem survives); `mirror` roots
+/// every file at the current directory — a relative path keeps its folders
+/// verbatim (`a/doc.docx` → `out/a/doc.md`), an absolute one is made
+/// relative to the current directory, and a path that escapes it (`../x.pdf`,
+/// `/elsewhere/x.pdf`) is refused rather than guessed at.
+fn apply_output_dirs(
+    mode: OutputDirs,
+    files: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+) -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>, String> {
+    match mode {
+        OutputDirs::Auto => Ok(files),
+        OutputDirs::Flat => Ok(files
+            .into_iter()
+            .map(|(f, _)| {
+                let base = f.parent().map(Path::to_path_buf).unwrap_or_default();
+                (f, base)
+            })
+            .collect()),
+        OutputDirs::Mirror => {
+            let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+            files
+                .into_iter()
+                .map(|(f, _)| mirror_pair(&f, &cwd))
+                .collect()
+        }
+    }
+}
+
+/// One `mirror` pair: the file as a path relative to `cwd` (lexically
+/// normalized — `./`, `a/../b`) with an empty base, so `batch_out_path` keeps
+/// the whole relative path.
+fn mirror_pair(
+    file: &Path,
+    cwd: &Path,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    use std::path::Component;
+    let abs = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        cwd.join(file)
+    };
+    // Normalize `.` and `..` lexically (no symlink resolution: the user named
+    // the path, and the output should mirror what they named).
+    let mut norm = std::path::PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !norm.pop() {
+                    return Err(format!(
+                        "'{}' climbs above the filesystem root",
+                        file.display()
+                    ));
+                }
+            }
+            c => norm.push(c),
+        }
+    }
+    let rel = norm.strip_prefix(cwd).map_err(|_| {
+        format!(
+            "'{}' is outside the current directory ({}); --output-dirs mirror lays inputs \
+             out by their path relative to it — run from a common parent, or use \
+             --output-dirs flat",
+            file.display(),
+            cwd.display()
+        )
+    })?;
+    if rel.as_os_str().is_empty() {
+        return Err(format!(
+            "'{}' is the current directory itself",
+            file.display()
+        ));
+    }
+    Ok((rel.to_path_buf(), std::path::PathBuf::new()))
+}
+
+/// `--document-timeout SECONDS`: a positive number of seconds (fractions
+/// allowed, like Python docling's float).
+fn parse_document_timeout(s: &str) -> Result<std::time::Duration, String> {
+    let secs: f64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("expected a number of seconds, got {s:?}"))?;
+    if !secs.is_finite() || secs <= 0.0 {
+        return Err(format!("expected a positive number of seconds, got {s:?}"));
+    }
+    Ok(std::time::Duration::from_secs_f64(secs))
 }
 
 /// Expand one source argument (#489) into (files, base): an existing file is
@@ -1182,7 +1364,8 @@ fn check_output_collisions(
             if first != file {
                 return Err(format!(
                     "'{}' and '{}' would both be written to '{}'; pass a common parent \
-                     directory (its structure is kept) or use separate --output directories",
+                     directory (its structure is kept), use --output-dirs mirror, or use \
+                     separate --output directories",
                     first.display(),
                     file.display(),
                     out.display()
@@ -1327,7 +1510,7 @@ fn batch_converter(cfg: &BatchCfg) -> DocumentConverter {
     if let Some(s) = cfg.ocr_scale {
         converter = converter.ocr_scale(s);
     }
-    converter
+    converter.document_timeout(cfg.document_timeout)
 }
 
 /// The lazily-built warm PDF/image pipeline shared by every batch worker —
@@ -1367,7 +1550,8 @@ fn batch_pipeline<'a>(
                 picture_classification: cfg.enrich_picture_classes,
                 code: cfg.enrich_code,
                 formula: cfg.enrich_formula,
-            });
+            })
+            .document_timeout(cfg.document_timeout);
         p.set_pages(cfg.pages);
         p.set_ocr_lang(cfg.ocr_lang.as_deref().and_then(docling::OcrLang::parse));
         // Dot-progress on stderr: one dot per 10 finished pages, newline when
@@ -1417,7 +1601,7 @@ fn batch_convert_one(
     cfg: &BatchCfg,
     converter: &DocumentConverter,
     pipe: &std::sync::Mutex<Option<Pipeline>>,
-) -> Result<(Vec<std::path::PathBuf>, f64, Option<usize>), String> {
+) -> Result<BatchOutcome, String> {
     let source = SourceDocument::from_file(file).map_err(|e| e.to_string())?;
     // Announce the document up front — with its page count for PDFs, so long
     // conversions are attributable while the dots tick.
@@ -1471,8 +1655,16 @@ fn batch_convert_one(
         .filter(|t| *t != "images")
         .collect();
     if formats.is_empty() {
-        return Ok((written, started.elapsed().as_secs_f64(), pages));
+        return Ok(BatchOutcome {
+            written,
+            secs: started.elapsed().as_secs_f64(),
+            pages,
+            partial: Vec::new(),
+        });
     }
+    // Problems the conversion survived — docling's `ConversionResult.errors`:
+    // a spent `--document-timeout` (#497) leaves the pages done so far.
+    let mut partial: Vec<String> = Vec::new();
     let mut document = if let Some(vlm) = &cfg.vlm {
         docling::vlm::convert_vlm(&source, vlm).map_err(|e| e.to_string())?
     } else if matches!(source.format, InputFormat::Pdf | InputFormat::Image) {
@@ -1482,15 +1674,21 @@ fn batch_convert_one(
         let mut guard = pipe.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let p = batch_pipeline(&mut guard, cfg)?;
         match source.format {
-            InputFormat::Pdf => p.convert(&source.bytes, None, &source.name),
-            _ => p.convert_image(&source.bytes, &source.name),
+            InputFormat::Pdf => {
+                let c = p
+                    .convert_outcome(&source.bytes, None, &source.name)
+                    .map_err(|e| e.to_string())?;
+                partial.extend(c.completion.message());
+                c.document
+            }
+            _ => p
+                .convert_image(&source.bytes, &source.name)
+                .map_err(|e| e.to_string())?,
         }
-        .map_err(|e| e.to_string())?
     } else {
-        converter
-            .convert(source)
-            .map_err(|e| e.to_string())?
-            .document
+        let result = converter.convert(source).map_err(|e| e.to_string())?;
+        partial.extend(result.errors.into_iter().map(|e| e.error_message));
+        result.document
     };
     document.strict_markdown = cfg.strict;
     document.page_break_placeholder = cfg.page_break_placeholder.clone();
@@ -1563,7 +1761,23 @@ fn batch_convert_one(
         }
         written.push(out);
     }
-    Ok((written, started.elapsed().as_secs_f64(), pages))
+    Ok(BatchOutcome {
+        written,
+        secs: started.elapsed().as_secs_f64(),
+        pages,
+        partial,
+    })
+}
+
+/// One batch file's result: the files written, the wall time, the page
+/// count (PDFs) and the problems the conversion survived (`partial` —
+/// non-empty means docling's `PARTIAL_SUCCESS`, today a spent
+/// `--document-timeout`).
+struct BatchOutcome {
+    written: Vec<std::path::PathBuf>,
+    secs: f64,
+    pages: Option<usize>,
+    partial: Vec<String>,
 }
 
 /// Convert every matched file, `--jobs` workers wide. Output paths print to
@@ -1581,6 +1795,7 @@ fn run_batch(
     let next = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     let succeeded = AtomicUsize::new(0);
+    let partial = AtomicUsize::new(0);
     // Fail fast on a broken execution provider: an explicit DOCLING_RS_EP
     // whose runtime libraries are missing fails *every* PDF/image identically
     // — the first such error aborts the rest of the batch instead of
@@ -1617,24 +1832,49 @@ fn run_batch(
                         Err("the conversion panicked (its message and backtrace are above)".into())
                     });
                     match outcome {
-                        Ok((outs, secs, pages)) => {
+                        Ok(BatchOutcome {
+                            written: outs,
+                            secs,
+                            pages,
+                            partial: problems,
+                        }) => {
                             let shown = outs
                                 .iter()
                                 .map(|o| o.display().to_string())
                                 .collect::<Vec<_>>()
                                 .join(", ");
+                            // Python docling's `PARTIAL_SUCCESS`: the files are
+                            // written (the pages that fit the budget), the
+                            // document counts as converted, and the reason
+                            // is logged — `--abort-on-error` alone makes it
+                            // end the batch (#497).
+                            let tag = if problems.is_empty() { "ok" } else { "partial" };
                             match pages {
                                 Some(n) if n > 0 => eprintln!(
-                                    "ok: {} -> {shown} ({secs:.1}s, {:.0} ms/page)",
+                                    "{tag}: {} -> {shown} ({secs:.1}s, {:.0} ms/page)",
                                     file.display(),
                                     secs * 1000.0 / n as f64
                                 ),
-                                _ => eprintln!("ok: {} -> {shown} ({secs:.1}s)", file.display()),
+                                _ => eprintln!("{tag}: {} -> {shown} ({secs:.1}s)", file.display()),
+                            }
+                            for problem in &problems {
+                                eprintln!("warning: {}: {problem}", file.display());
                             }
                             for out in &outs {
                                 println!("{}", out.display());
                             }
-                            succeeded.fetch_add(1, Ordering::Relaxed);
+                            if problems.is_empty() {
+                                succeeded.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                partial.fetch_add(1, Ordering::Relaxed);
+                                if abort_on_error {
+                                    abort.store(true, Ordering::Relaxed);
+                                    eprintln!(
+                                        "aborting the batch (--abort-on-error: the document \
+                                         was only partially converted)"
+                                    );
+                                }
+                            }
                         }
                         Err(e) => {
                             failed.fetch_add(1, Ordering::Relaxed);
@@ -1675,12 +1915,16 @@ fn run_batch(
     });
     let nf = failed.load(Ordering::Relaxed);
     let ok = succeeded.load(Ordering::Relaxed);
-    let skipped = files.len() - ok - nf;
-    if skipped > 0 {
-        eprintln!("batch: {ok} converted, {nf} failed, {skipped} skipped");
-    } else {
-        eprintln!("batch: {ok} converted, {nf} failed");
+    let np = partial.load(Ordering::Relaxed);
+    let skipped = files.len() - ok - nf - np;
+    let mut summary = format!("batch: {ok} converted, {nf} failed");
+    if np > 0 {
+        summary.push_str(&format!(", {np} partial"));
     }
+    if skipped > 0 {
+        summary.push_str(&format!(", {skipped} skipped"));
+    }
+    eprintln!("{summary}");
     if nf > 0 {
         ExitCode::FAILURE
     } else {
@@ -1940,6 +2184,84 @@ mod tests {
         // A literal file path (no metachars) bases at its parent, so a batch of
         // one lands directly under --output.
         assert_eq!(glob_base("dir/file.pdf"), Path::new("dir"));
+    }
+
+    /// `--output-dirs` (#496): `flat` drops every tree, `mirror` roots every
+    /// input at the current directory and refuses what lies outside it.
+    #[test]
+    fn output_dirs_modes_rewrite_the_bases() {
+        let p = |s: &str| std::path::PathBuf::from(s);
+        let files = vec![
+            (p("a/doc.docx"), p("a")),
+            (p("b/sub/doc.docx"), p("b")),
+            (p("c/README.md"), p("")),
+        ];
+        // auto: untouched.
+        assert_eq!(
+            apply_output_dirs(OutputDirs::Auto, files.clone()).unwrap(),
+            files
+        );
+        // flat: every base is the file's own parent, so only the stem lands.
+        let flat = apply_output_dirs(OutputDirs::Flat, files.clone()).unwrap();
+        for (f, base) in &flat {
+            assert_eq!(base, f.parent().unwrap());
+            assert_eq!(
+                batch_out_path(f, base, Path::new("out"), "md"),
+                Path::new("out")
+                    .join(f.file_stem().unwrap())
+                    .with_extension("md")
+            );
+        }
+        // mirror: the path relative to the current directory, folders kept.
+        let cwd = std::env::current_dir().unwrap();
+        let (f, base) = mirror_pair(Path::new("b/sub/doc.docx"), &cwd).unwrap();
+        assert_eq!(f, Path::new("b/sub/doc.docx"));
+        assert_eq!(base, Path::new(""));
+        assert_eq!(
+            batch_out_path(&f, &base, Path::new("out"), "json"),
+            Path::new("out/b/sub/doc.json")
+        );
+        // `./` and an interior `..` normalize lexically.
+        let (f, _) = mirror_pair(Path::new("./x/../b/doc.docx"), &cwd).unwrap();
+        assert_eq!(f, Path::new("b/doc.docx"));
+        // An absolute path below the current directory mirrors too.
+        let (f, _) = mirror_pair(&cwd.join("c/README.md"), &cwd).unwrap();
+        assert_eq!(f, Path::new("c/README.md"));
+        // Outside the current directory: refused, not guessed at.
+        let err = mirror_pair(Path::new("../elsewhere/doc.pdf"), &cwd).unwrap_err();
+        assert!(err.contains("outside the current directory"), "{err}");
+        let err = mirror_pair(Path::new("/nowhere/doc.pdf"), &cwd).unwrap_err();
+        assert!(err.contains("outside the current directory"), "{err}");
+        // The same stem under two folders collides flat, not mirrored.
+        let flat = apply_output_dirs(
+            OutputDirs::Flat,
+            vec![(p("a/doc.docx"), p("a")), (p("b/doc.docx"), p("b"))],
+        )
+        .unwrap();
+        assert!(check_output_collisions(&flat, Path::new("out"), &["md".to_string()]).is_err());
+        let mirrored = apply_output_dirs(
+            OutputDirs::Mirror,
+            vec![(p("a/doc.docx"), p("a")), (p("b/doc.docx"), p("b"))],
+        )
+        .unwrap();
+        assert!(check_output_collisions(&mirrored, Path::new("out"), &["md".to_string()]).is_ok());
+    }
+
+    /// `--document-timeout` (#497) takes a positive number of seconds.
+    #[test]
+    fn document_timeout_parses_positive_seconds() {
+        assert_eq!(
+            parse_document_timeout("90").unwrap(),
+            std::time::Duration::from_secs(90)
+        );
+        assert_eq!(
+            parse_document_timeout(" 0.5 ").unwrap(),
+            std::time::Duration::from_millis(500)
+        );
+        assert!(parse_document_timeout("0").is_err());
+        assert!(parse_document_timeout("-3").is_err());
+        assert!(parse_document_timeout("soon").is_err());
+        assert!(parse_document_timeout("inf").is_err());
     }
 
     #[test]

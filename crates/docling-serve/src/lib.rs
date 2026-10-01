@@ -45,6 +45,11 @@
 //!   DocumentFigureClassifier over pictures, CodeFormulaV2 over code / formula
 //!   regions. Off by default; a missing model warns and skips the pass
 //! - `pages` — PDF page window `A-B` / `N` (1-based inclusive, #80)
+//! - `document_timeout` — per-document budget in seconds for the PDF pipeline
+//!   (docling's `document_timeout`, #497): checked between pages; once spent
+//!   the pages done so far are the document, `status` is `partial_success`
+//!   and `errors` carries the reason (batch / async items); a single
+//!   response says so in `X-Docling-Status` / `X-Docling-Errors`
 //! - `ocr_lang` — OCR recognition language for scanned pages: `en` (default)
 //!   | `ch` (the multilingual docling-conformance model); under
 //!   `ocr_engine=tesseract` a tessdata stem list (`deu+fra`) or BCP-47 tags
@@ -484,6 +489,10 @@ struct ConvertOptions {
     xbrl_taxonomy: Option<String>,
     /// PDF page window, `"A-B"` or a single `"N"` (1-based inclusive — #80).
     pages: Option<String>,
+    /// Per-document budget in seconds for the PDF pipeline (docling's
+    /// `document_timeout`, #497); unset = unlimited. Checked between pages:
+    /// once spent, the pages done so far are the (partial) document.
+    document_timeout: Option<f64>,
     /// OCR recognition language for scanned pages: `en` (default) | `ch`.
     ocr_lang: Option<String>,
     /// Which regions feed the OCR (docling's `OcrMode`, #254): `default` |
@@ -567,6 +576,7 @@ impl ConvertOptions {
             video_frames: self.video_frames.or(base.video_frames),
             xbrl_taxonomy: self.xbrl_taxonomy.or(base.xbrl_taxonomy),
             pages: self.pages.or(base.pages),
+            document_timeout: self.document_timeout.or(base.document_timeout),
             ocr_lang: self.ocr_lang.or(base.ocr_lang),
             ocr_mode: self.ocr_mode.or(base.ocr_mode),
             ocr_engine: self.ocr_engine.or(base.ocr_engine),
@@ -1159,6 +1169,7 @@ async fn job_result(
             // the TTL evicts it (a client retrying a dropped response must not
             // find a 404).
             JobState::Success(stored) => StoredResponse {
+                errors: Vec::new(),
                 content_type: stored.content_type,
                 disposition: stored.disposition.clone(),
                 confidence: stored.confidence.clone(),
@@ -1179,11 +1190,28 @@ struct StoredResponse {
     /// The `X-Docling-Confidence` summary (#183), when the pipeline made one.
     confidence: Option<header::HeaderValue>,
     body: Vec<u8>,
+    /// The problems the conversion survived (#497) — a non-empty list is a
+    /// `partial_success`, announced in `X-Docling-Status` / `X-Docling-Errors`
+    /// since the body is the document itself.
+    errors: Vec<docling::ErrorItem>,
 }
 
 impl StoredResponse {
     fn into_response(self) -> Response {
         let mut response = ([(header::CONTENT_TYPE, self.content_type)], self.body).into_response();
+        if !self.errors.is_empty() {
+            let converted = Converted {
+                document: DoclingDocument::new(""),
+                errors: self.errors,
+            };
+            response.headers_mut().insert(
+                "x-docling-status",
+                header::HeaderValue::from_static("partial_success"),
+            );
+            if let Ok(v) = header::HeaderValue::from_str(&converted.errors_json().to_string()) {
+                response.headers_mut().insert("x-docling-errors", v);
+            }
+        }
         if let Some(d) = self.disposition {
             if let Ok(v) = header::HeaderValue::from_str(&d) {
                 response
@@ -1237,6 +1265,7 @@ fn run_conversion(
         if to == "images" {
             let pages = rasterize_pages(state, &source, options)?;
             return Ok(StoredResponse {
+                errors: Vec::new(),
                 content_type: "application/json",
                 disposition: None,
                 confidence: None,
@@ -1245,8 +1274,10 @@ fn run_conversion(
             });
         }
         let name = source.name.clone();
-        let document = convert_document(state, source, options)?;
-        return render_stored(state, to, image_mode, &name, &document, options);
+        let converted = convert_document(state, source, options)?;
+        let mut stored = render_stored(state, to, image_mode, &name, &converted.document, options)?;
+        stored.errors = converted.errors;
+        return Ok(stored);
     }
     let items: Vec<serde_json::Value> = sources
         .into_iter()
@@ -1277,7 +1308,12 @@ fn run_conversion(
                 };
             }
             match convert_document(state, source, options) {
-                Ok(document) => batch_item(state, to, image_mode, &name, &document, options),
+                Ok(converted) => {
+                    let mut item =
+                        batch_item(state, to, image_mode, &name, &converted.document, options);
+                    mark_partial(&mut item, &converted);
+                    item
+                }
                 Err(e) => json!({
                     "name": name,
                     "status": "failure",
@@ -1287,6 +1323,7 @@ fn run_conversion(
         })
         .collect();
     Ok(StoredResponse {
+        errors: Vec::new(),
         content_type: "application/json",
         disposition: None,
         confidence: None,
@@ -1365,7 +1402,7 @@ fn run_conversion_to_target(
             };
             let name = source.name.clone();
             let rendered = convert_document(state, source, options)
-                .and_then(|doc| render_stored(state, to, image_mode, &name, &doc, options));
+                .and_then(|c| render_stored(state, to, image_mode, &name, &c.document, options));
             let stored = match rendered {
                 Ok(stored) => stored,
                 Err(e) => {
@@ -1384,6 +1421,7 @@ fn run_conversion_to_target(
         })
         .collect();
     Ok(StoredResponse {
+        errors: Vec::new(),
         content_type: "application/json",
         disposition: None,
         confidence: None,
@@ -1420,8 +1458,9 @@ fn run_conversion_to_zip(
         let (name, rendered) = match item {
             Ok(source) => {
                 let name = source.name.clone();
-                let rendered = convert_document(state, source, options)
-                    .and_then(|doc| render_stored(state, to, image_mode, &name, &doc, options));
+                let rendered = convert_document(state, source, options).and_then(|c| {
+                    render_stored(state, to, image_mode, &name, &c.document, options)
+                });
                 (name, rendered.map(|stored| stored.body))
             }
             Err((name, e)) => (name, Err(e)),
@@ -1447,6 +1486,7 @@ fn run_conversion_to_zip(
     // name (there is no one stem to speak for it).
     let file_name = archive_stem.map_or_else(|| "converted.zip".into(), |s| format!("{s}.zip"));
     Ok(StoredResponse {
+        errors: Vec::new(),
         content_type: "application/zip",
         disposition: Some(format!("attachment; filename=\"{file_name}\"")),
         confidence: None,
@@ -1493,7 +1533,7 @@ fn run_conversion_to_put(
             };
             let name = source.name.clone();
             let rendered = convert_document(state, source, options)
-                .and_then(|doc| render_stored(state, to, image_mode, &name, &doc, options));
+                .and_then(|c| render_stored(state, to, image_mode, &name, &c.document, options));
             let stored = match rendered {
                 Ok(stored) => stored,
                 Err(e) => {
@@ -1525,6 +1565,7 @@ fn run_conversion_to_put(
         })
         .collect();
     Ok(StoredResponse {
+        errors: Vec::new(),
         content_type: "application/json",
         disposition: None,
         confidence: None,
@@ -1660,6 +1701,7 @@ fn render_stored(
     let confidence = confidence_header(document);
     Ok(match to {
         "md" | "markdown" => StoredResponse {
+            errors: Vec::new(),
             content_type: "text/markdown; charset=utf-8",
             disposition: None,
             confidence,
@@ -1671,6 +1713,7 @@ fn render_stored(
                 value["confidence"] = report.to_json();
             }
             StoredResponse {
+                errors: Vec::new(),
                 content_type: "application/json",
                 disposition: None,
                 confidence,
@@ -1689,6 +1732,7 @@ fn render_stored(
                 records["warnings"] = json!(warnings);
             }
             StoredResponse {
+                errors: Vec::new(),
                 content_type: "application/json",
                 disposition: None,
                 confidence,
@@ -1696,6 +1740,7 @@ fn render_stored(
             }
         }
         "dclx" => StoredResponse {
+            errors: Vec::new(),
             content_type: "application/octet-stream",
             disposition: Some(format!("attachment; filename=\"{name}.dclx\"")),
             confidence,
@@ -1703,6 +1748,7 @@ fn render_stored(
         },
         // #317: a text body like Markdown (no download disposition).
         "latex" => StoredResponse {
+            errors: Vec::new(),
             content_type: "text/x-tex; charset=utf-8",
             disposition: None,
             confidence,
@@ -1711,6 +1757,7 @@ fn render_stored(
         // #492: docling-core's HTML serializer; pictures follow `images`
         // exactly as the Markdown body does.
         "html" => StoredResponse {
+            errors: Vec::new(),
             content_type: "text/html; charset=utf-8",
             disposition: None,
             confidence,
@@ -1718,6 +1765,15 @@ fn render_stored(
         },
         _ => unreachable!("validated above"),
     })
+}
+
+/// Stamp a batch / async item with docling's `partial_success` status and
+/// its `errors` when the conversion survived a problem (#497).
+fn mark_partial(item: &mut serde_json::Value, converted: &Converted) {
+    if !converted.errors.is_empty() {
+        item["status"] = json!(converted.status());
+        item["errors"] = converted.errors_json();
+    }
 }
 
 /// One batch item (#182) as JSON. Text outputs inline as strings, the
@@ -1867,6 +1923,14 @@ async fn read_multipart(
             "asr_lang" => body_opts.asr_lang = Some(text_field(field).await?),
             "encoding" => body_opts.encoding = Some(text_field(field).await?),
             "pages" => body_opts.pages = Some(text_field(field).await?),
+            "document_timeout" => {
+                let v = text_field(field).await?;
+                body_opts.document_timeout = Some(v.parse().map_err(|_| {
+                    ApiError::Bad(format!(
+                        "document_timeout must be a number of seconds, got {v:?}"
+                    ))
+                })?);
+            }
             "ocr_lang" => body_opts.ocr_lang = Some(text_field(field).await?),
             "ocr_mode" => body_opts.ocr_mode = Some(text_field(field).await?),
             "ocr_engine" => body_opts.ocr_engine = Some(text_field(field).await?),
@@ -2212,10 +2276,40 @@ fn convert_document(
     state: &AppState,
     source: SourceDocument,
     options: &ConvertOptions,
-) -> Result<DoclingDocument, ApiError> {
+) -> Result<Converted, ApiError> {
     let result = convert_document_inner(state, source, options);
     o11y::record_conversion(result.is_ok());
     result
+}
+
+/// A converted document with the problems its conversion survived —
+/// docling's `ConversionResult.errors`, non-empty for a `partial_success`
+/// (today: a spent `document_timeout`, #497).
+struct Converted {
+    document: DoclingDocument,
+    errors: Vec<docling::ErrorItem>,
+}
+
+impl Converted {
+    fn status(&self) -> &'static str {
+        if self.errors.is_empty() {
+            "success"
+        } else {
+            "partial_success"
+        }
+    }
+
+    fn errors_json(&self) -> serde_json::Value {
+        json!(self
+            .errors
+            .iter()
+            .map(|e| json!({
+                "component_type": e.component_type,
+                "module_name": e.module_name,
+                "error_message": e.error_message,
+            }))
+            .collect::<Vec<_>>())
+    }
 }
 
 /// Resolve the request's `pipeline` / `vlm_*` options (#304) into
@@ -2296,7 +2390,7 @@ fn convert_document_inner(
     state: &AppState,
     source: SourceDocument,
     options: &ConvertOptions,
-) -> Result<DoclingDocument, ApiError> {
+) -> Result<Converted, ApiError> {
     // #304: the VLM pipeline is a sibling path — the remote model does the
     // reading, none of the local ML options apply. Resolved here (on the
     // blocking pool, where the endpoint's DNS check belongs) so every
@@ -2305,6 +2399,10 @@ fn convert_document_inner(
     // is a per-request error like any other, never a server crash.
     if let Some(vlm) = resolve_vlm_options(state, options, true)? {
         return docling::vlm::convert_vlm(&source, &vlm)
+            .map(|document| Converted {
+                document,
+                errors: Vec::new(),
+            })
             .map_err(|e| ApiError::Unsupported(e.to_string()));
     }
     match source.format {
@@ -2349,18 +2447,38 @@ fn convert_document_inner(
             pipeline.set_heading_hierarchy(docling::HeadingHierarchyOptions::enabled(
                 options.heading_hierarchy.unwrap_or(false),
             ));
-            let doc = match source.format {
-                InputFormat::Pdf => pipeline.convert(&source.bytes, None, &source.name),
-                _ => pipeline.convert_image(&source.bytes, &source.name),
+            // The document budget (#497) is per-request too.
+            pipeline.set_document_timeout(parse_document_timeout(options.document_timeout)?);
+            let converted = match source.format {
+                InputFormat::Pdf => pipeline
+                    .convert_outcome(&source.bytes, None, &source.name)
+                    .map(|c| Converted {
+                        errors: c
+                            .completion
+                            .message()
+                            .map(docling::ErrorItem::timeout)
+                            .into_iter()
+                            .collect(),
+                        document: c.document,
+                    }),
+                _ => pipeline
+                    .convert_image(&source.bytes, &source.name)
+                    .map(|document| Converted {
+                        document,
+                        errors: Vec::new(),
+                    }),
             }
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-            Ok(doc)
+            Ok(converted)
         }
         _ => {
             let converter = request_converter(state, options)?;
             converter
                 .convert(source)
-                .map(|r| r.document)
+                .map(|r| Converted {
+                    document: r.document,
+                    errors: r.errors,
+                })
                 .map_err(|e| ApiError::Unsupported(e.to_string()))
         }
     }
@@ -2474,6 +2592,7 @@ fn request_converter(
             docling::parse_page_range(pages).map_err(|e| ApiError::Bad(format!("pages: {e}")))?;
         converter = converter.page_range(first, last);
     }
+    converter = converter.document_timeout(parse_document_timeout(options.document_timeout)?);
     // Validated against the request's engine (#460): `deu` is a language
     // to Tesseract only.
     parse_ocr_lang(options)?;
@@ -2527,6 +2646,18 @@ fn parse_ocr_mode(raw: Option<&str>) -> Result<Option<docling::OcrMode>, ApiErro
 
 /// Validate a request's `ocr_scale` (#254; None passes through — the engine
 /// default).
+/// Validate a request's `document_timeout` (#497): a positive number of
+/// seconds, or unset (unlimited).
+fn parse_document_timeout(raw: Option<f64>) -> Result<Option<std::time::Duration>, ApiError> {
+    match raw {
+        Some(s) if !(s.is_finite() && s > 0.0) => Err(ApiError::Bad(format!(
+            "document_timeout must be a positive number of seconds, got {s}"
+        ))),
+        Some(s) => Ok(Some(std::time::Duration::from_secs_f64(s))),
+        None => Ok(None),
+    }
+}
+
 fn parse_ocr_scale(raw: Option<f32>) -> Result<Option<f32>, ApiError> {
     match raw {
         Some(s) if !(s.is_finite() && s > 0.0) => Err(ApiError::Bad(format!(
@@ -2632,7 +2763,13 @@ async fn stream_markdown(
             // streaming holds the model mutex anyway, so the wall-clock
             // is the same; the client still gets incremental output.)
             match convert_document(&st, source, &options) {
-                Ok(mut doc) => {
+                Ok(converted) => {
+                    // A partial document (#497) streams like a whole one; the
+                    // body is already on its way, so the reason is only logged.
+                    for e in &converted.errors {
+                        eprintln!("docling-serve: partial document: {}", e.error_message);
+                    }
+                    let mut doc = converted.document;
                     doc.strict_markdown = options.strict.unwrap_or(st.cfg.strict);
                     doc.page_break_placeholder = options.md_page_break_placeholder.clone();
                     let md = match image_mode {
@@ -2669,6 +2806,14 @@ async fn stream_markdown(
                                 if !send(Ok((s, None))) {
                                     return;
                                 }
+                            }
+                            // The stream's last item on a spent document
+                            // budget (#497): the chunks before it are the
+                            // partial document and the body is already on
+                            // its way, so this ends the stream cleanly.
+                            Err(ConversionError::Timeout(msg)) => {
+                                eprintln!("docling-serve: partial document: {msg}");
+                                break;
                             }
                             Err(e) => {
                                 o11y::record_conversion(false);

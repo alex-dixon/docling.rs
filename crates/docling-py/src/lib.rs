@@ -66,6 +66,17 @@ struct PyNativeResult {
     input_name: String,
     #[pyo3(get)]
     document_json: String,
+    /// docling's `ConversionResult.errors` as `(component_type, module_name,
+    /// error_message)` tuples; non-empty exactly for `partial_success`.
+    #[pyo3(get)]
+    errors: Vec<(String, String, String)>,
+}
+
+fn error_tuples(errors: Vec<docling::ErrorItem>) -> Vec<(String, String, String)> {
+    errors
+        .into_iter()
+        .map(|e| (e.component_type, e.module_name, e.error_message))
+        .collect()
 }
 
 /// docling's `DocumentConverter`, reduced to its processor role. Thread-safe for
@@ -96,6 +107,8 @@ struct PyDocumentConverter {
     ocr_mode: Option<docling::OcrMode>,
     ocr_scale: Option<f32>,
     page_range: Option<(usize, usize)>,
+    /// docling's `document_timeout` (#497), for the warm pipeline.
+    document_timeout: Option<std::time::Duration>,
     /// `pipeline="vlm"` (#304): resolved once in `new` (a bad configuration
     /// raises there, not mid-conversion); `convert` then routes PDF/image
     /// through the remote VLM instead of the local ML stack.
@@ -211,6 +224,7 @@ impl PyDocumentConverter {
         vlm_api_key = None,
         vlm_prompt = None,
         vlm_max_tokens = None,
+        document_timeout = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -246,7 +260,21 @@ impl PyDocumentConverter {
         vlm_api_key: Option<String>,
         vlm_prompt: Option<String>,
         vlm_max_tokens: Option<usize>,
+        document_timeout: Option<f64>,
     ) -> PyResult<Self> {
+        // `document_timeout` (docling's `PipelineOptions.document_timeout`,
+        // #497): a positive number of seconds, or None for unlimited.
+        let document_timeout = match document_timeout {
+            Some(secs) if secs.is_finite() && secs > 0.0 => {
+                Some(std::time::Duration::from_secs_f64(secs))
+            }
+            Some(secs) => {
+                return Err(PyValueError::new_err(format!(
+                    "document_timeout must be a positive number of seconds, got {secs}"
+                )))
+            }
+            None => None,
+        };
         let vlm = resolve_vlm(
             pipeline.as_deref(),
             vlm_endpoint,
@@ -294,6 +322,7 @@ impl PyDocumentConverter {
             Some((first, last)) => base.page_range(first, last),
             None => base,
         };
+        let base = base.document_timeout(document_timeout);
         // `ocr_lang` / `ocr_mode` / `ocr_scale` (#254) — validated here so a
         // typo raises instead of degrading; the parsed values also prime the
         // warm pipeline in `initialize_pipeline`.
@@ -394,6 +423,7 @@ impl PyDocumentConverter {
             ocr_mode: ocr_mode_choice,
             ocr_scale,
             page_range,
+            document_timeout,
             vlm,
         })
     }
@@ -428,6 +458,7 @@ impl PyDocumentConverter {
         let ocr_mode = self.ocr_mode;
         let ocr_scale = self.ocr_scale;
         let page_range = self.page_range;
+        let document_timeout = self.document_timeout;
         run_interruptible(py, move || {
             let mut slot = slot.lock().unwrap();
             if slot.is_none() {
@@ -448,6 +479,7 @@ impl PyDocumentConverter {
                     .ocr_mode(ocr_mode)
                     .ocr_scale(ocr_scale)
                     .pages(page_range)
+                    .document_timeout(document_timeout)
                     .enrichments(enrich);
                 pipeline
                     .warm_up()
@@ -504,6 +536,7 @@ impl PyDocumentConverter {
                     status: "success".to_string(),
                     input_name: src.name,
                     document_json: doc.export_to_json(),
+                    errors: Vec::new(),
                 })
             });
         }
@@ -514,13 +547,27 @@ impl PyDocumentConverter {
                 let pipeline = slot
                     .as_mut()
                     .ok_or_else(|| ConversionError::new_err("PDF pipeline not initialized"))?;
-                let doc = pipeline
-                    .convert(&src.bytes, None, &src.name)
+                // docling's PARTIAL_SUCCESS (#497): a spent budget leaves the
+                // pages done so far and says so in `errors`.
+                let c = pipeline
+                    .convert_outcome(&src.bytes, None, &src.name)
                     .map_err(|e| ConversionError::new_err(e.to_string()))?;
+                let errors: Vec<docling::ErrorItem> = c
+                    .completion
+                    .message()
+                    .map(docling::ErrorItem::timeout)
+                    .into_iter()
+                    .collect();
                 Ok(PyNativeResult {
-                    status: "success".to_string(),
+                    status: if errors.is_empty() {
+                        "success"
+                    } else {
+                        "partial_success"
+                    }
+                    .to_string(),
                     input_name: src.name,
-                    document_json: doc.export_to_json(),
+                    document_json: c.document.export_to_json(),
+                    errors: error_tuples(errors),
                 })
             });
         }
@@ -642,6 +689,7 @@ fn native_result(r: docling::ConversionResult) -> PyNativeResult {
         status,
         input_name: r.input_name,
         document_json,
+        errors: error_tuples(r.errors),
     }
 }
 

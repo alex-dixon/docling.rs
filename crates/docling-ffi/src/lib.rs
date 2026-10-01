@@ -66,6 +66,11 @@ struct Options {
     xbrl_taxonomy: Option<String>,
     /// PDF page window, `"A-B"` or a single `"N"` (1-based inclusive, #80).
     pages: Option<String>,
+    /// Per-document budget in seconds for the PDF pipeline (docling's
+    /// `document_timeout`, #497): checked between pages; once spent the pages
+    /// done so far are the document (this C surface returns the document
+    /// only, so the partial status is not reported).
+    document_timeout: Option<f64>,
     /// OCR recognition language for scanned pages: `en` (default) | `ch`.
     ocr_lang: Option<String>,
     /// Keep layout + TableFormer, never OCR (docling's independent
@@ -145,6 +150,14 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
     if let Some(pages) = &options.pages {
         let (first, last) = docling::parse_page_range(pages).map_err(|e| format!("pages: {e}"))?;
         converter = converter.page_range(first, last);
+    }
+    if let Some(secs) = options.document_timeout {
+        if !(secs.is_finite() && secs > 0.0) {
+            return Err(format!(
+                "document_timeout must be a positive number of seconds, got {secs}"
+            ));
+        }
+        converter = converter.document_timeout(Some(std::time::Duration::from_secs_f64(secs)));
     }
     if let Some(lang) = &options.ocr_lang {
         docling::OcrLang::parse(lang).ok_or_else(|| {

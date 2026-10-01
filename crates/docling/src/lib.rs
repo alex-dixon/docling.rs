@@ -41,7 +41,7 @@ pub mod video;
 pub use converter::{parse_page_range, DocumentConverter, DEFAULT_VIDEO_FRAMES};
 pub use error::ConversionError;
 pub use format::InputFormat;
-pub use result::{ConversionResult, ConversionStatus};
+pub use result::{ConversionResult, ConversionStatus, ErrorItem};
 pub use source::SourceDocument;
 #[cfg(feature = "pdf")]
 pub use stream::MarkdownStream;

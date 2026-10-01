@@ -63,6 +63,7 @@ async function main() {
   await check('convert (bytes) → Markdown round-trips', () => {
     const res = convert({ name: 'doc', data: Buffer.from(MD), format: 'md' })
     assert.equal(res.status, 'success')
+    assert.deepEqual(res.errors, [])
     assert.equal(res.format, 'md')
     assert.match(res.content, /# Title/)
     assert.match(res.content, /Hello/)
@@ -384,6 +385,9 @@ async function main() {
     assert.throws(() => new Pipeline({ ocrMode: 'sideways' }), /ocrMode/)
     assert.throws(() => new Pipeline({ ocrScale: 0 }), /ocrScale/)
     assert.throws(() => new Pipeline({ pages: '3-1' }), /pages/)
+    assert.throws(() => new Pipeline({ documentTimeout: 0 }), /documentTimeout/)
+    assert.throws(() => new DocumentConverter({ documentTimeout: -5 }), /documentTimeout/)
+    new DocumentConverter({ documentTimeout: 90 })
     new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'por+eng', ocrMode: 'full_page', pages: '1-2' })
     new Pipeline({ ocrEngine: 'ppocr', ocrLang: 'zh-Hans', ocrScale: 3, headingHierarchy: true })
   })

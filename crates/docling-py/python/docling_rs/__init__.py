@@ -70,6 +70,7 @@ __all__ = [
     "DocumentConverter",
     "ConversionResult",
     "ConversionStatus",
+    "ErrorItem",
     "ConversionError",
     "InputDocument",
     "DoclingDocument",
@@ -111,15 +112,35 @@ class InputDocument:
     file: Path
 
 
+@dataclass(frozen=True)
+class ErrorItem:
+    """docling's ``ErrorItem``: one recorded problem of a conversion that still
+    produced a document (``component_type``, ``module_name``,
+    ``error_message``). Today the one recorded problem is a spent
+    ``document_timeout`` (#497)."""
+
+    component_type: str
+    module_name: str
+    error_message: str
+
+
 class ConversionResult:
     """docling's ``ConversionResult``: ``.document`` (a genuine
-    :class:`~docling_core.types.doc.DoclingDocument`), ``.status`` and
-    ``.input``."""
+    :class:`~docling_core.types.doc.DoclingDocument`), ``.status``,
+    ``.input`` and ``.errors`` (non-empty exactly when the status is
+    ``PARTIAL_SUCCESS``)."""
 
-    def __init__(self, status: str, input_name: str, document: DoclingDocument):
+    def __init__(
+        self,
+        status: str,
+        input_name: str,
+        document: DoclingDocument,
+        errors: Iterable[ErrorItem] = (),
+    ):
         self.status = ConversionStatus(status)
         self.document = document
         self.input = InputDocument(file=Path(input_name))
+        self.errors = list(errors)
 
 
 class DocumentConverter:
@@ -188,6 +209,12 @@ class DocumentConverter:
       construction); ``vlm_api_key`` (Bearer token), ``vlm_prompt`` and
       ``vlm_max_tokens`` (default 8192) are optional. With
       ``pipeline="standard"`` the ``vlm_*`` kwargs are ignored, not rejected.
+    * ``document_timeout`` — docling's ``PipelineOptions.document_timeout``
+      (#497): a per-document budget in seconds for the PDF pipeline, checked
+      between pages. Once spent, the pages done so far are the document and
+      the result is a ``PARTIAL_SUCCESS`` whose ``.errors`` says why. ``None``
+      (default) is unlimited. Also accepted docling-shaped, via
+      ``pipeline_options.document_timeout``.
     * ``artifacts_path`` — override the model cache dir (docling's
       ``artifacts_path``); defaults to ``~/.cache/docling.rs``.
     """
@@ -221,6 +248,7 @@ class DocumentConverter:
         vlm_api_key: Optional[str] = None,
         vlm_prompt: Optional[str] = None,
         vlm_max_tokens: Optional[int] = None,
+        document_timeout: Optional[float] = None,
         artifacts_path=None,
     ):
         ensure_env(artifacts_path)
@@ -250,6 +278,11 @@ class DocumentConverter:
             do_formula_enrichment = getattr(
                 pdf_opts, "do_formula_enrichment", do_formula_enrichment
             )
+            # docling's PipelineOptions.document_timeout (#497), when set on
+            # the pipeline options, wins over the shorthand kwarg.
+            dt = getattr(pdf_opts, "document_timeout", None)
+            if dt is not None:
+                document_timeout = float(dt)
             # Map docling's ocr_options.lang (a list of language ids) onto the
             # engine's en/ch recognition-model switch. First entry wins;
             # anything that isn't recognisably English/Chinese is ignored with
@@ -356,6 +389,7 @@ class DocumentConverter:
             vlm_api_key=vlm_api_key,
             vlm_prompt=vlm_prompt,
             vlm_max_tokens=vlm_max_tokens,
+            document_timeout=document_timeout,
             allowed_formats=(
                 [InputFormat(f).value for f in allowed_formats]
                 if allowed_formats is not None
@@ -426,4 +460,5 @@ def _pdf_pipeline_options(
 def _wrap(native) -> ConversionResult:
     """Validate the Rust engine's JSON into a real ``DoclingDocument``."""
     document = DoclingDocument.model_validate_json(native.document_json)
-    return ConversionResult(native.status, native.input_name, document)
+    errors = [ErrorItem(*item) for item in getattr(native, "errors", ())]
+    return ConversionResult(native.status, native.input_name, document, errors)
