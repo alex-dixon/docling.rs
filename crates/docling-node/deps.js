@@ -113,7 +113,18 @@ function resolvePaths(dir) {
     tfBbox: process.env.DOCLING_TABLEFORMER_BBOX || path.join(models, 'tableformer', 'bbox.onnx'),
     chunkTokenizer:
       process.env.DOCLING_CHUNK_TOKENIZER || path.join(models, 'chunk', 'tokenizer.json'),
+    // IBM Z (#504): the prebuilt addon has no ONNX Runtime linked in — pyke
+    // ships none for s390x — and dlopens libonnxruntime.so from
+    // `ORT_DYLIB_PATH`, else `<models>/onnxruntime/`, else the library search
+    // path; download_dependencies.sh fetches it there on an s390x host.
+    onnxRuntime: process.env.ORT_DYLIB_PATH || path.join(models, 'onnxruntime', 'libonnxruntime.so'),
   }
+}
+
+// Whether this process needs a separately installed ONNX Runtime library for
+// the ML stages (the s390x addon; every other prebuilt links it in).
+function needsOnnxRuntime() {
+  return process.arch === 's390x'
 }
 
 /**
@@ -141,9 +152,14 @@ function checkDependencies(options = {}) {
     ocrDet: has(p.ocrDet),
     tableformer: has(p.tfEncoder) && has(p.tfDecoder) && has(p.tfBbox),
     chunkTokenizer: has(p.chunkTokenizer),
+    // true where the runtime is linked in; on s390x whether the library is present.
+    onnxRuntime: !needsOnnxRuntime() || has(p.onnxRuntime),
   }
-  status.ready = status.layout
-  status.missing = [!status.layout && 'layout_heron.onnx'].filter(Boolean)
+  status.ready = status.layout && status.onnxRuntime
+  status.missing = [
+    !status.layout && 'layout_heron.onnx',
+    !status.onnxRuntime && 'onnxruntime/libonnxruntime.so',
+  ].filter(Boolean)
   return status
 }
 
@@ -156,6 +172,12 @@ function exportEnv(p) {
   if (fs.existsSync(p.tfEncoder)) process.env.DOCLING_TABLEFORMER_ENCODER = p.tfEncoder
   if (fs.existsSync(p.tfDecoder)) process.env.DOCLING_TABLEFORMER_DECODER = p.tfDecoder
   if (fs.existsSync(p.tfBbox)) process.env.DOCLING_TABLEFORMER_BBOX = p.tfBbox
+  // The native loader looks under `.models/` (CWD) and `$DOCLING_RS_MODELS_DIR`
+  // only; a cache-layout home (`~/.cache/docling.rs/models/onnxruntime/`) is
+  // handed over as the explicit path.
+  if (needsOnnxRuntime() && !process.env.ORT_DYLIB_PATH && fs.existsSync(p.onnxRuntime)) {
+    process.env.ORT_DYLIB_PATH = p.onnxRuntime
+  }
 }
 
 /**
@@ -174,6 +196,10 @@ function downloadGuide() {
     'or, from a checkout of the repo:',
     '',
     '  scripts/install/download_dependencies.sh',
+    '',
+    'On IBM Z (s390x) the same script also fetches the ONNX Runtime library',
+    '(onnxruntime/libonnxruntime.so) the prebuilt addon loads at run time;',
+    'ORT_DYLIB_PATH points at one installed elsewhere.',
     '',
     'TableFormer is optional (tables fall back to geometric reconstruction',
     'without it). To use your own export/host instead, point the DOCLING_*',

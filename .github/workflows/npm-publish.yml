@@ -97,6 +97,21 @@ jobs:
           #   - { target: x86_64-apple-darwin,  host: macos-14 }  # cross via --target
           - target: x86_64-pc-windows-msvc
             host: windows-latest
+          # IBM Z (#504): cross-compiled with cargo-zigbuild against glibc
+          # 2.28 (the distro cross toolchain would pin the addon to its 2.39
+          # sysroot and shut out RHEL 8/9 mainframes; napi's own `--zig` has
+          # a target allowlist without s390x) and `ort-load-dynamic` — pyke
+          # ships no ONNX Runtime for s390x, the addon dlopens the one
+          # download_dependencies.sh fetches into .models/onnxruntime/ on an
+          # s390x host. The cdylib is renamed the way napi names it,
+          # docling-rs.linux-s390x-gnu.node, so `napi artifacts` files it into
+          # the docling.rs-linux-s390x-gnu platform package (the loader has
+          # the s390x branch). `cross` is the binutils prefix used to strip.
+          - target: s390x-unknown-linux-gnu
+            host: ubuntu-24.04
+            cross: s390x-linux-gnu
+            zig: true
+            features: ort-load-dynamic
     steps:
       - uses: actions/checkout@v7
         with:
@@ -111,6 +126,19 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add ${{ matrix.target }}
+
+      # cargo-zigbuild + zig (both as wheels) as the cross C compiler/linker;
+      # the target's binutils only for `strip`, which the host's cannot do on
+      # a foreign ELF.
+      - name: Install cargo-zigbuild and the target binutils
+        if: matrix.zig
+        shell: bash
+        run: |
+          pipx install cargo-zigbuild
+          pipx inject cargo-zigbuild ziglang
+          cargo zigbuild --help >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils-${{ matrix.cross }}
 
       # One workspace, key the cache per target so the 5 jobs don't collide.
       - uses: actions/cache@v6
@@ -133,9 +161,21 @@ jobs:
       # Native addon + the JS loader / d.ts. `--strip` keeps the (ONNX-linked)
       # binary as small as possible; strip isn't available under MSVC, so the
       # Windows build omits it.
+      # `--strip` runs the host `strip` on the cross-built s390x addon, which
+      # cannot read it: the cross build strips with the target's binutils
+      # afterwards.
       - name: Build (unix)
         if: runner.os != 'Windows'
-        run: npx napi build --platform --release --strip --target ${{ matrix.target }} --js native.js --dts native.d.ts
+        shell: bash
+        run: |
+          features="${{ matrix.features }}"
+          if [ -n "${{ matrix.zig }}" ]; then
+            cargo zigbuild --release --locked -p docling-node --target ${{ matrix.target }}.2.28 ${features:+--features $features}
+            cp ../../target/${{ matrix.target }}/release/libdocling_node.so docling-rs.linux-s390x-gnu.node
+            ${{ matrix.cross }}-strip docling-rs.*.node
+          else
+            npx napi build --platform --release --strip --target ${{ matrix.target }} --js native.js --dts native.d.ts ${features:+--features $features}
+          fi
 
       - name: Build (windows)
         if: runner.os == 'Windows'

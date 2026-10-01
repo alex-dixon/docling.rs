@@ -44,7 +44,7 @@ transition; drop `docling` once nothing imports it. For the GPU build install
 never both):
 
 ```bash
-pip install docling-rs            # CPU wheels: Linux x86-64/arm64, Windows; sdist elsewhere
+pip install docling-rs            # CPU wheels: Linux x86-64/arm64/s390x, Windows; sdist elsewhere
 # or, with an NVIDIA GPU (Linux x86_64, CUDA 12 + cuDNN 9, glibc ≥ 2.38):
 pip install docling-rs-cuda       # converts on the GPU automatically, CPU fallback
 pip uninstall docling             # optional — only when you no longer import it
@@ -303,7 +303,9 @@ Releases are **automatic**, mirroring the npm package: every GitHub Release
 CI cuts (`v<version>`, see the repo's release flow) triggers the
 [`pypi-publish`](../../.github/workflows/pypi-publish.yml) GitHub Actions
 workflow, which builds an `abi3` wheel per platform (Linux x86-64/arm64 as
-`manylinux_2_28`, Windows x86-64 — one wheel covers every Python ≥ 3.9) plus an
+`manylinux_2_28`, Linux s390x cross-compiled with maturin — it loads ONNX
+Runtime at run time, see the repo README's IBM Z section — and Windows x86-64;
+one wheel covers every Python ≥ 3.9) plus an
 sdist and the `docling-rs-cuda` wheel, and uploads them to PyPI at the release's
 version. It can also be run by hand (`workflow_dispatch`) — to re-publish a
 version an automatic run skipped or failed on, or to publish a branch build;

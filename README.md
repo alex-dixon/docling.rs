@@ -1711,8 +1711,15 @@ release workflow attaches the cross-compiled
 `docling-rs-<tag>-s390x-unknown-linux-gnu.tar.gz` (and the FFI library),
 `install.sh` picks it on an s390x host, and the container images publish a
 `linux/s390x` variant (binaries cross-built on the build platform, the
-runtime fetched into the image). Not yet: the s390x Python wheels and npm
-package.
+runtime fetched into the image). The Python wheel
+(`cp39-abi3-manylinux_2_28_s390x`) and the npm platform package
+`docling.rs-linux-s390x-gnu` are cross-compiled too, in maturin's / napi's
+zig mode against glibc 2.28 — the manylinux s390x container would compile
+the workspace under QEMU for hours, and the distro cross toolchain would pin
+them to its glibc 2.39 sysroot, shutting out RHEL 8/9 mainframes; `docling_rs.download_models()` fetches the runtime into its cache on an
+s390x host, and the Node binding reports `onnxruntime/libonnxruntime.so` as
+a missing dependency there until `download_dependencies.sh` has run (or
+`ORT_DYLIB_PATH` names one).
 
 Then either:
 

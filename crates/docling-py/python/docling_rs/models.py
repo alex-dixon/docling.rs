@@ -27,7 +27,9 @@ under the docling-owned cache root, so nothing collides.)
 from __future__ import annotations
 
 import os
+import platform
 import sys
+import tarfile
 import urllib.request
 from pathlib import Path
 
@@ -91,6 +93,15 @@ _ENRICH = {
     "cf_tokenizer.json": "models/code_formula/tokenizer.json",
 }
 _ENRICH_FP32_DECODER = ("cf_decoder_kv.onnx", "models/code_formula/decoder_kv.onnx")
+
+# IBM Z (#504): the s390x wheel has no ONNX Runtime linked in — pyke ships
+# none for the target — and dlopens libonnxruntime.so from ``ORT_DYLIB_PATH``,
+# else ``<models dir>/onnxruntime/`` (``DOCLING_RS_MODELS_DIR``, which
+# ensure_env points at the cache), else the library search path. The models
+# release hosts the library (ONNX Runtime 1.28.0, cross-compiled by the
+# onnxruntime-s390x.yml workflow) as a tarball that unpacks into that
+# directory; fetched on s390x hosts only.
+_ORT_S390X = ("onnxruntime-linux-s390x.tar.gz", "models/onnxruntime")
 
 # Straight-from-upstream fallback for assets older release tags don't host:
 # cache path -> upstream URL.
@@ -167,7 +178,32 @@ def download_models(
     name, rel = _ENRICH_FP32_DECODER
     if not (root / _ENRICH["cf_decoder_kv_int8.onnx"]).exists():
         _fetch(f"{BASE_URL}/{name}", root / rel, optional=True, progress=progress, force=force)
+    if platform.machine() == "s390x":
+        _fetch_onnxruntime(root, progress=progress, force=force)
     return root
+
+
+def _fetch_onnxruntime(root: Path, progress: bool, force: bool) -> bool:
+    """Fetch and unpack the s390x ONNX Runtime library into the cache
+    (``models/onnxruntime/libonnxruntime.so`` + its versioned name, LICENSE,
+    VERSION). Optional: an older release tag without it leaves the ML stages
+    unavailable on this host with the native pipeline's own message."""
+    name, rel = _ORT_S390X
+    dest = root / rel
+    if (dest / "libonnxruntime.so").exists() and not force:
+        return True
+    tgz = dest.with_suffix(".tar.gz")
+    if not _fetch(f"{BASE_URL}/{name}", tgz, optional=True, progress=progress, force=True):
+        return False
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tgz) as tar:
+            # The tarball is flat (the names ONNX Runtime's build produces plus
+            # LICENSE/VERSION); the filter keeps a crafted archive inside dest.
+            tar.extractall(dest, filter="data") if hasattr(tarfile, "data_filter") else tar.extractall(dest)
+    finally:
+        tgz.unlink(missing_ok=True)
+    return (dest / "libonnxruntime.so").exists()
 
 
 def _point_at(var: str, local: "list[str]", cached: Path) -> None:
