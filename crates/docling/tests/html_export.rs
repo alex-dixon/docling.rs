@@ -2,11 +2,14 @@
 //! its fixtures (#492): every `tests/data/<fmt>/groundtruth/<name>.html` in
 //! the mirrored corpus is byte-for-byte what `DoclingDocument.export_to_html(
 //! image_mode=EMBEDDED)` produced for `sources/<name>`, so the port is scored
-//! the way the Markdown and JSON exports are.
+//! the way the Markdown and JSON exports are. The content-layer selection
+//! (#499) is scored the same way against `tests/data/html_layers/` in this
+//! crate: docling-core 2.99's `export_to_html(included_content_layers=…)`
+//! run over the upstream groundtruth JSON of the same fixtures.
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use docling::{DocumentConverter, ImageMode, SourceDocument};
+use docling::{ContentLayers, DocumentConverter, HtmlExportOptions, ImageMode, SourceDocument};
 
 /// `src="data:<mime>;base64,<payload>"` → `src="data:…"`: the payload and
 /// its media type both come from the JSON export's picture bytes.
@@ -106,6 +109,95 @@ fn html_matches_upstream_groundtruth() {
     assert!(
         failures.is_empty(),
         "{} of {} HTML groundtruth mismatch(es):\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
+}
+
+/// `export_to_html_with_layers` (#499) against docling-core's own output for
+/// the extra layers: every `tests/data/html_layers/<source>.<layers>.html`
+/// (`<layers>` = `+`-joined layer names, or `all`) is what docling-core 2.99's
+/// `DoclingDocument.export_to_html(image_mode=EMBEDDED,
+/// included_content_layers={…})` produced over the upstream groundtruth
+/// JSON of the DOCX fixture `<source>`, whose body-parented page headers /
+/// footers (furniture) and reviewer comments (notes) the default export
+/// leaves out.
+#[test]
+fn html_layers_match_docling_core() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/html_layers");
+    let corpus = corpus();
+    let mut cases: Vec<(PathBuf, PathBuf, ContentLayers)> = Vec::new();
+    for e in fs::read_dir(&dir).expect("html_layers fixtures").flatten() {
+        let want = e.path();
+        let name = want.file_name().unwrap().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".html") else {
+            continue;
+        };
+        let (source, layers) = stem.rsplit_once('.').expect("<source>.<layers>.html");
+        let layers = ContentLayers::parse_list(&layers.replace('+', ",")).expect("layer names");
+        let ext = Path::new(source)
+            .extension()
+            .and_then(|x| x.to_str())
+            .expect("source extension");
+        let src = corpus.join(ext).join("sources").join(source);
+        assert!(src.is_file(), "no upstream source for {name}");
+        cases.push((src, want, layers));
+    }
+    cases.sort_by(|a, b| a.1.cmp(&b.1));
+    assert!(!cases.is_empty(), "no fixtures under {}", dir.display());
+
+    let converter = DocumentConverter::new();
+    let mut failures = Vec::new();
+    for (src, want_path, layers) in &cases {
+        let name = want_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let source = SourceDocument::from_file(src).expect("read source");
+        let doc = converter.convert(source).expect("convert").document;
+        let (got, _) = doc.export_to_html_with(&HtmlExportOptions {
+            image_mode: ImageMode::Embedded,
+            layers: *layers,
+            ..HtmlExportOptions::default()
+        });
+        let want = fs::read_to_string(want_path).expect("read expected");
+        let (got, want) = (
+            mask_data_uris(got.trim_end()),
+            mask_data_uris(want.trim_end()),
+        );
+        if got != want {
+            let first = got
+                .lines()
+                .zip(want.lines())
+                .enumerate()
+                .find(|(_, (a, b))| a != b)
+                .map(|(i, (a, b))| {
+                    format!("line {}:\n  got:  {:.200}\n  want: {:.200}", i + 1, a, b)
+                })
+                .unwrap_or_else(|| {
+                    format!("lengths differ: got {} want {}", got.len(), want.len())
+                });
+            failures.push(format!("{name}: {first}"));
+        }
+        // The default export of the same document stays body-only.
+        if *layers != ContentLayers::BODY {
+            let body_only = doc.export_to_html();
+            assert_ne!(
+                mask_data_uris(&body_only),
+                got,
+                "{name}: the extra layers changed nothing"
+            );
+            assert_eq!(
+                body_only,
+                doc.export_to_html_with_layers(ContentLayers::BODY)
+            );
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} layer export mismatch(es):\n{}",
         failures.len(),
         cases.len(),
         failures.join("\n")

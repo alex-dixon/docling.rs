@@ -658,6 +658,33 @@ regression suite pins every fixture's `.html`.
 let (html, _) = result.document.export_to_html_with_images(ImageMode::Embedded, "artifacts");
 ```
 
+**Content layers** (#499 — docling-core's `HTMLParams.layers` /
+`export_to_html(included_content_layers=…)`): the export renders the `body`
+layer only by default, so page headers and footers (the `furniture` layer —
+DOCX/ODF running headers, PDF `page_header`/`page_footer` items, HTML
+chrome), reviewer comments (`notes`) and hidden content (`invisible`) stay
+out exactly as upstream leaves them out. `export_to_html_with_layers` takes
+the set to render: `ContentLayers::BODY.with(ContentLayer::Furniture)`,
+`ContentLayers::ALL` (Python's `set(ContentLayer)`), or a set without
+`body`; `HtmlExportOptions` combines it with the image mode and artifacts
+directory for `export_to_html_with`. An item off the set is skipped while
+its children are still walked, and the extra items render through the same
+serializers as the body — a header is a `<p>`, a comment a `<p>`, a header
+table a `<table>` — byte-identical to docling-core 2.99's output for the
+same layer sets (`html_layers_match_docling_core` pins DOCX header/footer,
+comment and all-layer exports). The default export is unchanged byte for
+byte.
+
+```rust
+use docling::{ContentLayer, ContentLayers, HtmlExportOptions, ImageMode};
+let html = doc.export_to_html_with_layers(ContentLayers::BODY.with(ContentLayer::Furniture));
+let (html, artifacts) = doc.export_to_html_with(&HtmlExportOptions {
+    image_mode: ImageMode::Referenced,
+    layers: ContentLayers::ALL,
+    ..HtmlExportOptions::default()
+});
+```
+
 `--to html` on the CLI prints it (batch mode writes `<stem>.html`, pictures
 per `--images`), serve answers `to=html` as `text/html` (inline under `html`
 in a batch), the Node bindings take `to: 'html'`, wasm `"html"`. The Python

@@ -395,6 +395,149 @@ impl ContentLayer {
     }
 }
 
+/// A set of content layers, `body` included — docling-core's
+/// `set[ContentLayer]` (`HTMLParams.layers`,
+/// `export_to_html(included_content_layers=…)`), where `body` is a member
+/// like any other. [`Default`] is docling's `DEFAULT_CONTENT_LAYERS`: body
+/// only, so an export built with it is unchanged from before layers could
+/// be chosen (#499).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContentLayers {
+    /// The main content (items without an explicit layer).
+    pub body: bool,
+    /// [`ContentLayer::Furniture`]: page headers/footers, navigation chrome.
+    pub furniture: bool,
+    /// [`ContentLayer::Notes`]: reviewer comments and other editorial notes.
+    pub notes: bool,
+    /// [`ContentLayer::Invisible`]: hidden content (hidden sheets, …).
+    pub invisible: bool,
+}
+
+impl Default for ContentLayers {
+    fn default() -> Self {
+        Self::BODY
+    }
+}
+
+impl ContentLayers {
+    /// Body only — docling's `DEFAULT_CONTENT_LAYERS`.
+    pub const BODY: Self = Self {
+        body: true,
+        furniture: false,
+        notes: false,
+        invisible: false,
+    };
+    /// Every layer — Python's `set(ContentLayer)`.
+    pub const ALL: Self = Self {
+        body: true,
+        furniture: true,
+        notes: true,
+        invisible: true,
+    };
+    /// No layer at all (nothing renders); build a set from it with
+    /// [`with`](Self::with) / [`with_body`](Self::with_body).
+    pub const NONE: Self = Self {
+        body: false,
+        furniture: false,
+        notes: false,
+        invisible: false,
+    };
+
+    /// The set plus `layer`.
+    pub const fn with(mut self, layer: ContentLayer) -> Self {
+        match layer {
+            ContentLayer::Furniture => self.furniture = true,
+            ContentLayer::Notes => self.notes = true,
+            ContentLayer::Invisible => self.invisible = true,
+        }
+        self
+    }
+
+    /// The set plus the body layer.
+    pub const fn with_body(mut self) -> Self {
+        self.body = true;
+        self
+    }
+
+    /// Whether `layer` is in the set; `None` is the body layer.
+    pub fn contains(&self, layer: Option<ContentLayer>) -> bool {
+        match layer {
+            None => self.body,
+            Some(ContentLayer::Furniture) => self.furniture,
+            Some(ContentLayer::Notes) => self.notes,
+            Some(ContentLayer::Invisible) => self.invisible,
+        }
+    }
+
+    /// Whether the layer spelled `name` (`body`, `furniture`, `notes`,
+    /// `invisible` — the JSON `content_layer` values) is in the set; an
+    /// unknown name is not.
+    pub fn contains_name(&self, name: &str) -> bool {
+        match name {
+            "body" => self.body,
+            "furniture" => self.furniture,
+            "notes" => self.notes,
+            "invisible" => self.invisible,
+            _ => false,
+        }
+    }
+
+    /// Parse a comma-separated list of layer names (`body,furniture`;
+    /// whitespace around a name is ignored, `all` is every layer). An
+    /// unknown name is the error. docling-core 2.99's `background` layer
+    /// (watermarks) has no items in this model, so the name is accepted and
+    /// adds nothing — a set written for Python keeps parsing.
+    pub fn parse_list(list: &str) -> Result<Self, String> {
+        let mut set = Self::NONE;
+        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            match name {
+                "body" => set.body = true,
+                "furniture" => set.furniture = true,
+                "notes" => set.notes = true,
+                "invisible" => set.invisible = true,
+                "background" => {}
+                "all" => set = Self::ALL,
+                other => {
+                    return Err(format!(
+                        "unknown content layer `{other}` (expected body, furniture, notes, invisible or all)"
+                    ))
+                }
+            }
+        }
+        Ok(set)
+    }
+}
+
+/// Options of the HTML export ([`DoclingDocument::export_to_html_with`]):
+/// docling-core's `HTMLParams` subset the port honours. [`Default`] is
+/// upstream's default export — placeholder images, `artifacts` as the
+/// referenced-image directory, the body layer only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlExportOptions {
+    /// How pictures render (`HTMLParams.image_mode`): nothing but captions
+    /// and meta for [`ImageMode::Placeholder`], `data:` URIs when embedded,
+    /// `<img src>` paths under [`artifacts_dir`](Self::artifacts_dir) when
+    /// referenced.
+    pub image_mode: ImageMode,
+    /// The directory referenced images are named under, the Markdown
+    /// export's convention (`<artifacts_dir>/image_NNNNNN.<ext>`).
+    pub artifacts_dir: String,
+    /// The content layers rendered (`HTMLParams.layers`, #499): an item on a
+    /// layer outside the set is skipped, its children still walked — exactly
+    /// how docling-core's `get_excluded_refs` reads the set.
+    pub layers: ContentLayers,
+}
+
+impl Default for HtmlExportOptions {
+    fn default() -> Self {
+        Self {
+            image_mode: ImageMode::Placeholder,
+            artifacts_dir: "artifacts".to_string(),
+            layers: ContentLayers::BODY,
+        }
+    }
+}
+
 /// DocLang-only content for a [`Node::ListItem`] whose DocLang form differs from
 /// its flat Markdown `text` (see [`Node::ListItem::dclx`]). `ordered` picks the
 /// enclosing `<list>` kind, `marker` the `<ldiv><marker>`; content is `runs`
@@ -1017,7 +1160,7 @@ impl DoclingDocument {
     ///
     /// [`export_to_html_with_images`]: Self::export_to_html_with_images
     pub fn export_to_html(&self) -> String {
-        crate::html::to_html(self, ImageMode::Placeholder, "artifacts").0
+        crate::html::to_html(self, &HtmlExportOptions::default()).0
     }
 
     /// HTML with pictures per `image_mode`: `data:` URIs when embedded, and
@@ -1029,7 +1172,48 @@ impl DoclingDocument {
         image_mode: ImageMode,
         artifacts_dir: &str,
     ) -> (String, Vec<(String, Vec<u8>)>) {
-        crate::html::to_html(self, image_mode, artifacts_dir)
+        crate::html::to_html(
+            self,
+            &HtmlExportOptions {
+                image_mode,
+                artifacts_dir: artifacts_dir.to_string(),
+                ..HtmlExportOptions::default()
+            },
+        )
+    }
+
+    /// HTML rendering the content `layers` — docling-core's
+    /// `export_to_html(included_content_layers=…)` (#499). The default export
+    /// is body only; `ContentLayers::BODY.with(ContentLayer::Furniture)` adds
+    /// page headers/footers, `.with(ContentLayer::Notes)` reviewer comments,
+    /// [`ContentLayers::ALL`] is Python's `set(ContentLayer)`. An item on a
+    /// layer outside the set is skipped while its children are still walked,
+    /// and the items that do render go through the same serializers as the
+    /// body (a page header is a `<p>`, a comment a `<p>`, a header table a
+    /// `<table>`), exactly as upstream's `HTMLParams.layers` behaves. Pictures
+    /// stay placeholders; see [`export_to_html_with`] for the full option set.
+    ///
+    /// [`export_to_html_with`]: Self::export_to_html_with
+    pub fn export_to_html_with_layers(&self, layers: ContentLayers) -> String {
+        crate::html::to_html(
+            self,
+            &HtmlExportOptions {
+                layers,
+                ..HtmlExportOptions::default()
+            },
+        )
+        .0
+    }
+
+    /// HTML per `options` — image mode, referenced-image directory and content
+    /// layers in one call; the other `export_to_html*` methods are
+    /// shorthands for it. Returns the HTML and, for
+    /// [`ImageMode::Referenced`], the `(path, bytes)` artifacts.
+    pub fn export_to_html_with(
+        &self,
+        options: &HtmlExportOptions,
+    ) -> (String, Vec<(String, Vec<u8>)>) {
+        crate::html::to_html(self, options)
     }
 }
 
