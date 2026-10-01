@@ -1703,7 +1703,7 @@ its own libc++, so the library loads on RHEL 8/9 era mainframe Linux, where
 the distro `gcc-s390x-linux-gnu` toolchain would pin it to glibc 2.38 and
 GCC 13's libstdc++; `ORT_TOOLCHAIN=gcc` still builds that way), a host
 `protoc`, `--build_shared_lib`, Eigen's ZVector kernels disabled (they do
-not compile with GCC 13; ORT's s390x SIMD lives in MLAS) — about 45 minutes
+not compile with GCC 13; ORT's s390x SIMD lives in MLAS) — about 40 minutes
 on four cores where upstream's own s390x CI compiles natively under QEMU
 for hours. Every s390x artifact (CLI tarball, FFI library, wheel, npm
 addon, this runtime) has the same glibc 2.28 floor.
