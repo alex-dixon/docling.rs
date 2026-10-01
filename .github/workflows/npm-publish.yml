@@ -27,6 +27,12 @@
 # publish jobs request `id-token: write` and upgrade to npm >= 11.5.1 (the
 # first release that performs the OIDC exchange; the runner's bundled npm 10
 # silently falls back to tokens, which npm now rejects as E404).
+# npm only offers the trusted-publisher setting on a package that already
+# exists, so a NEW platform package (a new napi target, e.g. s390x in #504)
+# fails its first CI publish with ENEEDAUTH: publish a placeholder version of
+# it once by hand (`npm publish` of a bare package.json, version 0.0.0),
+# configure the trusted publisher on it, then re-run this workflow with the
+# release tag — the platform packages that did go out are skipped below.
 #
 # The optional `cuda` input additionally publishes `docling.rs-cuda`
 # (issue #74, Linux x64): the CUDA addon + ONNX Runtime provider libraries are
@@ -282,6 +288,27 @@ jobs:
         run: |
           npx napi create-npm-dir -t .
           npx napi artifacts --dir artifacts
+
+      # A re-run after a partial publish: `napi prepublish` publishes every
+      # platform package unconditionally, so one that made it to npm last
+      # time (`docling.rs-linux-x64-gnu@1.87.0` before the brand-new s390x
+      # package failed its first publish, ENEEDAUTH) aborts the run with
+      # "cannot publish over the previously published version" — and the
+      # main package never goes out. napi skips a platform dir whose `.node`
+      # is missing, so dropping the binary of each already-published package
+      # makes the re-run publish only what is left; the optionalDependencies
+      # wiring is unaffected.
+      - name: Skip platform packages already on npm
+        if: steps.check.outputs.published == 'false'
+        run: |
+          for dir in npm/*/; do
+            name=$(node -p "require('./${dir}package.json').name")
+            ver=$(node -p "require('./${dir}package.json').version")
+            if npm view "$name@$ver" version >/dev/null 2>&1; then
+              echo "$name@$ver is already on npm — skipping."
+              rm -f "$dir"*.node
+            fi
+          done
 
       - name: Publish
         if: steps.check.outputs.published == 'false'
