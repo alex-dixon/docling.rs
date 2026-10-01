@@ -5,9 +5,10 @@
 # mainframe Linux; the distro gcc cross toolchain (s390x-linux-gnu.toolchain.cmake)
 # pins it to its own glibc 2.39 / GCC 13 libstdc++ instead. The build script
 # writes the `zig cc`/`zig c++` wrapper scripts into ZIG_WRAPPER_DIR — they add
-# `-target s390x-linux-gnu.2.28 -march=z13`: zig's default s390x CPU has no
-# vector facility and MLAS's s390x SIMD kernels need one (z13 is also the
-# distro gcc default).
+# `-target s390x-linux-gnu.2.28 -mcpu=z15` and enable the vector facility
+# (+vector, +vector-enhancements-1/2) explicitly: MLAS's s390x kernels are
+# built for z15 (`-march=z15`, which zig ignores while force-disabling the
+# vector features of its own CPU model).
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR s390x)
 list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES ZIG_WRAPPER_DIR)

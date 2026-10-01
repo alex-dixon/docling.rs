@@ -61,9 +61,14 @@ case "$ORT_TOOLCHAIN" in
     fi
     [ -n "$ZIG" ] && [ -x "$ZIG" ] || { echo "error: zig is required for ORT_TOOLCHAIN=zig (pip install ziglang, or put zig on PATH); ORT_TOOLCHAIN=gcc uses the distro cross toolchain" >&2; exit 1; }
     # Wrapper scripts: cmake wants a compiler path, zig wants its target.
+    # MLAS's s390x kernels are built for z15 (onnxruntime_mlas.cmake adds
+    # `-mvx -mzvector -march=z15`); zig ignores `-march` and emits
+    # `-target-feature -vector` from its own CPU model, so the vector
+    # facility and its z14/z15 enhancements are enabled explicitly.
     ZIGW="$WORK/zigw"; mkdir -p "$ZIGW"
-    printf '#!/bin/sh\nexec "%s" cc -target s390x-linux-gnu.2.28 -march=z13 "$@"\n' "$ZIG" > "$ZIGW/zig-cc"
-    printf '#!/bin/sh\nexec "%s" c++ -target s390x-linux-gnu.2.28 -march=z13 "$@"\n' "$ZIG" > "$ZIGW/zig-cxx"
+    ZIG_FLAGS='-target s390x-linux-gnu.2.28 -mcpu=z15 -Xclang -target-feature -Xclang +vector -Xclang -target-feature -Xclang +vector-enhancements-1 -Xclang -target-feature -Xclang +vector-enhancements-2'
+    printf '#!/bin/sh\nexec "%s" cc %s "$@"\n' "$ZIG" "$ZIG_FLAGS" > "$ZIGW/zig-cc"
+    printf '#!/bin/sh\nexec "%s" c++ %s "$@"\n' "$ZIG" "$ZIG_FLAGS" > "$ZIGW/zig-cxx"
     printf '#!/bin/sh\nexec "%s" ar "$@"\n' "$ZIG" > "$ZIGW/zig-ar"
     printf '#!/bin/sh\nexec "%s" ranlib "$@"\n' "$ZIG" > "$ZIGW/zig-ranlib"
     chmod +x "$ZIGW"/zig-*

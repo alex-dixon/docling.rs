@@ -1698,7 +1698,7 @@ DOCX never touch it.
 `ort`'s prebuilt binaries) cross-compiled from source by
 `.github/workflows/onnxruntime-s390x.yml` with
 `scripts/install/build_onnxruntime_s390x.sh` — zig as the compiler
-(`zig cc -target s390x-linux-gnu.2.28 -march=z13`: a glibc 2.28 floor and
+(`zig cc -target s390x-linux-gnu.2.28 -mcpu=z15`: a glibc 2.28 floor and
 its own libc++, so the library loads on RHEL 8/9 era mainframe Linux, where
 the distro `gcc-s390x-linux-gnu` toolchain would pin it to glibc 2.38 and
 GCC 13's libstdc++; `ORT_TOOLCHAIN=gcc` still builds that way), a host

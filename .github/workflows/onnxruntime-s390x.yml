@@ -6,7 +6,7 @@
 # on an s390x host (or anywhere with --with-onnxruntime).
 #
 # Cross-compiled on the x86_64 runner by scripts/install/build_onnxruntime_s390x.sh
-# with zig as the compiler (`zig cc -target s390x-linux-gnu.2.28 -march=z13`),
+# with zig as the compiler (`zig cc -target s390x-linux-gnu.2.28 -mcpu=z15`),
 # ~45 min on 4 cores where upstream's own s390x CI compiles natively under
 # QEMU for many hours. zig gives the library a glibc 2.28 floor and a
 # statically linked libc++, so it loads on RHEL 8/9 era mainframe Linux; the
