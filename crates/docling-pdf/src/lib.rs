@@ -1381,6 +1381,9 @@ impl Worker {
         // special's child (a cell / in-figure label), not a separate block —
         // remove it so it isn't emitted twice (docling parity).
         assemble::drop_contained_regulars(&mut regions);
+        // A one-line paragraph in the bottom margin under a body-less heading
+        // is that heading's text, not furniture (deliberate deviation).
+        assemble::reclaim_heading_body_footers(&mut regions, page.width);
         // No text layer → recognise text from the page image via OCR.
         let ocred = page.cells.is_empty();
         // Lines the text detector found outside every layout region (#429).

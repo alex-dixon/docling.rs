@@ -109,17 +109,51 @@ impl GState {
 /// page twice (the layout scale and the OCR scale), so decoding a page's
 /// photographs once pays for itself; the store is bounded by
 /// [`IMAGE_BUDGET`] bytes and cleared wholesale when it overflows.
-#[derive(Default)]
 pub struct Shared {
     fonts: RefCell<FontCache>,
     cmyk: RefCell<CmykCache>,
     images: RefCell<ImageStore>,
+    /// docling-parse's `bitmap_target_pixels_per_unit`: the resolution, in
+    /// pixels per PDF unit, a JPEG needs to be decoded at for the page it is
+    /// drawn on ([`image::codec_reduction_shift`]). docling renders with
+    /// `render_scale` 1.0 and re-renders the same decoders at the model
+    /// scales, so 1.0 is the pipeline's value whatever the canvas scale;
+    /// `0.0` disables the reduced decode (every image at full size).
+    bitmap_hint: f64,
 }
 
-/// Decoded image samples per source stream (`image::load`'s result).
+impl Default for Shared {
+    fn default() -> Self {
+        Shared {
+            fonts: RefCell::default(),
+            cmyk: RefCell::default(),
+            images: RefCell::default(),
+            bitmap_hint: 1.0,
+        }
+    }
+}
+
+impl Shared {
+    /// Caches for a renderer decoding its JPEGs for `bitmap_hint` pixels per
+    /// PDF unit (see the field).
+    pub fn with_bitmap_hint(bitmap_hint: f64) -> Shared {
+        Shared {
+            bitmap_hint,
+            ..Shared::default()
+        }
+    }
+
+    /// The renderer's default `bitmap_target_pixels_per_unit`.
+    pub fn bitmap_hint(&self) -> f64 {
+        self.bitmap_hint
+    }
+}
+
+/// Decoded image samples per source stream (`image::load`'s result), by
+/// (object id, reduction shift).
 #[derive(Default)]
 struct ImageStore {
-    by_id: HashMap<ObjectId, Rc<image::LoadedImage>>,
+    by_id: HashMap<(ObjectId, u32), Rc<image::LoadedImage>>,
     bytes: usize,
 }
 
@@ -141,13 +175,14 @@ impl Shared {
         stream: &lopdf::Stream,
         id: Option<ObjectId>,
         res: Option<&Dictionary>,
+        reduction_shift: u32,
     ) -> Result<Rc<image::LoadedImage>, String> {
         if let Some(id) = id {
-            if let Some(img) = self.images.borrow().by_id.get(&id) {
+            if let Some(img) = self.images.borrow().by_id.get(&(id, reduction_shift)) {
                 return Ok(img.clone());
             }
         }
-        let img = Rc::new(image::load(doc, stream, res)?);
+        let img = Rc::new(image::load(doc, stream, res, reduction_shift)?);
         if let Some(id) = id {
             let mut store = self.images.borrow_mut();
             let bytes = img.bytes();
@@ -157,7 +192,7 @@ impl Shared {
             }
             if bytes <= IMAGE_BUDGET {
                 store.bytes += bytes;
-                store.by_id.insert(id, img.clone());
+                store.by_id.insert((id, reduction_shift), img.clone());
             }
         }
         Ok(img)
@@ -186,6 +221,10 @@ pub struct Interp<'a> {
     type3_depth: usize,
     /// The page's base CTM: pattern space (8.7.3.1).
     base: Mat,
+    /// `bitmap_target_pixels_per_unit` for this render (see
+    /// [`Shared::bitmap_hint`]): the model-input renders take docling's 1.0,
+    /// a bitmap kept for OCR or handed to a caller takes 0.0 (full size).
+    bitmap_hint: f64,
 }
 
 /// One painted sub-path being built (user space, transformed at paint time).
@@ -222,6 +261,7 @@ impl<'a> Interp<'a> {
         width: u32,
         height: u32,
         shared: Rc<Shared>,
+        bitmap_hint: f64,
     ) -> Option<Interp<'a>> {
         let mut canvas = Pixmap::new(width, height)?;
         canvas.fill(tiny_skia::Color::WHITE);
@@ -230,6 +270,7 @@ impl<'a> Interp<'a> {
             canvas,
             device: Box2::new(0.0, 0.0, f64::from(width), f64::from(height)),
             shared,
+            bitmap_hint,
             images: HashMap::new(),
             rect_masks: HashMap::new(),
             shape_masks: HashMap::new(),
@@ -1395,12 +1436,31 @@ impl<'a> Interp<'a> {
             (true, None) => return,
             _ => [0, 0, 0],
         };
+        // docling-parse decodes a JPEG no larger than the page needs at its
+        // bitmap hint (a scan at a quarter for the 72 dpi hint, then blitted
+        // up onto this canvas): the drawn extent in PDF units against the
+        // declared size picks the reduced inverse DCT.
+        let reduction = image::declared_size(doc, &stream.dict)
+            .map(|(sw, sh)| {
+                let ux = self.base.a.hypot(self.base.b).max(1e-9);
+                let uy = self.base.c.hypot(self.base.d).max(1e-9);
+                image::codec_reduction_shift(
+                    (bx1 - bx0) / ux,
+                    (by1 - by0) / uy,
+                    sw,
+                    sh,
+                    self.bitmap_hint,
+                )
+            })
+            .unwrap_or(0);
         let key = id.map(|id| (id, target.0, target.1, fill));
         let img = match key.and_then(|k| self.images.get(&k).cloned()) {
             Some(i) => i,
             None => {
                 let decoded = match crate::timing::timed("render.image_decode", || {
-                    let loaded = self.shared.load_image(doc, stream, id, resources)?;
+                    let loaded = self
+                        .shared
+                        .load_image(doc, stream, id, resources, reduction)?;
                     let mut cmyk = self.shared.cmyk.borrow_mut();
                     image::rasterize(&loaded, fill, Some(target), &mut cmyk)
                 }) {
@@ -1423,6 +1483,13 @@ impl<'a> Interp<'a> {
         let (pw, ph) = (
             f64::from(img.pixmap.width()),
             f64::from(img.pixmap.height()),
+        );
+        docling_core::debug_log!(
+            "docling-pdf render: image {:?} reduction 1/{} → pixmap {pw}×{ph} (src {}×{}) for {target:?} px",
+            id,
+            1u32 << reduction,
+            img.src_width,
+            img.src_height
         );
         let to_unit = Mat::new(1.0 / pw, 0.0, 0.0, -1.0 / ph, 0.0, 1.0);
         let m = to_unit.then(st.ctm);
@@ -2028,6 +2095,7 @@ impl<'a> Interp<'a> {
             warned_no_face: self.warned_no_face,
             type3_depth: self.type3_depth,
             base: to_tile,
+            bitmap_hint: self.bitmap_hint,
         };
         let mut gst = inner.initial_state(to_tile);
         if paint_type == 2 {

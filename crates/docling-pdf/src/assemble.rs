@@ -487,6 +487,66 @@ pub fn resolve(regions: Vec<Region>) -> Vec<Region> {
 /// `form` / `key_value_region` wrappers are deliberately **excluded**: this
 /// pipeline does not render them as a structured block (they are skipped), so
 /// their textual content comes precisely from the contained regular regions —
+/// A `page_footer` that is really the body of the last heading on the page
+/// becomes `text`.
+///
+/// The layout model labels the bottom margin by position as much as by
+/// content: a one-line paragraph that happens to sit where a running footer
+/// would — a CV's `Languages` line under its `## Languages` heading, the last
+/// entry of a section that runs to the page edge — comes back as
+/// `page_footer` (0.88 against 0.49 for `text` on the reporting file, with
+/// the fp32 model and either renderer alike), and Markdown drops furniture,
+/// so the document loses real content while the JSON keeps it under the
+/// wrong label. docling fails the same way. Deliberate deviation, gated so a
+/// real footer keeps its label: the nearest `section_header` above the footer
+/// must overlap it horizontally, end within 2.5 footer heights of its top,
+/// and be the **last body element** of its column — no other non-furniture
+/// region starts at or below the heading's bottom edge over the same span —
+/// and the footer must be a line of text, not a page number: at least 40 %
+/// of the page width. A running footer never follows a heading that has no
+/// body of its own, so the combination is the misread heading body.
+pub fn reclaim_heading_body_footers(regions: &mut [Region], page_w: f32) {
+    let n = regions.len();
+    let overlap_x = |a: &Region, b: &Region| a.r.min(b.r) - a.l.max(b.l) > 0.0;
+    for fi in 0..n {
+        let f = regions[fi].clone();
+        if f.label != "page_footer" || f.r - f.l < 0.4 * page_w {
+            continue;
+        }
+        let fh = (f.b - f.t).max(1.0);
+        // The nearest heading above the footer, over the footer's span.
+        let heading = (0..n)
+            .filter(|&j| {
+                let h = &regions[j];
+                j != fi && h.label == "section_header" && h.b <= f.t + 0.5 * fh && overlap_x(h, &f)
+            })
+            .min_by(|&a, &b| regions[b].b.total_cmp(&regions[a].b));
+        let Some(hi) = heading else {
+            continue;
+        };
+        let h = regions[hi].clone();
+        if f.t - h.b > 2.5 * fh {
+            continue;
+        }
+        // The heading must have no body of its own: nothing but the footer
+        // starts at or below its bottom edge over the heading's or footer's
+        // span (a heading whose paragraph follows is not this case, and a
+        // heading with the footer far below it was filtered above).
+        let has_body = (0..n).any(|j| {
+            let r = &regions[j];
+            j != fi
+                && j != hi
+                && !matches!(r.label, "page_footer" | "page_header")
+                && r.t >= h.b - 0.5 * fh
+                && (overlap_x(r, &h) || overlap_x(r, &f))
+        });
+        if has_body {
+            continue;
+        }
+        regions[fi].label = "text";
+    }
+}
+
 /// dropping those would erase the page (e.g. `right_to_left_03`'s form-heavy
 /// pages). Runs *after* [`drop_false_pictures`] so a phantom picture can't
 /// swallow real text on its way out.
@@ -3479,7 +3539,7 @@ impl StreamAssembler {
 
 #[cfg(test)]
 mod tests {
-    use super::{cells_text, clean_text, merge_overlapping_regulars};
+    use super::{cells_text, clean_text, merge_overlapping_regulars, reclaim_heading_body_footers};
 
     /// docling drops a picture covering > 90 % of the page (its labels then
     /// read out as text); a dominant-but-not-full figure and any other label
@@ -4109,6 +4169,46 @@ mod tests {
         ];
         merge_overlapping_regulars(&mut regions);
         assert_eq!(regions.len(), 2);
+    }
+
+    #[test]
+    fn footer_under_a_body_less_heading_is_its_text() {
+        // The reporting CV's last page: `## Languages` at t=773.7..783.4 and
+        // its one-line body at 798.5..808.7, labelled page_footer (A4, 595 pt).
+        let mut regions = vec![
+            region("list_item", 0.9, 66.0, 754.0, 353.0, 765.0),
+            region("section_header", 0.94, 43.0, 773.7, 89.5, 783.4),
+            region("page_footer", 0.88, 43.0, 798.5, 527.8, 808.7),
+        ];
+        reclaim_heading_body_footers(&mut regions, 595.28);
+        assert_eq!(regions[2].label, "text");
+        assert_eq!(regions[1].label, "section_header");
+
+        // A heading with its own paragraph and a running footer below: kept.
+        let mut regions = vec![
+            region("section_header", 0.9, 43.0, 700.0, 120.0, 710.0),
+            region("text", 0.9, 43.0, 714.0, 520.0, 780.0),
+            region("page_footer", 0.9, 43.0, 798.0, 520.0, 808.0),
+        ];
+        reclaim_heading_body_footers(&mut regions, 595.28);
+        assert_eq!(regions[2].label, "page_footer");
+
+        // A page number under a trailing heading is too narrow to be a body.
+        let mut regions = vec![
+            region("section_header", 0.9, 43.0, 773.0, 120.0, 783.0),
+            region("page_footer", 0.9, 280.0, 798.0, 300.0, 808.0),
+        ];
+        reclaim_heading_body_footers(&mut regions, 595.28);
+        assert_eq!(regions[1].label, "page_footer");
+
+        // Too far below the heading (a real footer after a heading that ends
+        // the page): kept.
+        let mut regions = vec![
+            region("section_header", 0.9, 43.0, 700.0, 120.0, 710.0),
+            region("page_footer", 0.9, 43.0, 798.0, 520.0, 808.0),
+        ];
+        reclaim_heading_body_footers(&mut regions, 595.28);
+        assert_eq!(regions[1].label, "page_footer");
     }
 
     fn region(label: &'static str, score: f32, l: f32, t: f32, r: f32, b: f32) -> Region {

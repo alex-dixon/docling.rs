@@ -103,7 +103,7 @@ converts every PDF, the text layer has one source (the Rust parser), and no
 native PDF library is fetched or linked. The opt-in `pdfium` cargo feature
 brings the library back for `DOCLING_RS_RENDERER=pdfium` (docling's
 pypdfium2 chain) and for a file lopdf cannot read
-(`docs/PDF_CONFORMANCE.md`, "Retiring pdfium"; JPX and JBIG2 images draw as
+(`docs/PDF_CONFORMANCE.md`, "The PDF stack"; JPX and JBIG2 images draw as
 placeholders, as docling-parse draws them). TableFormer is ported
 to ONNX and run on every detected table region to recover its structure;
 geometric reconstruction from cell positions remains only as the fallback when
@@ -847,6 +847,11 @@ library builder, a `force_full_page_ocr` option in docling-rs-serve, the
 `--no-text-panels` keeps every detected picture as a picture: it disables the
 demotion of uncaptioned dense-text "picture" regions into paragraphs (the
 recovery that turns misdetected text panels back into text, issue #173).
+A second recovery of the same kind has no flag: a one-line paragraph in the
+bottom margin directly under a heading that has no other body — a CV's
+`Languages` line — comes out of the layout model as `page_footer` and would
+vanish from the Markdown with the rest of the page furniture; it is read as
+that heading's text instead.
 
 Scanned pages with a `/Rotate` flag (a scan that came in sideways or
 upside-down — the most common defect of real-world scans) are normalized

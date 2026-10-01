@@ -96,14 +96,90 @@ impl LoadedImage {
 
 /// Decode `stream` to samples: the filter chain and codec, the colour
 /// space, the alpha plane.
+/// The `/Width` × `/Height` an image dictionary declares (the codec's own
+/// size wins once decoded; this is what the reduction rule is asked with).
+pub fn declared_size(doc: &Document, d: &Dictionary) -> Option<(i64, i64)> {
+    Some((
+        get_int2(doc, d, b"Width", b"W")?,
+        get_int2(doc, d, b"Height", b"H")?,
+    ))
+}
+
+/// docling-parse's `codec_reduction_shift`: how many halvings a JPEG may be
+/// decoded at (libjpeg's 1/2, 1/4, 1/8 reduced inverse DCT) and still hold
+/// at least the pixels it is drawn onto at `target_pixels_per_unit` — the
+/// renderer's `bitmap_target_pixels_per_unit`, docling's `render_scale` of
+/// 1.0 — so the rasterizer keeps minifying and never magnifies samples it
+/// once had. A 300 dpi scan drawn full-page decodes at a quarter for the
+/// 72 dpi hint and is blitted *up* onto the scale-2 canvas; matching that is
+/// what lines the Rust render of a scan up with the shim's. Capped at three
+/// halvings and never below 64 samples a side (a thumbnail is not worth the
+/// resampling risk); `drawn_*_units` is the axis-aligned extent of the drawn
+/// quad in PDF units.
+pub fn codec_reduction_shift(
+    drawn_width_units: f64,
+    drawn_height_units: f64,
+    source_width: i64,
+    source_height: i64,
+    target_pixels_per_unit: f64,
+) -> u32 {
+    const MAX_SHIFT: u32 = 3;
+    const MIN_SOURCE_EXTENT: i64 = 64;
+    if target_pixels_per_unit <= 0.0
+        || source_width <= 0
+        || source_height <= 0
+        || drawn_width_units <= 0.0
+        || drawn_height_units <= 0.0
+    {
+        return 0;
+    }
+    let target_width = drawn_width_units * target_pixels_per_unit;
+    let target_height = drawn_height_units * target_pixels_per_unit;
+    let mut shift = 0u32;
+    while shift < MAX_SHIFT {
+        let next_width = source_width >> (shift + 1);
+        let next_height = source_height >> (shift + 1);
+        if next_width < MIN_SOURCE_EXTENT || next_height < MIN_SOURCE_EXTENT {
+            break;
+        }
+        if (next_width as f64) < target_width || (next_height as f64) < target_height {
+            break;
+        }
+        shift += 1;
+    }
+    shift
+}
+
+/// Whether a reduced decode is allowed at all (docling-parse's
+/// `may_reduce_decode`): not for a stencil mask, an image with a soft mask or
+/// `/Mask` (its alpha plane is resolved on the full grid), or an Indexed image
+/// (its bytes are palette indices — interpolating them means nothing). Only
+/// the DCT decoder acts on the shift; every other codec ignores it.
+fn may_reduce_decode(doc: &Document, d: &Dictionary, res: Option<&Dictionary>) -> bool {
+    if get_bool2(doc, d, b"ImageMask", b"IM").unwrap_or(false) {
+        return false;
+    }
+    if d.has(b"SMask") || d.has(b"Mask") {
+        return false;
+    }
+    !matches!(
+        get2(doc, d, b"ColorSpace", b"CS").and_then(|o| ColorSpace::parse(doc, o, res)),
+        Some(ColorSpace::Indexed { .. })
+    )
+}
+
+/// Decode an image XObject (or inline image) into samples. `reduction_shift`
+/// asks the JPEG decoder for a `1 / 2^shift` reduced decode when the image
+/// allows one ([`codec_reduction_shift`], [`may_reduce_decode`]); the loaded
+/// image then reports the reduced size.
 pub fn load(
     doc: &Document,
     stream: &lopdf::Stream,
     res: Option<&Dictionary>,
+    reduction_shift: u32,
 ) -> Result<LoadedImage, String> {
     let d = &stream.dict;
-    let width = get_int2(doc, d, b"Width", b"W").ok_or("Width")?;
-    let height = get_int2(doc, d, b"Height", b"H").ok_or("Height")?;
+    let (width, height) = declared_size(doc, d).ok_or("Width")?;
     if width <= 0
         || height <= 0
         || width > 1 << 16
@@ -112,10 +188,20 @@ pub fn load(
     {
         return Err("image size".into());
     }
-    let (w, h) = (width as usize, height as usize);
     let is_mask = get_bool2(doc, d, b"ImageMask", b"IM").unwrap_or(false);
     let decode_arr: Option<Vec<f64>> = get2(doc, d, b"Decode", b"D").and_then(|o| nums(doc, o));
-    let mut samples = load_samples(doc, stream, res, is_mask)?;
+    let shift = if reduction_shift > 0 && may_reduce_decode(doc, d, res) {
+        reduction_shift
+    } else {
+        0
+    };
+    let mut samples = load_samples(doc, stream, res, is_mask, shift)?;
+    // The decoded samples' size is the image's (a JPEG's own header, or the
+    // reduced decode, wins over the dictionary's `/Width` × `/Height`).
+    let (w, h) = match &samples {
+        Loaded::Samples(s) => (s.width, s.height),
+        Loaded::Placeholder => (width as usize, height as usize),
+    };
     if is_mask {
         return Ok(LoadedImage {
             width: w,
@@ -373,7 +459,7 @@ pub fn decode(
     target: Option<(u32, u32)>,
     cmyk: &mut CmykCache,
 ) -> Result<DecodedImage, String> {
-    let img = load(doc, stream, res)?;
+    let img = load(doc, stream, res, 0)?;
     rasterize(&img, fill, target, cmyk)
 }
 
@@ -389,6 +475,7 @@ fn load_samples(
     stream: &lopdf::Stream,
     res: Option<&Dictionary>,
     is_mask: bool,
+    reduction_shift: u32,
 ) -> Result<Loaded, String> {
     let d = &stream.dict;
     let w = get_int2(doc, d, b"Width", b"W").unwrap_or(0).max(0) as usize;
@@ -440,7 +527,7 @@ fn load_samples(
                 .and_then(|p| get_int(doc, p, b"ColorTransform"))
                 .unwrap_or(1)
                 != 0;
-            match jpeg::decode(&data, transform, 1) {
+            match jpeg::decode(&data, transform, 1u32 << reduction_shift.min(3)) {
                 Ok(img) => {
                     let ncomp = img.channels;
                     // The JPEG's own size wins over the dictionary's.
@@ -525,7 +612,7 @@ fn alpha_plane(
         let smw = get_int(doc, &sm.dict, b"Width").unwrap_or(0).max(0) as usize;
         let smh = get_int(doc, &sm.dict, b"Height").unwrap_or(0).max(0) as usize;
         if smw > 0 && smh > 0 && smw * smh <= 80_000_000 {
-            if let Ok(Loaded::Samples(ms)) = load_samples(doc, sm, res, false) {
+            if let Ok(Loaded::Samples(ms)) = load_samples(doc, sm, res, false, 0) {
                 let decode = get2(doc, &sm.dict, b"Decode", b"D").and_then(|o| nums(doc, o));
                 let invert = decode.is_some_and(|v| v.first().is_some_and(|x| *x >= 0.5));
                 let mmax = ms.max();
@@ -549,7 +636,7 @@ fn alpha_plane(
             let mw = get_int(doc, &ms.dict, b"Width").unwrap_or(0).max(0) as usize;
             let mh = get_int(doc, &ms.dict, b"Height").unwrap_or(0).max(0) as usize;
             if mw > 0 && mh > 0 && mw * mh <= 80_000_000 {
-                if let Ok(Loaded::Samples(bits)) = load_samples(doc, ms, res, true) {
+                if let Ok(Loaded::Samples(bits)) = load_samples(doc, ms, res, true, 0) {
                     let decode = get2(doc, &ms.dict, b"Decode", b"D").and_then(|o| nums(doc, o));
                     let one_paints = decode.is_some_and(|v| v.first().is_some_and(|x| *x >= 0.5));
                     let mut plane = vec![255u8; w * h];
