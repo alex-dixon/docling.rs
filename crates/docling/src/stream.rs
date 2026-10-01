@@ -103,6 +103,8 @@ pub(crate) struct StreamSettings {
     /// reason: the buffered PDF path sets it on the document it builds, the
     /// streaming path has no document.
     pub compact_tables: bool,
+    /// [`DocumentConverter::document_timeout`] (#497).
+    pub document_timeout: Option<std::time::Duration>,
 }
 
 /// Spawn the background conversion and return the chunk iterator.
@@ -181,6 +183,7 @@ fn run_pdf(
             .ocr_scale(settings.ocr_scale)
             .enrichments(settings.enrich)
             .pages(settings.page_range)
+            .document_timeout(settings.document_timeout)
     }) {
         Ok(p) => p,
         Err(e) => {
@@ -189,28 +192,36 @@ fn run_pdf(
         }
     };
 
-    let result = pipeline.convert_streaming(&source.bytes, None, &source.name, |nodes, links| {
-        let chunk = streamer.push(&nodes, &links);
-        // Referenced mode: this push's images hit the disk as its Markdown is
-        // emitted, keeping ~one page batch of image bytes resident. A write
-        // failure aborts the pipeline and surfaces through the outer error arm.
-        if let Err(e) = write_artifacts(streamer.take_artifacts()) {
-            return Err(docling_pdf::PdfError::Pdfium(e.to_string()));
-        }
-        if !chunk.is_empty() && tx.send(Ok(chunk)).is_err() {
-            // Consumer dropped the stream: abort the pipeline.
-            return Err(docling_pdf::PdfError::Pdfium(
-                "markdown stream consumer dropped".into(),
-            ));
-        }
-        Ok(())
-    });
+    let result =
+        pipeline.convert_streaming_outcome(&source.bytes, None, &source.name, |nodes, links| {
+            let chunk = streamer.push(&nodes, &links);
+            // Referenced mode: this push's images hit the disk as its Markdown is
+            // emitted, keeping ~one page batch of image bytes resident. A write
+            // failure aborts the pipeline and surfaces through the outer error arm.
+            if let Err(e) = write_artifacts(streamer.take_artifacts()) {
+                return Err(docling_pdf::PdfError::Pdfium(e.to_string()));
+            }
+            if !chunk.is_empty() && tx.send(Ok(chunk)).is_err() {
+                // Consumer dropped the stream: abort the pipeline.
+                return Err(docling_pdf::PdfError::Pdfium(
+                    "markdown stream consumer dropped".into(),
+                ));
+            }
+            Ok(())
+        });
 
     match result {
-        Ok(()) => {
+        Ok(completion) => {
             let tail = streamer.finish();
             if !tail.is_empty() {
                 let _ = tx.send(Ok(tail));
+            }
+            // A spent document budget (#497) is the stream's last item, after
+            // every chunk of the partial document: the consumer has the pages
+            // that fit and learns the document was cut — docling's
+            // PARTIAL_SUCCESS, which a chunk stream has no status field for.
+            if let Some(message) = completion.message() {
+                let _ = tx.send(Err(ConversionError::Timeout(message)));
             }
         }
         // A consumer-drop abort and a real parse error both end here; the send below

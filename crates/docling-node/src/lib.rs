@@ -51,6 +51,11 @@ pub struct ConverterOptions {
     /// Convert only this PDF page window: `"A-B"` or a single page `"N"`
     /// (1-based inclusive — issue #80). Other formats ignore it.
     pub pages: Option<String>,
+    /// Per-document budget in seconds for the PDF pipeline (docling's
+    /// `document_timeout`, #497); unset = unlimited. Checked between pages:
+    /// once spent, the pages done so far are the document, `status` is
+    /// `"partial_success"` and `errors` says why.
+    pub document_timeout: Option<f64>,
     /// OCR recognition language for scanned PDF/image pages: `"en"` (default;
     /// proper Latin word spacing) or `"ch"` (the multilingual
     /// docling-conformance model), or a BCP-47 tag for either language —
@@ -210,6 +215,9 @@ pub struct ConvertOptions {
     pub xbrl_taxonomy: Option<String>,
     /// PDF page window `"A-B"` (or `"N"`), 1-based inclusive (#80).
     pub pages: Option<String>,
+    /// Per-document budget in seconds (docling's `document_timeout`, #497);
+    /// see `ConverterOptions.documentTimeout`.
+    pub document_timeout: Option<f64>,
     /// OCR recognition language for scanned pages: `"en"` (default) | `"ch"`,
     /// or a BCP-47 tag for either (`"en-US"`, `"zh-Hans"`, #388).
     pub ocr_lang: Option<String>,
@@ -313,6 +321,32 @@ pub struct ConvertResult {
     /// For the `referenced` image mode, the image files to write next to the
     /// Markdown; empty otherwise.
     pub images: Vec<ImageArtifact>,
+    /// The problems the conversion survived — docling's
+    /// `ConversionResult.errors`; non-empty exactly when `status` is
+    /// `"partial_success"` (today: a spent `documentTimeout`, #497).
+    pub errors: Vec<ConversionErrorItem>,
+}
+
+/// docling's `ErrorItem`: one recorded problem of a conversion that still
+/// produced a document.
+#[napi(object)]
+pub struct ConversionErrorItem {
+    /// `"document_backend"`, `"model"`, `"doc_assembler"`, `"user_input"`.
+    pub component_type: String,
+    /// The stage that recorded it (`"pipeline"` for the document budget).
+    pub module_name: String,
+    pub error_message: String,
+}
+
+fn error_items(errors: Vec<docling::ErrorItem>) -> Vec<ConversionErrorItem> {
+    errors
+        .into_iter()
+        .map(|e| ConversionErrorItem {
+            component_type: e.component_type,
+            module_name: e.module_name,
+            error_message: e.error_message,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +364,8 @@ struct ConvertConfig {
     video_frames: Option<usize>,
     xbrl_taxonomy: Option<String>,
     page_range: Option<(usize, usize)>,
+    /// docling's `document_timeout` (#497).
+    document_timeout: Option<std::time::Duration>,
     ocr_lang: Option<String>,
     ocr_mode: Option<String>,
     ocr_engine: Option<String>,
@@ -377,6 +413,7 @@ pub struct RawResult {
     status: String,
     input_name: String,
     images: Vec<(String, Vec<u8>)>,
+    errors: Vec<docling::ErrorItem>,
 }
 
 impl RawResult {
@@ -386,6 +423,7 @@ impl RawResult {
             format: self.format,
             status: self.status,
             input_name: self.input_name,
+            errors: error_items(self.errors),
             images: self
                 .images
                 .into_iter()
@@ -417,6 +455,7 @@ fn build_config(o: ConvertOptions) -> Result<ConvertConfig> {
         video_frames: o.video_frames.map(|n| n as usize),
         xbrl_taxonomy: o.xbrl_taxonomy,
         page_range,
+        document_timeout: parse_document_timeout(o.document_timeout)?,
         ocr_lang: parse_ocr_lang(o.ocr_lang, o.ocr_engine.as_deref())?,
         ocr_mode: parse_ocr_mode(o.ocr_mode)?,
         ocr_engine: parse_ocr_engine(o.ocr_engine)?,
@@ -583,6 +622,17 @@ fn parse_ocr_mode(s: Option<String>) -> Result<Option<String>> {
 }
 
 /// Validate an `ocrScale` option (#254); non-positive values are an error.
+/// `documentTimeout` (#497): a positive number of seconds, or unset.
+fn parse_document_timeout(s: Option<f64>) -> Result<Option<std::time::Duration>> {
+    match s {
+        Some(v) if v.is_finite() && v > 0.0 => Ok(Some(std::time::Duration::from_secs_f64(v))),
+        Some(v) => Err(Error::from_reason(format!(
+            "documentTimeout must be a positive number of seconds, got {v}"
+        ))),
+        None => Ok(None),
+    }
+}
+
 fn parse_ocr_scale(s: Option<f64>) -> Result<Option<f32>> {
     match s {
         Some(v) if v.is_finite() && v > 0.0 => Ok(Some(v as f32)),
@@ -634,6 +684,7 @@ fn build_converter(cfg: &ConvertConfig) -> RsConverter {
         Some((first, last)) => base.page_range(first, last),
         None => base,
     };
+    let base = base.document_timeout(cfg.document_timeout);
     let base = match &cfg.ocr_lang {
         Some(lang) => base.ocr_lang(lang.clone()),
         None => base,
@@ -660,6 +711,7 @@ fn render_doc(
     input_name: String,
     format: String,
     status: String,
+    errors: Vec<docling::ErrorItem>,
 ) -> RawResult {
     let (content, images) = match cfg.to {
         OutputKind::Json => (doc.export_to_json(), Vec::new()),
@@ -679,6 +731,7 @@ fn render_doc(
         status,
         input_name,
         images,
+        errors,
     }
 }
 
@@ -718,6 +771,7 @@ fn run_convert(source: SourceDocument, cfg: &ConvertConfig) -> Result<RawResult>
             source.name,
             format,
             "success".to_string(),
+            Vec::new(),
         ));
     }
     let converter = build_converter(cfg);
@@ -730,6 +784,7 @@ fn run_convert(source: SourceDocument, cfg: &ConvertConfig) -> Result<RawResult>
         result.input_name,
         format,
         status,
+        result.errors,
     ))
 }
 
@@ -864,6 +919,8 @@ pub struct DocumentConverter {
     video_frames: Option<usize>,
     xbrl_taxonomy: Option<String>,
     page_range: Option<(usize, usize)>,
+    /// docling's `document_timeout` (#497).
+    document_timeout: Option<std::time::Duration>,
     ocr_lang: Option<String>,
     ocr_mode: Option<String>,
     ocr_engine: Option<String>,
@@ -908,6 +965,7 @@ impl DocumentConverter {
             video_frames: o.video_frames.map(|n| n as usize),
             xbrl_taxonomy: o.xbrl_taxonomy.clone(),
             page_range,
+            document_timeout: parse_document_timeout(o.document_timeout)?,
             ocr_lang: parse_ocr_lang(o.ocr_lang.clone(), o.ocr_engine.as_deref())?,
             ocr_mode: parse_ocr_mode(o.ocr_mode.clone())?,
             ocr_engine: parse_ocr_engine(o.ocr_engine.clone())?,
@@ -949,6 +1007,7 @@ impl DocumentConverter {
             video_frames: self.video_frames,
             xbrl_taxonomy: self.xbrl_taxonomy.clone(),
             page_range: self.page_range,
+            document_timeout: self.document_timeout,
             ocr_lang: self.ocr_lang.clone(),
             ocr_mode: self.ocr_mode.clone(),
             ocr_engine: self.ocr_engine.clone(),
@@ -1152,6 +1211,8 @@ struct WarmPipelineConfig {
     no_text_panels: bool,
     heading_hierarchy: bool,
     page_range: Option<(usize, usize)>,
+    /// docling's `document_timeout` (#497).
+    document_timeout: Option<std::time::Duration>,
     ocr_engine: Option<docling::OcrEngine>,
     /// The PP-OCR recognizer; `None` under Tesseract, whose language list is
     /// `tesseract_lang` instead (#460).
@@ -1194,6 +1255,7 @@ fn warm_pipeline_config(o: &ConverterOptions) -> Result<WarmPipelineConfig> {
         no_text_panels: o.no_text_panels.unwrap_or(false),
         heading_hierarchy: o.heading_hierarchy.unwrap_or(false),
         page_range: parse_pages(o.pages.as_deref())?,
+        document_timeout: parse_document_timeout(o.document_timeout)?,
         ocr_engine,
         ocr_lang,
         tesseract_lang,
@@ -1265,6 +1327,7 @@ impl Pipeline {
             .ocr_mode(warm.ocr_mode)
             .ocr_scale(warm.ocr_scale)
             .pages(warm.page_range)
+            .document_timeout(warm.document_timeout)
             .enrichments(warm.enrich);
         Ok(Self {
             inner: Arc::new(Mutex::new(pipeline)),
@@ -1387,10 +1450,16 @@ fn run_pipeline(
             "pipeline poisoned by an earlier panic",
         )
     })?;
+    // docling's PARTIAL_SUCCESS (#497): a spent budget leaves the pages done.
+    let mut errors: Vec<docling::ErrorItem> = Vec::new();
     let mut doc = match source.format {
-        InputFormat::Pdf => pipe
-            .convert(&source.bytes, None, &source.name)
-            .map_err(convert_err)?,
+        InputFormat::Pdf => {
+            let c = pipe
+                .convert_outcome(&source.bytes, None, &source.name)
+                .map_err(convert_err)?;
+            errors.extend(c.completion.message().map(docling::ErrorItem::timeout));
+            c.document
+        }
         InputFormat::Image => pipe
             .convert_image(&source.bytes, &source.name)
             .map_err(convert_err)?,
@@ -1407,12 +1476,18 @@ fn run_pipeline(
     };
     doc.strict_markdown = strict;
     doc.page_break_placeholder = cfg.page_break_placeholder.clone();
+    let status = if errors.is_empty() {
+        "success"
+    } else {
+        "partial_success"
+    };
     Ok(render_doc(
         doc,
         cfg,
         source.name,
         source.format.as_str().to_string(),
-        "success".to_string(),
+        status.to_string(),
+        errors,
     ))
 }
 
@@ -1543,6 +1618,7 @@ fn output_config(out: Option<OutputOptions>, strict: bool) -> Result<ConvertConf
         video_frames: None,
         xbrl_taxonomy: None,
         page_range: None,
+        document_timeout: None,
         list_attachments: false,
         skip_empty_cells: false,
         compact_tables: false,
@@ -2204,6 +2280,7 @@ mod tests {
                 no_text_panels: false,
                 heading_hierarchy: false,
                 page_range: None,
+                document_timeout: None,
                 ocr_engine: None,
                 ocr_lang: None,
                 tesseract_lang: None,

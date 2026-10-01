@@ -27,6 +27,13 @@ pub enum ConversionError {
     /// into an ordinary error for the caller, so a server answers with a 500
     /// instead of a silent empty document and a batch keeps going.
     Panic(String),
+    /// The document budget (`DocumentConverter::document_timeout`, #497) ran
+    /// out on a **streaming** conversion. Not a failure: every chunk emitted
+    /// before it is the partial document, and this is the stream's last item
+    /// — the streaming counterpart of [`crate::ConversionStatus::PartialSuccess`]
+    /// with a timeout [`crate::ErrorItem`]. Buffered conversions never raise
+    /// it; they report the cut on the result.
+    Timeout(String),
     /// A dependency failed during conversion. Unlike [`ConversionError::Parse`]
     /// the underlying error is kept alive (not flattened into a string), so
     /// callers can walk [`std::error::Error::source`] and downcast to the
@@ -72,6 +79,7 @@ impl fmt::Display for ConversionError {
             ConversionError::Streaming(msg) => write!(f, "streaming not supported: {msg}"),
             ConversionError::Browser(msg) => write!(f, "web-browser render error: {msg}"),
             ConversionError::Panic(msg) => write!(f, "conversion panicked: {msg}"),
+            ConversionError::Timeout(msg) => write!(f, "document timeout: {msg}"),
             ConversionError::WithSource { context, source } => {
                 write!(f, "parse error: {context}: {source}")
             }

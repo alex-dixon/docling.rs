@@ -174,6 +174,12 @@ conv = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeli
 # shorthand: DocumentConverter(do_ocr=False, do_table_structure=True)
 ```
 
+`document_timeout=90.0` (docling's `PipelineOptions.document_timeout`, #497;
+also accepted as `pipeline_options.document_timeout`) is a per-document
+budget in seconds for the PDF pipeline, checked between pages: once spent, the
+pages done so far are the document, `result.status` is `PARTIAL_SUCCESS` and
+`result.errors` holds the reason as docling's `ErrorItem`.
+
 For scanned pages, `ocr_lang="en"|"ch"` picks the OCR recognition model (`en`
 is the default — proper Latin word spacing; `ch` is the multilingual
 docling-conformance model). BCP-47 tags for either language resolve to the

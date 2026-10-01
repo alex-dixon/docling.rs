@@ -291,7 +291,10 @@ parallel calls.
 
 The constructor takes the same PDF/image options as the one-shot calls —
 `ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`, `skipOcr`, `forceFullPageOcr`,
-`noTextPanels`, `headingHierarchy`, `pages` and the enrichment switches — and
+`noTextPanels`, `headingHierarchy`, `pages`, `documentTimeout` (a per-document
+budget in seconds, docling's `document_timeout`: once spent, the pages done so
+far are the document, `status` is `"partial_success"` and `errors` says why,
+#497) and the enrichment switches — and
 applies them to every conversion on that instance, e.g.
 `new Pipeline({ ocrEngine: 'tesseract', ocrLang: 'por+eng' })` for Portuguese
 scans. They are validated on `new` exactly as `DocumentConverter` validates

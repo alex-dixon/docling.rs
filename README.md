@@ -313,7 +313,7 @@ Options per request: `to=md|json|html|dclx|chunks|latex|images`, `strict`, `imag
 [enrichment models](#enrichment-models-picture-classification-code-formulas), named as
 docling's `PdfPipelineOptions` flags; a request that changes the enrichment mix rebuilds the
 warm pipeline once, the models themselves load lazily on the first matching region),
-`ocr_lang`, `ocr_engine`, `ocr_mode`, `ocr_scale`, `scale`, `asr_model`, `asr_lang`, `encoding`, `video_frames`, `xbrl_taxonomy`, `fetch_images`,
+`ocr_lang`, `ocr_engine`, `ocr_mode`, `ocr_scale`, `scale`, `document_timeout` (#497: a per-document budget in seconds — a cut conversion answers `X-Docling-Status: partial_success` + `X-Docling-Errors`, batch / async items carry `status` and `errors`), `asr_model`, `asr_lang`, `encoding`, `video_frames`, `xbrl_taxonomy`, `fetch_images`,
 `chunker=hierarchical|hybrid`, `chunk_tokenizer`, `chunk_max_tokens`, `chunk_merge_peers` (#256:
 per-request `to=chunks` configuration; the tokenizer is a server-local relative path),
 `pipeline=standard|vlm` + `vlm_endpoint`, `vlm_model`, `vlm_api_key`, `vlm_prompt`,
@@ -816,6 +816,28 @@ in memory instead of all of them until export.
 Python) converts only that 1-based inclusive PDF page window. Out-of-window
 pages are skipped *before* rasterization, so 3 pages of a 500-page PDF cost 3
 pages; `B` past the end clamps, and a window that selects nothing is an error.
+
+`--document-timeout SECONDS` (#497; docling's `PipelineOptions.document_timeout`
+— also `DocumentConverter::document_timeout` / `Pipeline::document_timeout`
+in the library, `document_timeout` in serve and the FFI options,
+`documentTimeout` in Node, `document_timeout=` or
+`pipeline_options.document_timeout` in Python) is a per-document wall-clock
+budget for the PDF pipeline, unlimited by default. It starts with the
+conversion and is checked cooperatively between pages: once spent, no further
+page is rendered or processed, the pages already finished become the
+document, and the result is docling's `PARTIAL_SUCCESS` with one error
+(`document timeout of 90.000s exceeded after 12 of 40 pages; the output holds
+the pages processed`). The CLI writes the partial document, prints the reason
+as a warning and exits 0 (`--abort-on-error` ends a batch on it, like a
+failure); `docling-serve` answers a single conversion with
+`X-Docling-Status: partial_success` and `X-Docling-Errors`, and marks a
+batch or async item's `status` / `errors`; the Node and Python results carry
+`status` and `errors` (docling's `ErrorItem`: `component_type`,
+`module_name`, `error_message`). A page in flight finishes first, so a
+budget shorter than one page's work still yields that page; a single image
+is never cut, and declarative formats convert whole, as in docling. A
+streaming conversion emits the pages that fit and ends with a `Timeout`
+error item, the chunk stream's spelling of a partial success.
 
 The CLI streams Markdown by default (`--no-stream` opts back into buffering;
 `--to json` always buffers). `--no-table-former` skips

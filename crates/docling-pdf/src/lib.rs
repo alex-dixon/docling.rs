@@ -146,6 +146,11 @@ pub enum PdfError {
     Layout(String),
     /// The OCR ONNX model failed to load or run.
     Ocr(String),
+    /// The document budget ([`Pipeline::document_timeout`]) ran out between
+    /// two pages. Internally the sentinel that stops the page walk; a caller
+    /// never sees it from [`Pipeline::convert`] — the conversion returns the
+    /// pages it finished and reports the cut through [`Completion`].
+    Timeout(String),
 }
 
 impl fmt::Display for PdfError {
@@ -155,8 +160,63 @@ impl fmt::Display for PdfError {
             PdfError::Document(m) => write!(f, "pdf: {m}"),
             PdfError::Layout(m) => write!(f, "pdf: {m}"),
             PdfError::Ocr(m) => write!(f, "pdf: {m}"),
+            PdfError::Timeout(m) => write!(f, "pdf: {m}"),
         }
     }
+}
+
+/// How a conversion ended: every selected page, or the pages that fit the
+/// document budget (docling's `document_timeout`, `PARTIAL_SUCCESS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completion {
+    /// Every selected page was processed.
+    Complete,
+    /// The budget ran out: `pages_done` of `pages_selected` pages are in the
+    /// document, the rest were never rendered (or never processed).
+    TimedOut {
+        pages_done: usize,
+        pages_selected: usize,
+        budget: std::time::Duration,
+    },
+}
+
+impl Completion {
+    pub fn timed_out(&self) -> bool {
+        matches!(self, Completion::TimedOut { .. })
+    }
+
+    /// docling's `ErrorItem.error_message` for the cut, `None` when complete.
+    pub fn message(&self) -> Option<String> {
+        match self {
+            Completion::Complete => None,
+            Completion::TimedOut {
+                pages_done,
+                pages_selected,
+                budget,
+            } => Some(format!(
+                "document timeout of {:.3}s exceeded after {pages_done} of {pages_selected} \
+                 pages; the output holds the pages processed",
+                budget.as_secs_f64()
+            )),
+        }
+    }
+}
+
+/// A converted document and how its conversion ended ([`Completion`]).
+#[derive(Debug, Clone)]
+pub struct Converted {
+    pub document: DoclingDocument,
+    pub completion: Completion,
+}
+
+/// Has the document budget run out?
+fn expired(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|d| std::time::Instant::now() >= d)
+}
+
+/// The sentinel the page walks stop on once the budget is gone.
+fn timeout_sentinel() -> PdfError {
+    PdfError::Timeout("document timeout exceeded".into())
 }
 
 impl std::error::Error for PdfError {}
@@ -1079,12 +1139,35 @@ impl Worker {
         &mut self,
         work_rx: &Mutex<Receiver<(usize, PdfPage)>>,
         layout_batch: usize,
+        deadline: Option<std::time::Instant>,
         mut deliver: impl FnMut(usize, Result<PageOut, PdfError>) -> bool,
     ) {
         use std::sync::mpsc::TryRecvError;
         let mut deferred: std::collections::VecDeque<(usize, PdfPage, Prepared)> =
             std::collections::VecDeque::new();
         loop {
+            // The document budget (#497), checked between pages: once it is
+            // spent, every page still queued or parked is reported as timed
+            // out instead of processed — the renderer stops feeding at the
+            // same check, so the queue drains quickly.
+            if expired(deadline) {
+                while let Some((idx, _, _)) = deferred.pop_front() {
+                    if !deliver(idx, Err(timeout_sentinel())) {
+                        return;
+                    }
+                }
+                let rx = work_rx.lock().unwrap();
+                loop {
+                    match rx.recv() {
+                        Ok((idx, _page)) => {
+                            if !deliver(idx, Err(timeout_sentinel())) {
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+            }
             // Any parked page the slot has since freed up for, oldest first.
             let mut i = 0;
             while i < deferred.len() {
@@ -1927,6 +2010,9 @@ pub struct Pipeline {
     /// each page finishes on both the serial and parallel buffered paths. Set
     /// by the CLI batch mode for dot-progress; `None` costs nothing.
     progress: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
+    /// Per-document wall-clock budget (docling's `document_timeout`, #497).
+    /// See [`Pipeline::document_timeout`].
+    document_timeout: Option<std::time::Duration>,
 }
 
 #[cfg(feature = "ml")]
@@ -1957,7 +2043,49 @@ impl Pipeline {
             ocr_scale: ocr::scale_from_env(),
             heading_hierarchy: HeadingHierarchyOptions::default(),
             progress: None,
+            document_timeout: None,
         })
+    }
+
+    /// A wall-clock budget for each document (docling's
+    /// `PipelineOptions.document_timeout`, #497; `None` = unlimited, the
+    /// default). The budget starts when a conversion starts and is checked
+    /// cooperatively between pages: once it is spent, no further page is
+    /// rendered or processed, the pages already finished are assembled into
+    /// the document, and the outcome says so (`Completion::TimedOut`, which
+    /// the converter reports as `PartialSuccess` with a timeout error, the
+    /// way docling does). A page in flight finishes — the check costs
+    /// nothing inside a page, and a single-page document (an image) is never
+    /// cut. For a long-lived pipeline use
+    /// [`set_document_timeout`](Self::set_document_timeout) before each
+    /// conversion.
+    pub fn document_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.document_timeout = timeout;
+        self
+    }
+
+    /// In-place variant of [`document_timeout`](Self::document_timeout) for a
+    /// warm pipeline — set it before every conversion so no request inherits
+    /// a previous one's budget.
+    pub fn set_document_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        self.document_timeout = timeout;
+    }
+
+    /// The deadline of a conversion starting now, from the configured budget.
+    fn deadline(&self) -> Option<std::time::Instant> {
+        self.document_timeout.map(|t| std::time::Instant::now() + t)
+    }
+
+    /// The [`Completion`] of a walk that processed `done` of `selected` pages.
+    fn completion(&self, timed_out: bool, done: usize, selected: usize) -> Completion {
+        match (timed_out, self.document_timeout) {
+            (true, Some(budget)) => Completion::TimedOut {
+                pages_done: done,
+                pages_selected: selected,
+                budget,
+            },
+            _ => Completion::Complete,
+        }
     }
 
     /// Infer section-header levels after assembly (#302, docling's
@@ -2344,18 +2472,36 @@ impl Pipeline {
         password: Option<&str>,
         name: &str,
     ) -> Result<DoclingDocument, PdfError> {
+        self.convert_outcome(bytes, password, name)
+            .map(|c| c.document)
+    }
+
+    /// [`convert`](Self::convert) that also says how the conversion ended —
+    /// whether the [`document_timeout`](Self::document_timeout) cut it short
+    /// and how many pages made it (`Completion`).
+    pub fn convert_outcome(
+        &mut self,
+        bytes: &[u8],
+        password: Option<&str>,
+        name: &str,
+    ) -> Result<Converted, PdfError> {
+        let deadline = self.deadline();
         let pages = pdfium_backend::page_count(bytes, password)?;
         let range = self.resolve_range(pages)?;
         // Serial vs parallel is decided by the pages actually converted: a
         // 3-page window over a 500-page PDF should not pay the pool load.
         let selected = range.map_or(pages, |(a, b)| b - a + 1);
-        let doc = if self.target_workers >= 2 && selected >= self.parallel_min {
-            self.convert_parallel(bytes, password, name, range, selected)?
-        } else {
-            self.convert_serial(bytes, password, name, range, selected)?
-        };
+        let (document, done, timed_out) =
+            if self.target_workers >= 2 && selected >= self.parallel_min {
+                self.convert_parallel(bytes, password, name, range, selected, deadline)?
+            } else {
+                self.convert_serial(bytes, password, name, range, selected, deadline)?
+            };
         timing::report();
-        Ok(doc)
+        Ok(Converted {
+            document,
+            completion: self.completion(timed_out, done, selected),
+        })
     }
 
     /// Stream pages one at a time through the primary worker — render → process →
@@ -2367,7 +2513,8 @@ impl Pipeline {
         name: &str,
         range: Option<(usize, usize)>,
         selected: usize,
-    ) -> Result<DoclingDocument, PdfError> {
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(DoclingDocument, usize, bool), PdfError> {
         let mut doc = DoclingDocument::new(name);
         let mut confs = std::collections::BTreeMap::new();
         let render_image = !self.no_ocr;
@@ -2375,29 +2522,41 @@ impl Pipeline {
         let progress = self.progress.clone();
         let mut done = 0usize;
         let worker = self.primary()?;
-        pdfium_backend::for_each_page(
+        // The walk renders a page before handing it over, so the budget is
+        // checked where a page *arrives*: a page the budget had already run
+        // out on is dropped unprocessed and ends the walk through the
+        // sentinel (`for_each_page` reads it as an error; here it is the cut).
+        let walk = pdfium_backend::for_each_page(
             bytes,
             password,
             render_image,
             extract_text,
             range,
             |n, _total, mut page| {
+                if expired(deadline) {
+                    return Err(timeout_sentinel());
+                }
                 let (mut nodes, links, conf) = worker.process(n, &mut page)?;
                 assemble::stamp_page_no(&mut nodes, n + 1);
                 doc.nodes.extend(nodes);
                 doc.links.extend(links);
                 confs.insert(n + 1, conf);
+                done += 1;
                 if let Some(cb) = &progress {
-                    done += 1;
                     cb(done, selected);
                 }
                 Ok::<(), PdfError>(())
             },
-        )?;
+        );
+        let timed_out = match walk {
+            Ok(()) => false,
+            Err(PdfError::Timeout(_)) => true,
+            Err(e) => return Err(e),
+        };
         assemble::merge_continuations(&mut doc.nodes);
         self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes));
         doc.confidence = Some(docling_core::ConfidenceReport::from_pages(confs));
-        Ok(doc)
+        Ok((doc, done, timed_out))
     }
 
     /// Render pages serially on this thread (pdfium) and process them in parallel
@@ -2412,10 +2571,12 @@ impl Pipeline {
         name: &str,
         range: Option<(usize, usize)>,
         selected: usize,
-    ) -> Result<DoclingDocument, PdfError> {
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(DoclingDocument, usize, bool), PdfError> {
         self.ensure_pool()?;
         let progress = self.progress.clone();
         let pages_done = std::sync::atomic::AtomicUsize::new(0);
+        let timed_out = std::sync::atomic::AtomicBool::new(false);
         let n_workers = self.pool.len();
         let render_image = !self.no_ocr;
         let extract_text = self.extract_text_layer();
@@ -2437,17 +2598,23 @@ impl Pipeline {
                 let first_err = Arc::clone(&first_err);
                 let progress = progress.clone();
                 let pages_done = &pages_done;
+                let timed_out = &timed_out;
                 s.spawn(move || {
-                    worker.run_pool(&work_rx, layout_batch, |idx, out| {
+                    worker.run_pool(&work_rx, layout_batch, deadline, |idx, out| {
                         match out {
                             Ok(out) => {
                                 results.lock().unwrap().push((idx, out));
+                                let d = pages_done
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                    + 1;
                                 if let Some(cb) = &progress {
-                                    let d = pages_done
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                                        + 1;
                                     cb(d, selected);
                                 }
+                            }
+                            // The budget ran out before this page's turn: the
+                            // page is left out, the document is partial.
+                            Err(PdfError::Timeout(_)) => {
+                                timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                             Err(e) => {
                                 let mut slot = first_err.lock().unwrap();
@@ -2462,7 +2629,8 @@ impl Pipeline {
             }
             // Render on this thread and feed the workers; backpressure blocks here
             // when the channel is full. Dropping `work_tx` afterwards signals the
-            // workers (recv → Err) to finish.
+            // workers (recv → Err) to finish. A spent budget ends the walk before
+            // the next page is rendered.
             let render = pdfium_backend::for_each_page(
                 bytes,
                 password,
@@ -2470,16 +2638,25 @@ impl Pipeline {
                 extract_text,
                 range,
                 |i, _total, page| {
+                    if expired(deadline) {
+                        return Err(timeout_sentinel());
+                    }
                     work_tx
                         .send((i, page))
                         .map_err(|_| PdfError::Pdfium("page-worker channel closed".into()))
                 },
             );
             drop(work_tx);
-            if let Err(e) = render {
-                let mut slot = first_err.lock().unwrap();
-                if slot.is_none() {
-                    *slot = Some(e);
+            match render {
+                Ok(()) => {}
+                Err(PdfError::Timeout(_)) => {
+                    timed_out.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(e) => {
+                    let mut slot = first_err.lock().unwrap();
+                    if slot.is_none() {
+                        *slot = Some(e);
+                    }
                 }
             }
         });
@@ -2494,6 +2671,7 @@ impl Pipeline {
             .into_inner()
             .unwrap();
         results.sort_by_key(|(idx, _)| *idx);
+        let done = results.len();
         let mut doc = DoclingDocument::new(name);
         let mut confs = std::collections::BTreeMap::new();
         for (idx, (mut nodes, links, conf)) in results {
@@ -2505,7 +2683,8 @@ impl Pipeline {
         assemble::merge_continuations(&mut doc.nodes);
         self.apply_heading_hierarchy(&mut doc.nodes, Some(bytes));
         doc.confidence = Some(docling_core::ConfidenceReport::from_pages(confs));
-        Ok(doc)
+        let timed_out = timed_out.load(std::sync::atomic::Ordering::Relaxed);
+        Ok((doc, done, timed_out))
     }
 
     /// Convert a PDF in **streaming** mode: `emit` is called with each finalized,
@@ -2529,17 +2708,38 @@ impl Pipeline {
     where
         F: FnMut(Vec<Node>, Vec<(String, String)>) -> Result<(), PdfError>,
     {
+        self.convert_streaming_outcome(bytes, password, name, emit)
+            .map(|_| ())
+    }
+
+    /// [`convert_streaming`](Self::convert_streaming) that also says how the
+    /// conversion ended ([`Completion`]): a spent
+    /// [`document_timeout`](Self::document_timeout) stops the walk, the pages
+    /// finished so far are emitted (the tail included) and the outcome is
+    /// `TimedOut` — never an error.
+    pub fn convert_streaming_outcome<F>(
+        &mut self,
+        bytes: &[u8],
+        password: Option<&str>,
+        name: &str,
+        emit: F,
+    ) -> Result<Completion, PdfError>
+    where
+        F: FnMut(Vec<Node>, Vec<(String, String)>) -> Result<(), PdfError>,
+    {
         let _ = name; // page nodes carry no name; the caller owns the document name.
+        let deadline = self.deadline();
         let pages = pdfium_backend::page_count(bytes, password)?;
         let range = self.resolve_range(pages)?;
         let selected = range.map_or(pages, |(a, b)| b - a + 1);
         let r = if self.target_workers >= 2 && selected >= self.parallel_min {
-            self.convert_streaming_parallel(bytes, password, range, emit)
+            self.convert_streaming_parallel(bytes, password, range, deadline, emit)
         } else {
-            self.convert_streaming_serial(bytes, password, range, emit)
+            self.convert_streaming_serial(bytes, password, range, deadline, emit)
         };
         timing::report();
-        r
+        let (done, timed_out) = r?;
+        Ok(self.completion(timed_out, done, selected))
     }
 
     /// Serial streaming: render → process → emit, one page at a time, holding back
@@ -2549,8 +2749,9 @@ impl Pipeline {
         bytes: &[u8],
         password: Option<&str>,
         range: Option<(usize, usize)>,
+        deadline: Option<std::time::Instant>,
         mut emit: F,
-    ) -> Result<(), PdfError>
+    ) -> Result<(usize, bool), PdfError>
     where
         F: FnMut(Vec<Node>, Vec<(String, String)>) -> Result<(), PdfError>,
     {
@@ -2558,21 +2759,32 @@ impl Pipeline {
         let render_image = !self.no_ocr;
         let extract_text = self.extract_text_layer();
         let worker = self.primary()?;
-        pdfium_backend::for_each_page(
+        let mut done = 0usize;
+        let walk = pdfium_backend::for_each_page(
             bytes,
             password,
             render_image,
             extract_text,
             range,
             |n, _total, mut page| {
+                if expired(deadline) {
+                    return Err(timeout_sentinel());
+                }
                 // Confidence is dropped on the streaming path: the report is
                 // only complete once every page has run, which defeats
                 // page-by-page emission — buffered `convert` carries it.
                 let (nodes, links, _conf) = worker.process(n, &mut page)?;
+                done += 1;
                 emit(asm.push(nodes), links)
             },
-        )?;
-        emit(asm.finish(), Vec::new())
+        );
+        let timed_out = match walk {
+            Ok(()) => false,
+            Err(PdfError::Timeout(_)) => true,
+            Err(e) => return Err(e),
+        };
+        emit(asm.finish(), Vec::new())?;
+        Ok((done, timed_out))
     }
 
     /// Parallel streaming: pages render serially on a dedicated thread (pdfium is
@@ -2586,8 +2798,9 @@ impl Pipeline {
         bytes: &[u8],
         password: Option<&str>,
         range: Option<(usize, usize)>,
+        deadline: Option<std::time::Instant>,
         mut emit: F,
-    ) -> Result<(), PdfError>
+    ) -> Result<(usize, bool), PdfError>
     where
         F: FnMut(Vec<Node>, Vec<(String, String)>) -> Result<(), PdfError>,
     {
@@ -2609,6 +2822,8 @@ impl Pipeline {
         let mut workers = std::mem::take(&mut self.pool);
         let mut asm = assemble::StreamAssembler::new();
         let mut first_err: Option<PdfError> = None;
+        let mut timed_out = false;
+        let mut done = 0usize;
 
         std::thread::scope(|s| {
             // Workers: pull a batch of pages (whatever is already rendered, up
@@ -2618,14 +2833,15 @@ impl Pipeline {
                 let work_rx = Arc::clone(&work_rx);
                 let res_tx = res_tx.clone();
                 s.spawn(move || {
-                    worker.run_pool(&work_rx, layout_batch, |idx, out| {
+                    worker.run_pool(&work_rx, layout_batch, deadline, |idx, out| {
                         // `false` once the consumer is gone.
                         res_tx.send(out.map(|o| (idx, o))).is_ok()
                     });
                 });
             }
             // Renderer: feed pages to the pool on its own thread (pdfium stays on a
-            // single thread); report a render error through the same channel.
+            // single thread); report a render error through the same channel. A
+            // spent budget ends the walk before the next page is rendered.
             {
                 let res_tx = res_tx.clone();
                 s.spawn(move || {
@@ -2636,6 +2852,9 @@ impl Pipeline {
                         extract_text,
                         range,
                         |i, _total, page| {
+                            if expired(deadline) {
+                                return Err(timeout_sentinel());
+                            }
                             work_tx
                                 .send((i, page))
                                 .map_err(|_| PdfError::Pdfium("page-worker channel closed".into()))
@@ -2652,10 +2871,15 @@ impl Pipeline {
 
             // Collector (this thread): reorder into document order and emit.
             // With a page window, indices start at the window's first page.
+            // A timed-out page leaves a hole in the sequence: everything
+            // before it emits in order, the pages after it stay buffered —
+            // they are the pages the budget did not cover, and the document
+            // ends at the cut like the buffered path's.
             let mut buffer: BTreeMap<usize, PageOut> = BTreeMap::new();
             let mut next = range.map_or(0, |(first, _)| first);
             for msg in res_rx.iter() {
                 match msg {
+                    Err(PdfError::Timeout(_)) => timed_out = true,
                     Err(e) => {
                         if first_err.is_none() {
                             first_err = Some(e);
@@ -2672,9 +2896,16 @@ impl Pipeline {
                                 break;
                             }
                             next += 1;
+                            done += 1;
                         }
                     }
                 }
+            }
+            // Pages that finished after a hole (a page the budget skipped
+            // before them) cannot follow it in document order; count them
+            // out of the document like the skipped one.
+            if timed_out && !buffer.is_empty() {
+                buffer.clear();
             }
         });
         // Threads have joined; restore the pool for the next conversion.
@@ -2683,7 +2914,8 @@ impl Pipeline {
         if let Some(e) = first_err {
             return Err(e);
         }
-        emit(asm.finish(), Vec::new())
+        emit(asm.finish(), Vec::new())?;
+        Ok((done, timed_out))
     }
 
     /// Lazily grow the pool to `target_workers`, loading the new workers

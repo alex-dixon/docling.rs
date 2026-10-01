@@ -356,6 +356,29 @@ async fn ocr_mode_and_scale_are_validated() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// #497: `document_timeout` must be a positive number of seconds; it is
+/// validated by the shared converter builder, so a plain Markdown upload
+/// exercises it without any model work. A valid value passes through (the
+/// budget only ever acts on the PDF pipeline).
+#[tokio::test]
+async fn document_timeout_is_validated() {
+    let (ct, body) = multipart("x.md", b"# hi", &[("document_timeout", "0")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(body_string(response).await.contains("document_timeout"));
+
+    let (ct, body) = multipart("x.md", b"# hi", &[("document_timeout", "soon")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(body_string(response).await.contains("document_timeout"));
+
+    let (ct, body) = multipart("x.md", b"# hi", &[("document_timeout", "90")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // A whole conversion carries no partial-status header.
+    assert!(response.headers().get("x-docling-status").is_none());
+}
+
 /// A `scale` outside 0.1–4.0 is rejected before any page is rendered.
 #[tokio::test]
 async fn images_scale_is_validated() {

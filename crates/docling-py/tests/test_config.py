@@ -481,3 +481,26 @@ def test_ocr_engine_forwards_and_maps_tesseract_options(monkeypatch):
     assert os.environ["DOCLING_TESSERACT"] == "/opt/tesseract/bin/tesseract"
     assert os.environ["DOCLING_RS_TESSDATA_DIR"] == "/opt/tessdata"
     assert os.environ["DOCLING_RS_TESSERACT_PSM"] == "6"
+
+
+def test_document_timeout_forwards_and_validates():
+    """#497: document_timeout reaches the native converter (which validates
+    it), directly and docling-shaped via pipeline_options.document_timeout;
+    a declarative conversion is never cut by it."""
+    from types import SimpleNamespace
+
+    from docling_rs import ConversionStatus, DocumentConverter, InputFormat, PdfFormatOption
+
+    DocumentConverter(document_timeout=90.0)
+    with pytest.raises(Exception):
+        DocumentConverter(document_timeout=0)
+    with pytest.raises(Exception):
+        DocumentConverter(document_timeout=-1.5)
+
+    shaped = SimpleNamespace(do_ocr=True, do_table_structure=True, document_timeout=120)
+    converter = DocumentConverter(
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=shaped)}
+    )
+    result = converter.convert(HTML)
+    assert result.status == ConversionStatus.SUCCESS
+    assert result.errors == []
