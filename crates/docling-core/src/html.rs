@@ -1,6 +1,6 @@
 //! HTML serializer — the Rust counterpart of docling-core's
 //! `HTMLDocSerializer` with default `HTMLParams` (single-column style, body
-//! layer, MathML off — see below), scored byte-for-byte against the HTML
+//! layer, formulas as MathML), scored byte-for-byte against the HTML
 //! groundtruth upstream ships for its ODF and DOCX fixtures (#492).
 //!
 //! Like [`crate::latex`] this walks the *JSON* document model rather than
@@ -28,18 +28,15 @@
 //! the picture `meta` block (`<details class="docling-meta">` with the
 //! classification and the tabular-chart table), key-value / form graphs as
 //! `<div class="key-value-region">` / `<div class="form-container">`, and
-//! `dir="rtl"` on captions and cells whose text reads right-to-left.
-//! Escaping follows Python's `html.escape`: `&<>` everywhere, plus `"` and
-//! `'` where upstream calls it with `quote=True` (captions, table cells,
-//! the title, meta names).
-//!
-//! Deliberate deviations, none of them pinned by upstream's groundtruth:
-//! formulas are not converted to MathML (upstream runs `latex2mathml`); they
-//! render through upstream's own fallback branch — `<pre>` for a block
-//! formula, `<code>` inline, the `formula-not-decoded` placeholders when
-//! the LaTeX is empty — with the LaTeX HTML-escaped. Everything else,
-//! including the raw (unescaped) source upstream writes inside
-//! `<pre><code>` for a code item, is reproduced as upstream does it.
+//! `dir="rtl"` on captions and cells whose text reads right-to-left, and
+//! formulas as MathML through [`crate::mathml`] — a port of the
+//! `latex2mathml` library upstream runs, with the `<annotation
+//! encoding="TeX">` source and upstream's `<pre>` fallback for LaTeX the
+//! library rejects. Escaping follows Python's `html.escape`: `&<>`
+//! everywhere, plus `"` and `'` where upstream calls it with `quote=True`
+//! (captions, table cells, the title, meta names); the raw (unescaped)
+//! source upstream writes inside `<pre><code>` for a code item and into a
+//! formula's MathML is reproduced as upstream does it.
 
 use serde_json::Value;
 
@@ -661,7 +658,9 @@ impl<'a> Serializer<'a> {
                     // module docs.
                     raw.to_string()
                 } else if is_formula {
-                    escape(raw, false)
+                    // Nor is a formula's LaTeX: it feeds `latex2mathml` and
+                    // the `<annotation>` / `<pre>` fallback verbatim.
+                    raw.to_string()
                 } else {
                     escape(raw, false).replace('\n', "<br>")
                 }
@@ -732,13 +731,18 @@ impl<'a> Serializer<'a> {
         text
     }
 
-    /// Upstream's `_process_formula` without `latex2mathml` (module docs).
+    /// Upstream's `_process_formula`: `latex2mathml` (see [`crate::mathml`])
+    /// with the `<annotation encoding="TeX">` child, `<div>`-wrapped for a
+    /// block formula; its `except Exception` branch — `<pre>{text}</pre>` —
+    /// for LaTeX the library rejects; the `formula-not-decoded` placeholders
+    /// for an empty formula. The image fallbacks (a formula crop from a
+    /// stored page image) are not reproduced: the documents this serializer
+    /// is scored on carry none.
     fn formula(text: &str, inline: bool) -> String {
         if !text.is_empty() {
-            if inline {
-                format!("<code>{text}</code>")
-            } else {
-                format!("<pre>{text}</pre>")
+            match crate::mathml::formula_to_mathml(text, inline) {
+                Ok(mathml) => mathml,
+                Err(_) => format!("<pre>{text}</pre>"),
             }
         } else if inline {
             "<span class=\"formula-not-decoded\">Formula not decoded</span>".to_string()

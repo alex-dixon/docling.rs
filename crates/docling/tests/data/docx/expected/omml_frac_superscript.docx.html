@@ -175,7 +175,7 @@
 <div class='page'>
 <h2>Issue 1: Fraction as superscript base not grouped</h2>
 <p>The equation below raises a fraction to the power 2.<br>Expected LaTeX: {\frac{(x-c)}{v}}^2<br>Docling produces: \frac{(x-c)}{v}^2<br><br>When &lt;m:sSup&gt; has an &lt;m:f&gt; (fraction) as its base &lt;m:e&gt;, docling emits<br>\frac{num}{den}^2 without grouping braces. In LaTeX this is ambiguous:<br>some renderers apply ^2 only to the last token, not the whole fraction.<br>The output should be {\frac{(x-c)}{v}}^2 or \left(\frac{(x-c)}{v}\right)^2.</p>
-<pre>{\frac{(x-c)}{v}}^{2}</pre>
+<div><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msup><mrow><mfrac><mrow><mo stretchy="false">&#x00028;</mo><mi>x</mi><mo>&#x02212;</mo><mi>c</mi><mo stretchy="false">&#x00029;</mo></mrow><mrow><mi>v</mi></mrow></mfrac></mrow><mrow><mn>2</mn></mrow></msup></mrow><annotation encoding="TeX">{\frac{(x-c)}{v}}^{2}</annotation></math></div>
 </div>
 </body>
 </html>

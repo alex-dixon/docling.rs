@@ -175,9 +175,9 @@
 <div class='page'>
 <h2>Issue 3: Concatenated equation blocks</h2>
 <p>The paragraph below contains three separate &lt;m:oMath&gt; elements.<br>Expected: three separate $$ blocks ($$a = b$$, $$c = d$$, $$e = f$$)<br>Docling produces: one $$ block with all equations concatenated.<br><br>All three &lt;m:oMath&gt; elements are siblings inside a single &lt;w:p&gt;.</p>
-<pre>a=b</pre>
-<pre>c=d</pre>
-<pre>e=f</pre>
+<div><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>a</mi><mo>&#x0003D;</mo><mi>b</mi></mrow><annotation encoding="TeX">a=b</annotation></math></div>
+<div><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>c</mi><mo>&#x0003D;</mo><mi>d</mi></mrow><annotation encoding="TeX">c=d</annotation></math></div>
+<div><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><mi>e</mi><mo>&#x0003D;</mo><mi>f</mi></mrow><annotation encoding="TeX">e=f</annotation></math></div>
 </div>
 </body>
 </html>

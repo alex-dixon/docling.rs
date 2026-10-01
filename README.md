@@ -643,12 +643,16 @@ against the HTML groundtruth upstream ships for its ODF and DOCX fixtures
 (`crates/docling/tests/html_export.rs`, 8/8 — picture payloads masked, since
 upstream's `save_as_html` re-encodes every picture through PIL), and against
 docling-core 2.99's own `export_to_html()` run over our exported JSON for the
-whole declarative corpus: **254 of 265 fixtures byte-identical**; the other
-11 are formulas, which upstream converts to MathML with `latex2mathml` and
-docling.rs renders through upstream's own fallback branch (`<pre>` for a
-block formula, `<code>` inline). That is the one deviation; even upstream's
-raw (unescaped) source inside `<pre><code>` for code items is reproduced.
-The regression suite pins every fixture's `.html`.
+whole declarative corpus: **265 of 265 fixtures byte-identical**. Formulas
+are MathML like upstream's: `docling_core::mathml` is a literal port of the
+`latex2mathml` library docling-core runs (tokenizer, walker, converter, its
+`unimathsymbols.txt` table, the same failure modes — verified against the
+Python package on every corpus formula plus a synthetic suite, inline and
+block, errors included), wrapped in `<div>` for a block formula and carrying
+the source in `<annotation encoding="TeX">`; LaTeX the library rejects
+falls back to upstream's `<pre>{latex}</pre>`. Even upstream's raw
+(unescaped) source inside `<pre><code>` for code items is reproduced. The
+regression suite pins every fixture's `.html`.
 
 ```rust
 let (html, _) = result.document.export_to_html_with_images(ImageMode::Embedded, "artifacts");
