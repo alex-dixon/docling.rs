@@ -11,7 +11,7 @@
 //! optional features the binary carries (execution providers, `serve`,
 //! chunking) — both answer without models present.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--abort-on-error] <input-file> | SOURCE...
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
 //!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
 //!                      md --to json`): each document converts once and is
 //!                      written in every format named, `<stem>.md` +
@@ -224,6 +224,11 @@ INPUT SELECTION
   --output DIR            where batch (or single-file) results are written
   --jobs N                batch workers (default 1)
   --abort-on-error        stop the batch at the first failed file (default: skip it)
+  --output-dirs MODE      where several inputs land under --output (#496): auto
+                          (default: a directory/glob mirrors its tree, a plain file
+                          lands by stem), flat (every output <stem>.<ext> directly in
+                          --output), mirror (every input's path relative to the
+                          current directory, inputs outside it are an error)
   --pages A-B             convert only PDF pages A..B (1-based, inclusive)
   --scale X               `--to images` render scale, px per PDF point (0.1-4.0, default 2.0)
 
@@ -371,6 +376,7 @@ fn main() -> ExitCode {
     let mut inputs: Vec<String> = Vec::new();
     let mut abort_on_error = false;
     let mut output: Option<String> = None;
+    let mut output_dirs = OutputDirs::Auto;
     let mut jobs: usize = 1;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -421,6 +427,17 @@ fn main() -> ExitCode {
             "--enrich-code" => enrich_code = true,
             "--enrich-formula" => enrich_formula = true,
             "--abort-on-error" => abort_on_error = true,
+            "--output-dirs" => match args.next().as_deref().map(OutputDirs::parse) {
+                Some(Some(mode)) => output_dirs = mode,
+                Some(None) => {
+                    eprintln!("error: --output-dirs expects auto, flat or mirror");
+                    return ExitCode::from(2);
+                }
+                None => {
+                    eprintln!("error: --output-dirs needs a mode (auto, flat or mirror)");
+                    return ExitCode::from(2);
+                }
+            },
             "--input" => match args.next() {
                 Some(v) => inputs.push(v),
                 None => {
@@ -750,6 +767,15 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // `--output-dirs` (#496) rewrites every source's base at once: `flat`
+        // drops the trees, `mirror` roots them all at the current directory.
+        let files = match apply_output_dirs(output_dirs, files) {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        };
         if let Err(e) = check_output_collisions(&files, Path::new(&outdir), &to) {
             eprintln!("error: {e}");
             return ExitCode::from(2);
@@ -1143,6 +1169,111 @@ struct BatchCfg {
     vlm: Option<docling::vlm::VlmOptions>,
 }
 
+/// `--output-dirs` (#496): how several inputs lay out under `--output`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputDirs {
+    /// Today's rule: a directory or glob mirrors its tree, a plain file lands
+    /// by stem (Python docling's `convert a.docx sub/b.docx --output out/`).
+    Auto,
+    /// Every output `<stem>.<ext>` directly in `--output`; two inputs with
+    /// one stem are rejected before anything is written.
+    Flat,
+    /// Every input's path *relative to the current directory* under
+    /// `--output` — the explicit-file list keeps its folders too, which is
+    /// what a RAG corpus full of `README.md`s needs. An input outside the
+    /// current directory has no such path and is an error.
+    Mirror,
+}
+
+impl OutputDirs {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(Self::Auto),
+            "flat" => Some(Self::Flat),
+            "mirror" => Some(Self::Mirror),
+            _ => None,
+        }
+    }
+}
+
+/// Rewrite the (file, base) pairs the sources expanded to for the chosen
+/// `--output-dirs` mode. `auto` keeps each source's own base; `flat` makes
+/// every file's parent its base (so only the stem survives); `mirror` roots
+/// every file at the current directory — a relative path keeps its folders
+/// verbatim (`a/doc.docx` → `out/a/doc.md`), an absolute one is made
+/// relative to the current directory, and a path that escapes it (`../x.pdf`,
+/// `/elsewhere/x.pdf`) is refused rather than guessed at.
+fn apply_output_dirs(
+    mode: OutputDirs,
+    files: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+) -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>, String> {
+    match mode {
+        OutputDirs::Auto => Ok(files),
+        OutputDirs::Flat => Ok(files
+            .into_iter()
+            .map(|(f, _)| {
+                let base = f.parent().map(Path::to_path_buf).unwrap_or_default();
+                (f, base)
+            })
+            .collect()),
+        OutputDirs::Mirror => {
+            let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+            files
+                .into_iter()
+                .map(|(f, _)| mirror_pair(&f, &cwd))
+                .collect()
+        }
+    }
+}
+
+/// One `mirror` pair: the file as a path relative to `cwd` (lexically
+/// normalized — `./`, `a/../b`) with an empty base, so `batch_out_path` keeps
+/// the whole relative path.
+fn mirror_pair(
+    file: &Path,
+    cwd: &Path,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    use std::path::Component;
+    let abs = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        cwd.join(file)
+    };
+    // Normalize `.` and `..` lexically (no symlink resolution: the user named
+    // the path, and the output should mirror what they named).
+    let mut norm = std::path::PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !norm.pop() {
+                    return Err(format!(
+                        "'{}' climbs above the filesystem root",
+                        file.display()
+                    ));
+                }
+            }
+            c => norm.push(c),
+        }
+    }
+    let rel = norm.strip_prefix(cwd).map_err(|_| {
+        format!(
+            "'{}' is outside the current directory ({}); --output-dirs mirror lays inputs \
+             out by their path relative to it — run from a common parent, or use \
+             --output-dirs flat",
+            file.display(),
+            cwd.display()
+        )
+    })?;
+    if rel.as_os_str().is_empty() {
+        return Err(format!(
+            "'{}' is the current directory itself",
+            file.display()
+        ));
+    }
+    Ok((rel.to_path_buf(), std::path::PathBuf::new()))
+}
+
 /// Expand one source argument (#489) into (files, base): an existing file is
 /// itself with its parent as base (so it lands in `--output` by stem, like
 /// Python's `docling convert a.docx sub/b.docx`), a directory or a glob goes
@@ -1182,7 +1313,8 @@ fn check_output_collisions(
             if first != file {
                 return Err(format!(
                     "'{}' and '{}' would both be written to '{}'; pass a common parent \
-                     directory (its structure is kept) or use separate --output directories",
+                     directory (its structure is kept), use --output-dirs mirror, or use \
+                     separate --output directories",
                     first.display(),
                     file.display(),
                     out.display()
@@ -1940,6 +2072,67 @@ mod tests {
         // A literal file path (no metachars) bases at its parent, so a batch of
         // one lands directly under --output.
         assert_eq!(glob_base("dir/file.pdf"), Path::new("dir"));
+    }
+
+    /// `--output-dirs` (#496): `flat` drops every tree, `mirror` roots every
+    /// input at the current directory and refuses what lies outside it.
+    #[test]
+    fn output_dirs_modes_rewrite_the_bases() {
+        let p = |s: &str| std::path::PathBuf::from(s);
+        let files = vec![
+            (p("a/doc.docx"), p("a")),
+            (p("b/sub/doc.docx"), p("b")),
+            (p("c/README.md"), p("")),
+        ];
+        // auto: untouched.
+        assert_eq!(
+            apply_output_dirs(OutputDirs::Auto, files.clone()).unwrap(),
+            files
+        );
+        // flat: every base is the file's own parent, so only the stem lands.
+        let flat = apply_output_dirs(OutputDirs::Flat, files.clone()).unwrap();
+        for (f, base) in &flat {
+            assert_eq!(base, f.parent().unwrap());
+            assert_eq!(
+                batch_out_path(f, base, Path::new("out"), "md"),
+                Path::new("out")
+                    .join(f.file_stem().unwrap())
+                    .with_extension("md")
+            );
+        }
+        // mirror: the path relative to the current directory, folders kept.
+        let cwd = std::env::current_dir().unwrap();
+        let (f, base) = mirror_pair(Path::new("b/sub/doc.docx"), &cwd).unwrap();
+        assert_eq!(f, Path::new("b/sub/doc.docx"));
+        assert_eq!(base, Path::new(""));
+        assert_eq!(
+            batch_out_path(&f, &base, Path::new("out"), "json"),
+            Path::new("out/b/sub/doc.json")
+        );
+        // `./` and an interior `..` normalize lexically.
+        let (f, _) = mirror_pair(Path::new("./x/../b/doc.docx"), &cwd).unwrap();
+        assert_eq!(f, Path::new("b/doc.docx"));
+        // An absolute path below the current directory mirrors too.
+        let (f, _) = mirror_pair(&cwd.join("c/README.md"), &cwd).unwrap();
+        assert_eq!(f, Path::new("c/README.md"));
+        // Outside the current directory: refused, not guessed at.
+        let err = mirror_pair(Path::new("../elsewhere/doc.pdf"), &cwd).unwrap_err();
+        assert!(err.contains("outside the current directory"), "{err}");
+        let err = mirror_pair(Path::new("/nowhere/doc.pdf"), &cwd).unwrap_err();
+        assert!(err.contains("outside the current directory"), "{err}");
+        // The same stem under two folders collides flat, not mirrored.
+        let flat = apply_output_dirs(
+            OutputDirs::Flat,
+            vec![(p("a/doc.docx"), p("a")), (p("b/doc.docx"), p("b"))],
+        )
+        .unwrap();
+        assert!(check_output_collisions(&flat, Path::new("out"), &["md".to_string()]).is_err());
+        let mirrored = apply_output_dirs(
+            OutputDirs::Mirror,
+            vec![(p("a/doc.docx"), p("a")), (p("b/doc.docx"), p("b"))],
+        )
+        .unwrap();
+        assert!(check_output_collisions(&mirrored, Path::new("out"), &["md".to_string()]).is_ok());
     }
 
     #[test]

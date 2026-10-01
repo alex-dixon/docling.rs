@@ -1148,9 +1148,18 @@ docling-rs --input /data/reports --output ./converted
 Two sources that would write the same output file (`sub/b.docx` and
 `other/b.docx` both become `b.md`) are refused before anything converts —
 pass a common parent directory instead, whose tree is kept (`sub/b.md`,
-`other/b.md`), or separate `--output` directories. `--abort-on-error` stops the batch at the first failed file
-(Python's flag of the same name); by default the file is reported and
-skipped. `--to` is repeatable like Python's: each document converts once and
+`other/b.md`), use `--output-dirs mirror`, or separate `--output`
+directories. `--output-dirs auto|flat|mirror` (#496, a docling.rs extension)
+chooses the layout under `--output` for every input at once: `auto` (the
+default) is the rule above — a directory or glob mirrors its tree, a plain
+file lands by stem; `flat` puts every output as `<stem>.<ext>` directly in
+`--output` (collisions are refused up front); `mirror` lays every input out
+by its path relative to the current directory, explicit files included
+(`docling-rs a/README.md b/README.md --output out/ --output-dirs mirror` →
+`out/a/README.md`, `out/b/README.md`), and refuses an input outside the
+current directory rather than guess at a path for it. `--abort-on-error`
+stops the batch at the first failed file (Python's flag of the same name);
+by default the file is reported and skipped. `--to` is repeatable like Python's: each document converts once and
 is written in every format named — several formats need `--output`, since
 stdout carries one document.
 
