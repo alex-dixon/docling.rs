@@ -48,7 +48,7 @@ validated for byte-for-byte conformance against upstream Python docling.
 | `crates/docling` | `DocumentConverter` (format routing), declarative backends (`src/backend/`), streaming (`src/stream.rs`), video (`src/video.rs`) |
 | `crates/docling-pdf` | ML pipeline: lopdf object model + pure-Rust page renderer (`render/`) / raster (`raster/`) + RT-DETR layout + TableFormer + PP-OCRv3 + enrichment (`ml` feature; pdfium only behind the opt-in `pdfium` feature); pure-Rust text-layer path compiles for wasm without it |
 | `crates/docling-onnx` | Shared ONNX Runtime execution-provider selection (`DOCLING_RS_EP`, `cuda`/`tensorrt`/`directml`/`coreml`/`xnnpack` features) and the one `session_builder()` every session starts from (`load-dynamic` feature, #504: ORT `dlopen`ed at run time — `ORT_DYLIB_PATH`, `.models/onnxruntime/`, search path — for s390x and self-built runtimes) for docling-pdf/docling-asr/docling-rag |
-| `crates/docling-asr` | Whisper ASR: symphonia decode (audio + video containers) → log-mel → ONNX encoder/decoder |
+| `crates/docling-asr` | ASR: symphonia decode (audio + video containers) → Whisper (log-mel → ONNX encoder/decoder), or the `parakeet_tdt_0.6b_v3` preset (#508: NeMo 128-mel → FastConformer encoder → TDT greedy decoding, Silero VAD spans; a port of onnx-asr) |
 | `crates/docling-cli` | `docling-rs` binary (also `serve` subcommand behind `--features serve`) |
 | `crates/docling-serve` | axum HTTP conversion API (+ Dockerfile with ffmpeg) |
 | `crates/docling-py` / `docling-node` / `docling-wasm` | pyo3 / napi-rs / wasm-bindgen bindings — **node and wasm are ordinary workspace members; only docling-py sits outside the workspace and builds from its own directory (maturin)** |
@@ -108,7 +108,9 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   `DOCLING_RS_OCR_DET_MAX_SIDE` (cap on the detector input's longer side;
   default 960 = PaddleOCR's, ~⅓ the uncapped detection time; `0` = RapidOCR's
   uncapped rule),
-  `DOCLING_ASR_{ENCODER,DECODER,VOCAB}`,
+  `DOCLING_ASR_{ENCODER,DECODER,VOCAB}` (Whisper), `DOCLING_RS_ASR_VAD`
+  (Parakeet's Silero VAD, on when `.models/asr/vad/silero_vad.onnx` exists;
+  `off` = the energy-based pause splitter) + `DOCLING_ASR_VAD_ONNX` (its path),
   `DOCLING_FFMPEG` (video frames — ffmpeg is a runtime binary, never a build
   dep), `DOCLING_RS_PDF_WORKERS/_THREADS/_INTRA`, `DOCLING_RS_TF_INTRA` (#262),
   `DOCLING_RS_NO_ARENA` (#263; serve defaults it on),

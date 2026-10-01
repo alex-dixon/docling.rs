@@ -119,7 +119,12 @@ OpenAI's timestamp rules — docling's ASR defaults), and each segment becomes a
 auto-detected from the first 30 seconds (docling 2.116 parity); pin it with
 `--asr-lang <code>` (a Whisper code like `en`, `de`, `zh`; `auto` re-enables
 detection), the `asr_lang` option on the other surfaces, or the
-`DOCLING_RS_ASR_LANG` environment variable. **Video** inputs (`mp4`/`mov`/`mkv`/`webm`, docling's
+`DOCLING_RS_ASR_LANG` environment variable. The `parakeet_tdt_0.6b_v3`
+preset (#508) swaps Whisper for NVIDIA's **Parakeet TDT 0.6B v3** — a
+FastConformer transducer for 25 European languages that detects the language
+itself, with a 128-mel NeMo front-end, TDT greedy decoding with per-token
+timestamps and Silero VAD segmentation; see
+[Whisper and Parakeet models](#whisper-and-parakeet-models-for-audioasr). **Video** inputs (`mp4`/`mov`/`mkv`/`webm`, docling's
 `InputFormat.VIDEO`) take the same path: symphonia demuxes the audio track
 (isomp4/Matroska readers) and the transcript becomes the document. When the
 `ffmpeg` **binary** is present (runtime detection — no build dependency;
@@ -1367,6 +1372,7 @@ instead — the same models — and see
 | TableFormer (optional) | `.models/tableformer/{encoder,decoder,bbox}.onnx` (+ `.data` sidecars where the export needs them); `decoder_kv.onnx` is preferred when present — its current export has a dynamic batch axis, so all tables on a page decode in one lockstep loop (byte-identical to one at a time; an older fixed-batch `decoder_kv.onnx` still works, one table at a time) |
 | Whisper tiny (audio/ASR; skip with `--no-asr`) | `.models/asr/{encoder_model,decoder_model}.onnx`, `.models/asr/vocab.json` (+ `added_tokens.json` for language selection) |
 | Whisper presets (optional; `--asr-model=<preset>`, repeatable) | `.models/asr/<preset>/…` — English-only (`whisper_tiny_en`, `whisper_base_en`, `whisper_small_en`) and Distil-Whisper (`whisper_distil_small_en`) exports, fetched from Hugging Face |
+| Parakeet TDT 0.6B v3 (optional; `--asr-model=parakeet_tdt_0.6b_v3`) | `.models/asr/parakeet_tdt_0.6b_v3/{encoder-model,decoder_joint-model}.int8.onnx` + `vocab.txt` (~670 MB; the fp32 graphs, ~2.5 GB, with `--no-int8`) and `.models/asr/vad/silero_vad.onnx` (Silero VAD v5, ~2 MB) |
 | INT8 CPU models (fetched by default; skip with `--no-int8`) | `.models/layout_heron_int8.onnx`, `.models/tableformer/decoder_int8.onnx` (+ `.models/code_formula/decoder_kv_int8.onnx` with `--enrich`) |
 | TableFormer encoder, fp16 weights (fetched by default; skip with `--no-int8`) | `.models/tableformer/encoder_fp16.onnx` — the same graph with fp16-stored weights cast back to fp32 at load (#374): half the download, fp32 compute; preferred when present, `DOCLING_RS_FP32=1` opts out |
 | DocumentFigureClassifier (picture classification) | `.models/picture_classifier.onnx` |
@@ -1399,7 +1405,7 @@ images do), or `download_dependencies.sh --with-fonts`
 release, licence texts alongside). `DOCLING_RS_FONT_DIRS` names further
 directories at runtime.
 
-#### Whisper models for audio/ASR
+#### Whisper and Parakeet models for audio/ASR
 
 The default run already fetches **Whisper tiny** (multilingual) into
 `.models/asr/` — nothing extra is needed for audio inputs:
@@ -1432,6 +1438,45 @@ The multilingual default auto-detects the language per file (`asr_lang`
 pins it: `--asr-lang de`, `asr_lang=de` on serve, `asrLang` / `asr_lang` in
 the bindings). English-only presets skip detection and always transcribe
 English.
+
+**Parakeet TDT 0.6B v3** (#508) is the alternative for non-English speech,
+where Whisper tiny/base fall apart and `small` costs three times the CPU:
+NVIDIA's multilingual FastConformer transducer (bg, cs, da, de, el, en, es,
+et, fi, fr, hr, hu, it, lt, lv, mt, nl, pl, pt, ro, ru, sk, sl, sv, uk —
+detected by the model itself, so `asr_lang` is ignored with a warning),
+from the [onnx-asr export](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx)
+of NVIDIA's checkpoint (CC-BY-4.0):
+
+```bash
+scripts/install/download_dependencies.sh --asr-model=parakeet_tdt_0.6b_v3            # int8, ~670 MB
+scripts/install/download_dependencies.sh --asr-model=parakeet_tdt_0.6b_v3 --no-int8  # fp32, ~2.5 GB
+docling-rs --asr-model parakeet_tdt_0.6b_v3 interview_de.mp3
+```
+
+The pipeline (`docling_asr::parakeet`) is a port of
+[onnx-asr](https://github.com/istupakov/onnx-asr), the export's reference
+runtime: NeMo's 128-mel preprocessor in Rust (pre-emphasis, 512-point STFT,
+Slaney mel, per-feature normalization), the FastConformer encoder, and TDT
+greedy decoding over the fused prediction-net/joint graph — token logits
+plus a duration head that skips 0–4 encoder frames (80 ms each), which is
+also where the per-token timestamps come from. Long recordings are cut by
+the **Silero VAD** (≤ 20 s speech spans, onnx-asr's defaults) so the
+encoder's full attention stays cheap; without the VAD model (or with
+`DOCLING_RS_ASR_VAD=off`) an energy-based stand-in splits at pauses and caps
+spans at 20 s. Within a span, sentence-final `.`/`?`/`!` start a new
+segment, so the output keeps docling's `[time: start-end] text` paragraphs.
+The int8 graphs are the default; `DOCLING_RS_FP32=1` (or a GPU execution
+provider) prefers the fp32 ones when present.
+
+Verified against onnx-asr 0.12 on identical 16 kHz samples (English, German
+and Russian fixtures): the features match its NumPy NeMo preprocessor to
+float rounding (≤ 2·10⁻⁵), the TDT loop run on the same encoder output emits
+the same tokens at the same frames, and with the fp32 graphs the whole
+pipeline's tokens and timestamps are identical to onnx-asr's. The int8
+encoder quantizes its activations dynamically, so its output — and the odd
+word — shifts with the ONNX Runtime build (1.28 linked here, 1.30 in
+onnx-asr's wheel), the same way it does between two onnx-asr installs.
+About 0.2× real time on four CPU cores (int8, a 10 s clip in ~2 s).
 
 ### Enrichment models (picture classification, code, formulas)
 

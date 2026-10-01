@@ -488,12 +488,15 @@ impl DocumentConverter {
         self
     }
 
-    /// Select a named Whisper model preset for audio sources — the
-    /// English-only (`whisper_tiny_en`, `whisper_base_en`, `whisper_small_en`)
-    /// and Distil-Whisper (`whisper_distil_small_en`) variants of docling's
-    /// ASR model specs. `None` (default) uses Whisper tiny (multilingual)
-    /// from `.models/asr/`; presets load from `.models/asr/<preset>/` (fetch
-    /// them with `download_dependencies.sh --asr-model <preset>`).
+    /// Select a named ASR model preset for audio sources — the English-only
+    /// (`whisper_tiny_en`, `whisper_base_en`, `whisper_small_en`) and
+    /// Distil-Whisper (`whisper_distil_small_en`) variants of docling's ASR
+    /// model specs, or `parakeet_tdt_0.6b_v3` (NVIDIA's Parakeet TDT 0.6B v3
+    /// transducer, 25 European languages detected by the model, #508 — see
+    /// `docling_asr::parakeet`). `None` (default) uses Whisper tiny
+    /// (multilingual) from `.models/asr/`; presets load from
+    /// `.models/asr/<preset>/` (fetch them with `download_dependencies.sh
+    /// --asr-model=<preset>`).
     pub fn asr_model(mut self, model: Option<String>) -> Self {
         self.asr_model = model;
         self

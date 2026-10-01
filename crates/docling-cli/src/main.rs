@@ -97,10 +97,12 @@
 //!                      META-INF/catalog.xml) mapping the base taxonomies'
 //!                      URLs for offline use (docling's XBRLBackendOptions
 //!                      .taxonomy). Default: the instance's own directory.
-//!   --asr-model NAME   Whisper preset for audio inputs: whisper_tiny_en,
-//!                      whisper_base_en, whisper_small_en, whisper_distil_small_en
-//!                      (models under .models/asr/<preset>/; fetch them with
-//!                      download_dependencies.sh --asr-model=<preset>)
+//!   --asr-model NAME   ASR preset for audio inputs: whisper_tiny_en,
+//!                      whisper_base_en, whisper_small_en, whisper_distil_small_en,
+//!                      or parakeet_tdt_0.6b_v3 (NVIDIA Parakeet TDT, 25 European
+//!                      languages detected by the model; #508) — models under
+//!                      .models/asr/<preset>/; fetch them with
+//!                      download_dependencies.sh --asr-model=<preset>
 //!   --asr-lang CODE    transcription language for audio/video input: a Whisper
 //!                      code (en, de, zh, ...) or auto (the default) to detect
 //!                      it from the first 30 seconds. English-only presets
@@ -273,7 +275,8 @@ VLM PIPELINE
   --vlm-prompt TEXT | --vlm-max-tokens N
 
 AUDIO / VIDEO
-  --asr-model PRESET      Whisper preset for audio/video transcription
+  --asr-model PRESET      ASR preset for audio/video transcription (whisper_*,
+                          parakeet_tdt_0.6b_v3)
   --asr-lang CODE         force a transcription language
   --video-frames N        sample N key frames from a video
   --xbrl-taxonomy DIR     taxonomy directory for XBRL instances (default: the

@@ -35,6 +35,10 @@
 #   .models/asr/{encoder_model,decoder_model}.onnx + vocab.json   (Whisper tiny,
 #     from the release when the tag mirrors it, else Hugging Face; skip with
 #     --no-asr)
+#   .models/asr/<preset>/…  (--asr-model=<preset>, repeatable: the Whisper
+#     presets, or parakeet_tdt_0.6b_v3 — NVIDIA Parakeet TDT 0.6B v3, #508:
+#     int8 encoder + decoder-joint ~670 MB, fp32 ~2.5 GB with --no-int8 — plus
+#     the Silero VAD into .models/asr/vad/silero_vad.onnx)
 #   .models/chunk/tokenizer.json                   (all-MiniLM-L6-v2's tokenizer,
 #     the HybridChunker's default token counter; falls back to Hugging Face when
 #     the release doesn't host it; skip with --no-chunk)
@@ -128,7 +132,7 @@ for arg in "$@"; do
 
     *)
       echo "usage: download_dependencies.sh [--force] [--no-asr] [--asr-model=<preset>] [--no-int8] [--no-chunk] [--enrich] [--embed] [--with-docling-parse] [--with-fonts] [--with-onnxruntime|--no-onnxruntime]" >&2
-      echo "  ASR presets: whisper_tiny_en whisper_base_en whisper_small_en whisper_distil_small_en" >&2
+      echo "  ASR presets: whisper_tiny_en whisper_base_en whisper_small_en whisper_distil_small_en parakeet_tdt_0.6b_v3" >&2
       exit 2
       ;;
   esac
@@ -381,16 +385,40 @@ if [ "$WITH_ASR" = true ]; then
 fi
 
 # Named ASR model presets (docling's English-only / Distil-Whisper specs,
-# limited to variants with public ONNX exports): each lands in its own
-# .models/asr/<preset>/ directory, selected at run time with
-# DocumentConverter::asr_model / the serve `asr_model` option.
+# limited to variants with public ONNX exports, and NVIDIA's Parakeet TDT
+# 0.6B v3, #508): each lands in its own .models/asr/<preset>/ directory,
+# selected at run time with DocumentConverter::asr_model / the serve
+# `asr_model` option.
 for preset in $ASR_PRESETS; do
   case "$preset" in
     whisper_tiny_en) repo="whisper-tiny.en" ;;
     whisper_base_en) repo="whisper-base.en" ;;
     whisper_small_en) repo="whisper-small.en" ;;
     whisper_distil_small_en) repo="distil-small.en" ;;
-    *) echo "unknown --asr-model '$preset' (available: whisper_tiny_en whisper_base_en whisper_small_en whisper_distil_small_en)" >&2; exit 2 ;;
+    parakeet_tdt_0.6b_v3)
+      # The onnx-asr export of NVIDIA's NeMo checkpoint (CC-BY-4.0): the int8
+      # encoder (~650 MB) + decoder-joint by default, the fp32 graphs
+      # (~2.5 GB, encoder weights in a .data sidecar) with --no-int8 — the
+      # pipeline loads whichever is present, int8 first unless DOCLING_RS_FP32.
+      # The Silero VAD (v5, MIT, ~2 MB; the file onnx-asr loads) segments long
+      # recordings — optional at run time, fetched alongside.
+      base="${DOCLING_RS_PARAKEET_MODELS_URL:-https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main}"
+      mkdir -p ".models/asr/$preset" .models/asr/vad
+      if [ "$WITH_INT8" = true ]; then
+        fetch "$base/encoder-model.int8.onnx" ".models/asr/$preset/encoder-model.int8.onnx"
+        fetch "$base/decoder_joint-model.int8.onnx" ".models/asr/$preset/decoder_joint-model.int8.onnx"
+      else
+        fetch "$base/encoder-model.onnx" ".models/asr/$preset/encoder-model.onnx"
+        fetch "$base/encoder-model.onnx.data" ".models/asr/$preset/encoder-model.onnx.data"
+        fetch "$base/decoder_joint-model.onnx" ".models/asr/$preset/decoder_joint-model.onnx"
+      fi
+      fetch "$base/vocab.txt" ".models/asr/$preset/vocab.txt"
+      fetch_optional "$base/config.json" ".models/asr/$preset/config.json"
+      fetch "${DOCLING_RS_VAD_MODEL_URL:-https://huggingface.co/istupakov/silero-vad-onnx/resolve/main/silero_vad.onnx}" \
+        .models/asr/vad/silero_vad.onnx
+      continue
+      ;;
+    *) echo "unknown --asr-model '$preset' (available: whisper_tiny_en whisper_base_en whisper_small_en whisper_distil_small_en parakeet_tdt_0.6b_v3)" >&2; exit 2 ;;
   esac
   base="https://huggingface.co/onnx-community/$repo/resolve/main"
   mkdir -p ".models/asr/$preset"
