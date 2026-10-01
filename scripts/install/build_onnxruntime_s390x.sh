@@ -68,10 +68,12 @@ if [ ! -d "$SRC/.git" ]; then
   git clone --depth 1 --branch "$ORT_TAG" --recurse-submodules --shallow-submodules https://github.com/microsoft/onnxruntime.git "$SRC"
 fi
 
-# --skip_tests: no googletest binaries for the target. --skip_submodule_sync:
-# the clone above is complete. onnxruntime_USE_KLEIDIAI=OFF: ARM-only, and
-# build.py turns it on unconditionally. The toolchain file carries the Eigen
-# flag (see there).
+# --skip_tests only skips *running* the tests; onnxruntime_BUILD_UNIT_TESTS=OFF
+# keeps build.py from compiling them too (onnxruntime_test_all alone is
+# thousands of objects — a third of the wall time — and drags googletest in).
+# --skip_submodule_sync: the clone above is complete. onnxruntime_USE_KLEIDIAI=OFF:
+# ARM-only, and build.py turns it on unconditionally. The toolchain file
+# carries the Eigen flag (see there).
 cd "$SRC"
 # shellcheck disable=SC2086
 ./build.sh --config Release --build_shared_lib --parallel "$JOBS" \
@@ -79,7 +81,7 @@ cd "$SRC"
   --compile_no_warning_as_error \
   --path_to_protoc_exe "$PROTOC" \
   --cmake_extra_defines "CMAKE_TOOLCHAIN_FILE=$TOOLCHAIN" onnxruntime_CROSS_COMPILING=ON \
-    onnxruntime_USE_KLEIDIAI=OFF ${CMAKE_EXTRA_DEFINES:-}
+    onnxruntime_USE_KLEIDIAI=OFF onnxruntime_BUILD_UNIT_TESTS=OFF ${CMAKE_EXTRA_DEFINES:-}
 
 BUILD="$SRC/build/Linux/Release"
 rm -rf "$OUT_DIR/lib" && mkdir -p "$OUT_DIR/lib"
