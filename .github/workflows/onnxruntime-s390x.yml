@@ -62,13 +62,18 @@ jobs:
       # zig + cargo-zigbuild as wheels (the build script finds zig through the
       # ziglang module; the smoke-test CLI builds with cargo-zigbuild for the
       # same glibc 2.28 floor the release binaries have); the target's binutils
-      # for strip/objdump; qemu-user to run the result.
-      - name: zig, cargo-zigbuild, cmake, ninja, binutils, qemu
+      # for strip/objdump; qemu-user to run the result, and libc6-s390x-cross
+      # for the sysroot `qemu-s390x-static -L /usr/s390x-linux-gnu` resolves
+      # the binary's loader (/lib/ld64.so.1) and libc against — zig links
+      # against its own glibc stubs, so nothing else installs that sysroot
+      # (the gcc cross toolchain this job used before pulled it in).
+      - name: zig, cargo-zigbuild, cmake, ninja, binutils, qemu, s390x libc
         run: |
           python3 -m pip install --user --break-system-packages ziglang cargo-zigbuild
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build python3 binutils-s390x-linux-gnu qemu-user-static
+            cmake ninja-build python3 binutils-s390x-linux-gnu qemu-user-static \
+            libc6-s390x-cross
           cmake --version | head -1
           python3 -m ziglang version
 
