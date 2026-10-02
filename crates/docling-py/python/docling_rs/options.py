@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from typing import BinaryIO, Optional
+from typing import Any, BinaryIO, Optional
 
 
 class InputFormat(str, enum.Enum):
@@ -123,7 +123,9 @@ class PdfPipelineOptions:
     ``no_text_panels`` (a docling.rs extension, #173/#174: keep every detected
     picture as a picture instead of demoting uncaptioned dense-text panels to
     paragraphs) and
-    ``accelerator_options.num_threads``. The remaining fields are accepted so
+    ``accelerator_options.num_threads``. ``do_picture_description`` with
+    ``picture_description_options`` runs in Python on the converted document
+    (:mod:`docling_rs.picture_description`). The remaining fields are accepted so
     docling code constructs unchanged, but do not alter the pipeline (images are
     always extracted; the export image mode is chosen by docling-core at
     ``export_to_markdown(...)`` time)."""
@@ -145,6 +147,16 @@ class PdfPipelineOptions:
     images_scale: float = 1.0
     generate_page_images: bool = False
     generate_picture_images: bool = False
+    #: docling's picture description enrichment: run on the converted
+    #: document with ``picture_description_options``' model (a
+    #: :class:`docling_rs.picture_description.PictureDescriptionBaseOptions`
+    #: subclass such as ``docling_rs.langchain.PictureDescriptionLangChainOptions``).
+    do_picture_description: bool = False
+    picture_description_options: Optional[Any] = None
+    #: Accepted for docling compatibility; no effect (no plugin system, no
+    #: remote-service gate — the describer you pass is what runs).
+    allow_external_plugins: bool = False
+    enable_remote_services: bool = False
 
 
 @dataclass

@@ -838,6 +838,17 @@ fn chunk_document(
                 "text": c.text,
                 "headings": c.headings,
                 "doc_items": c.doc_items.iter().map(|i| i.self_ref.clone()).collect::<Vec<_>>(),
+                // The refs above number the *re-imported* document, which
+                // drifts from the caller's JSON (empty items dropped on
+                // import, item-tree exports for HTML/DOCX); the per-item
+                // kind and standalone text let chunking.py map each item
+                // back to the caller's own refs.
+                "doc_item_kinds": c.doc_items.iter().map(|i| match i.kind {
+                    docling::chunker::ChunkItemKind::Text => "text",
+                    docling::chunker::ChunkItemKind::Table => "table",
+                    docling::chunker::ChunkItemKind::Picture => "picture",
+                }).collect::<Vec<_>>(),
+                "doc_item_texts": c.doc_items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(),
                 "contextualize": contextualized,
             })
             .to_string()

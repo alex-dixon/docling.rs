@@ -15,9 +15,11 @@ from ..options import (
     TableFormerMode,
     TableStructureOptions,
 )
+from ..picture_description import PictureDescriptionBaseOptions
 
 __all__ = [
     "PdfPipelineOptions",
+    "PictureDescriptionBaseOptions",
     "TableStructureOptions",
     "TableFormerMode",
     "AcceleratorDevice",

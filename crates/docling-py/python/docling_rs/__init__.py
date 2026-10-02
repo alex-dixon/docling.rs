@@ -407,6 +407,24 @@ class DocumentConverter:
                 else None
             ),
         )
+        # docling's do_picture_description enrichment, run on the converted
+        # document (picture_description.py): the engine embeds each picture's
+        # crop, so any Python-side describer — e.g. a LangChain chat model via
+        # docling_rs.langchain — works without an engine change.
+        self._picture_description = None
+        if pdf_opts is not None and getattr(pdf_opts, "do_picture_description", False):
+            pd = getattr(pdf_opts, "picture_description_options", None)
+            if pd is None or not hasattr(pd, "_annotate_images"):
+                # docling's default (a local SmolVLM) has no counterpart here;
+                # degrade like a missing enrichment model.
+                warnings.warn(
+                    "do_picture_description needs picture_description_options with a "
+                    "describer (e.g. docling_rs.langchain.PictureDescriptionLangChainOptions); "
+                    "pictures are left undescribed",
+                    stacklevel=2,
+                )
+            else:
+                self._picture_description = pd
 
     def initialize_pipeline(self, format: Optional[InputFormat] = None) -> None:
         """Eagerly load the ML models for ``format`` (docling's
@@ -420,10 +438,10 @@ class DocumentConverter:
         )
 
     def convert(self, source: Union[str, os.PathLike, DocumentStream]) -> ConversionResult:
-        """Convert a filesystem path (str / pathlib.Path) or an in-memory
+        """Convert a filesystem path (str / pathlib.Path), an ``http(s)://``
+        URL (downloaded first, as docling does) or an in-memory
         :class:`DocumentStream`."""
-        native = self._convert_native(source)
-        return _wrap(native)
+        return self._finish(_wrap(self._convert_native(source)))
 
     def convert_all(
         self,
@@ -435,7 +453,7 @@ class DocumentConverter:
         source yields a ``failure`` result (empty document) instead of raising."""
         for source in sources:
             try:
-                yield _wrap(self._convert_native(source))
+                yield self._finish(_wrap(self._convert_native(source)))
             except Exception:
                 if raises_on_error:
                     raise
@@ -446,12 +464,22 @@ class DocumentConverter:
         """Convert in-memory bytes; ``name``'s extension drives format detection
         (docling's ``DocumentStream`` counterpart)."""
         native = self._inner.convert_bytes(name, data)
-        return _wrap(native)
+        return self._finish(_wrap(native))
 
     def _convert_native(self, source):
         if isinstance(source, DocumentStream):
             return self._inner.convert_bytes(source.name, source.stream.read())
+        if isinstance(source, str) and _is_url(source):
+            name, data = _fetch_url(source)
+            return self._inner.convert_bytes(name, data)
         return self._inner.convert(source)
+
+    def _finish(self, result: ConversionResult) -> ConversionResult:
+        if self._picture_description is not None and result.status != "failure":
+            from .picture_description import describe_pictures
+
+            describe_pictures(result.document, self._picture_description)
+        return result
 
 
 def _pdf_pipeline_options(
@@ -466,6 +494,63 @@ def _pdf_pipeline_options(
         if fo is not None and getattr(fo, "pipeline_options", None) is not None:
             return fo.pipeline_options
     return None
+
+
+def _is_url(source: str) -> bool:
+    return source.startswith(("http://", "https://"))
+
+
+# Media types whose extension the URL path may not carry (e.g. arXiv's
+# https://arxiv.org/pdf/2408.09869) — format detection is by extension.
+_URL_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    "text/html": ".html",
+    "application/xhtml+xml": ".html",
+    "text/markdown": ".md",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "application/json": ".json",
+    "application/xml": ".xml",
+    "text/xml": ".xml",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/epub+zip": ".epub",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/tiff": ".tiff",
+    "image/webp": ".webp",
+    "audio/mpeg": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "video/mp4": ".mp4",
+}
+
+
+def _fetch_url(url: str) -> "tuple[str, bytes]":
+    """Download an http(s) source (docling's ``convert(url)``): the file name
+    comes from ``Content-Disposition``, else the URL path; when that has no
+    extension, the response's media type supplies one. Read whole into memory
+    — the engine converts bytes, like ``DocumentStream``."""
+    import email.message
+    import urllib.parse
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": f"docling-rs/{__version__}"})
+    with urllib.request.urlopen(req) as resp:
+        data = resp.read()
+        disposition = resp.headers.get("Content-Disposition", "")
+        media_type = resp.headers.get_content_type()
+    name = ""
+    if disposition:
+        msg = email.message.Message()
+        msg["Content-Disposition"] = disposition
+        name = msg.get_filename() or ""
+    if not name:
+        name = Path(urllib.parse.unquote(urllib.parse.urlparse(url).path)).name or "document"
+    if not Path(name).suffix and media_type in _URL_EXTENSIONS:
+        name += _URL_EXTENSIONS[media_type]
+    return name, data
 
 
 def _wrap(native) -> ConversionResult:
