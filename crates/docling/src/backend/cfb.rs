@@ -29,8 +29,9 @@ struct DirEntry {
     object_type: u8,
     /// Left/right siblings and first child in the directory's red-black
     /// tree, as entry indices (`NOSTREAM` = none). Office streams are looked
-    /// up flat by name, but .msg storages repeat stream names per
-    /// recipient/attachment, so those walk the tree.
+    /// up by name among the root's children ([`CompoundFile::stream`]);
+    /// .msg storages repeat stream names per recipient/attachment, so those
+    /// walk the tree themselves.
     left: u32,
     right: u32,
     child: u32,
@@ -166,14 +167,27 @@ impl<'a> CompoundFile<'a> {
         })
     }
 
-    /// Extract a stream's bytes by name (exact match, any storage level —
-    /// the Office streams we need live in the root storage and carry unique
-    /// names). `None` for a missing stream or one over the per-part budget.
+    /// Extract a stream's bytes by name (exact match). The Office streams the
+    /// backends ask for (`WordDocument`, `0Table`/`1Table`, `Data`,
+    /// `PowerPoint Document`, …) are the root storage's, so its direct
+    /// children are searched first: an embedded OLE object — a Word document
+    /// pasted into a Word document, stored under `ObjectPool/_<id>` — brings
+    /// its own `WordDocument`/`1Table`/`Data`, and whichever sorts first in
+    /// the directory used to win, pairing the outer FIB with the inner table
+    /// stream (#512). Only when the root has no such stream is the whole
+    /// directory searched, as before, for producers that nest it. `None`
+    /// for a missing stream or one over the per-part budget.
     pub(crate) fn stream(&self, name: &str) -> Option<Vec<u8>> {
+        let is_match = |i: &usize| {
+            self.entries
+                .get(*i)
+                .is_some_and(|e| e.object_type == 2 && e.name == name)
+        };
         let idx = self
-            .entries
-            .iter()
-            .position(|e| e.object_type == 2 && e.name == name)?;
+            .children_of(None)
+            .into_iter()
+            .find(is_match)
+            .or_else(|| (0..self.entries.len()).find(is_match))?;
         self.stream_by_index(idx)
     }
 
@@ -341,6 +355,26 @@ mod tests {
         let word = cfb.stream("WordDocument").expect("WordDocument stream");
         assert_eq!(&word[..2], &[0xEC, 0xA5], "FIB wIdent magic");
         assert!(cfb.stream("NoSuchStream").is_none());
+    }
+
+    #[test]
+    fn root_streams_win_over_an_embedded_documents_streams() {
+        // A Word document embedding another Word document (#512): the
+        // embedded one's `WordDocument`/`1Table`/`Data` sit under
+        // `ObjectPool/_<id>/` (and one level deeper for its own embed), and
+        // the outer document's must be the ones returned.
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/doc/sources/embedded_word_object.doc"
+        ))
+        .unwrap();
+        let cfb = CompoundFile::open(&data).expect("valid CFB");
+        let tables = cfb.stream_names().filter(|n| *n == "1Table").count();
+        assert_eq!(tables, 2, "fixture must carry a nested 1Table");
+        assert_eq!(cfb.stream("1Table").map(|s| s.len()), Some(11349));
+        assert_eq!(cfb.stream("WordDocument").map(|s| s.len()), Some(4165));
+        // Only nested: still found by the directory-wide fallback.
+        assert_eq!(cfb.stream("\u{1}Ole10Native").map(|s| s.len()), Some(80821));
     }
 
     #[test]

@@ -59,8 +59,25 @@ impl DeclarativeBackend for DocBackend {
         let ccp_text = u32_at(&word, 76).unwrap_or(0) as u64;
         let fc_clx = u32_at(&word, 418).unwrap_or(0) as usize;
         let lcb_clx = u32_at(&word, 422).unwrap_or(0) as usize;
-        let pieces = parse_piece_table(table.get(fc_clx..fc_clx + lcb_clx).unwrap_or(&[]))
-            .ok_or_else(|| ConversionError::Parse("doc: bad piece table".into()))?;
+        // Two distinct failures, reported apart (#512): a CLX the FIB places
+        // outside the table stream means the FIB and the table stream do not
+        // belong together (or one is truncated); one inside it that does not
+        // parse is a damaged piece table.
+        let clx = fc_clx
+            .checked_add(lcb_clx)
+            .and_then(|end| table.get(fc_clx..end))
+            .ok_or_else(|| {
+                ConversionError::Parse(format!(
+                    "doc: piece table (fcClx {fc_clx}, lcbClx {lcb_clx}) lies outside the \
+                     {table_name} stream ({} bytes)",
+                    table.len()
+                ))
+            })?;
+        let pieces = parse_piece_table(clx).ok_or_else(|| {
+            ConversionError::Parse(format!(
+                "doc: bad piece table (fcClx {fc_clx}, lcbClx {lcb_clx} in {table_name})"
+            ))
+        })?;
 
         // Styles (istd → sti) and paragraph properties (FC → PAPX).
         let fc_stsh = u32_at(&word, 162).unwrap_or(0) as usize;
