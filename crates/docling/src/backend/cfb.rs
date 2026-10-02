@@ -73,6 +73,15 @@ impl<'a> CompoundFile<'a> {
             return None;
         }
         let sector_size = 1usize << sector_shift;
+        // [MS-CFB] 2.6.3: a version 3 (512-byte sector) file's stream sizes
+        // fit 32 bits, and some older writers left the high half of the
+        // 64-bit size uninitialized — parsers should ignore it, or a valid
+        // stream reads as exabytes and is dropped over the part budget.
+        let size_mask = if sector_shift == 9 {
+            u32::MAX as u64
+        } else {
+            u64::MAX
+        };
         let sector_count = data.len() / sector_size; // bound for every chain walk
 
         // DIFAT: 109 entries in the header, then a chain of DIFAT sectors.
@@ -139,7 +148,8 @@ impl<'a> CompoundFile<'a> {
                 right: u32_at(chunk, 72)?,
                 child: u32_at(chunk, 76)?,
                 start_sector: u32_at(chunk, 116)?,
-                size: u32_at(chunk, 120)? as u64 | ((u32_at(chunk, 124)? as u64) << 32),
+                size: (u32_at(chunk, 120)? as u64 | ((u32_at(chunk, 124)? as u64) << 32))
+                    & size_mask,
             });
         }
 
@@ -375,6 +385,28 @@ mod tests {
         assert_eq!(cfb.stream("WordDocument").map(|s| s.len()), Some(4165));
         // Only nested: still found by the directory-wide fallback.
         assert_eq!(cfb.stream("\u{1}Ole10Native").map(|s| s.len()), Some(80821));
+    }
+
+    #[test]
+    fn v3_stream_size_ignores_an_uninitialized_high_half() {
+        // [MS-CFB] 2.6.3: older writers left the high 32 bits of a v3
+        // stream size as garbage (Apache POI's Bug51944.doc); reading them
+        // made `WordDocument` look exabytes long and get dropped.
+        let mut data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/doc/sources/docx_lists.doc"
+        ))
+        .unwrap();
+        let clean = CompoundFile::open(&data).unwrap().stream("WordDocument");
+        assert!(clean.is_some());
+        // Poison the high half of every directory entry's size.
+        let dir_start = u32_at(&data, 48).unwrap();
+        let base = sector_offset(dir_start, 512);
+        for e in 0..4 {
+            data[base + e * 128 + 124..base + e * 128 + 128].copy_from_slice(&[0x9F; 4]);
+        }
+        let cfb = CompoundFile::open(&data).expect("valid CFB");
+        assert_eq!(cfb.stream("WordDocument"), clean);
     }
 
     #[test]
