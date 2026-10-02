@@ -22,6 +22,23 @@
 //! (`0x08` anchor → PlcfSpa → the drawing's shape → BLIP store, with
 //! delay-stream data in `WordDocument`), decoded via [`officeart`].
 //! Footnotes and headers/footers remain out of scope.
+//!
+//! The FIB is read through [`Fib`], which locates `fibRgLw` and
+//! `fibRgFcLcb` from the counts the stream itself declares (`csw`, `cslw`,
+//! `cbRgFcLcb`) instead of fixed offsets, so a short or truncated FIB is an
+//! error naming what is missing and an `fc`/`lcb` pair beyond the writer's
+//! `cbRgFcLcb` reads as "structure absent" (#512).
+//!
+//! **Word 6.0 / Word 95** (`nFib` 101–105, the pre-97 FIB — no table stream,
+//! 8-bit text only) converts too, as text: the FIB's `fcMin`/`ccpText`
+//! locate the main text in `WordDocument`, or its CLX does for a fast-saved
+//! (complex) file; paragraphs split at the paragraph/cell/page marks. That
+//! format's stylesheet, PAPX and picture structures differ from Word 97's
+//! and are not read, so its output is body paragraphs (no headings, lists,
+//! tables or pictures) — where it used to be rejected outright. Text decodes
+//! as Windows-1252, the code page of the Western editions, or as UTF-16LE
+//! when the FIB's `fExtChar` is set (the Far East editions). Older files
+//! (Word for Windows 1.x/2.0) are not compound files and never reach here.
 
 use docling_core::{DoclingDocument, Node, PictureImage, Table};
 
@@ -40,13 +57,27 @@ impl DeclarativeBackend for DocBackend {
         let word = cfb
             .stream("WordDocument")
             .ok_or_else(|| ConversionError::Parse("doc: no WordDocument stream".into()))?;
-        if u16_at(&word, 0) != Some(0xA5EC) {
-            return Err(ConversionError::Parse("doc: bad FIB magic".into()));
-        }
+        let w_ident = u16_at(&word, 0).ok_or_else(|| {
+            ConversionError::Parse(format!(
+                "doc: WordDocument stream too short for a FIB ({} bytes)",
+                word.len()
+            ))
+        })?;
+        let n_fib = u16_at(&word, 2).unwrap_or(0);
         let flags = u16_at(&word, 0x0A).unwrap_or(0);
         if flags & 0x0100 != 0 {
             return Err(ConversionError::Parse("doc: document is encrypted".into()));
         }
+        if w_ident != 0xA5EC {
+            if (101..=105).contains(&n_fib) {
+                return convert_word6(&source.name, &word, flags);
+            }
+            return Err(ConversionError::Parse(format!(
+                "doc: unsupported Word binary format (wIdent {w_ident:#06X}, nFib {n_fib}); \
+                 Word 6.0/95 and Word 97 or later are read"
+            )));
+        }
+        let fib = Fib::parse(&word)?;
         let table_name = if flags & 0x0200 != 0 {
             "1Table"
         } else {
@@ -56,47 +87,50 @@ impl DeclarativeBackend for DocBackend {
             .stream(table_name)
             .ok_or_else(|| ConversionError::Parse(format!("doc: no {table_name} stream")))?;
 
-        let ccp_text = u32_at(&word, 76).unwrap_or(0) as u64;
-        let fc_clx = u32_at(&word, 418).unwrap_or(0) as usize;
-        let lcb_clx = u32_at(&word, 422).unwrap_or(0) as usize;
-        let pieces = parse_piece_table(table.get(fc_clx..fc_clx + lcb_clx).unwrap_or(&[]))
-            .ok_or_else(|| ConversionError::Parse("doc: bad piece table".into()))?;
+        let ccp_text = fib.ccp_text as u64;
+        let (fc_clx, lcb_clx) = fib.fc_lcb(Fib::CLX);
+        // Two distinct failures, reported apart (#512): a CLX the FIB places
+        // outside the table stream means the FIB and the table stream do not
+        // belong together (or one is truncated); one inside it that does not
+        // parse is a damaged piece table.
+        let clx = fc_clx
+            .checked_add(lcb_clx)
+            .and_then(|end| table.get(fc_clx..end))
+            .ok_or_else(|| {
+                ConversionError::Parse(format!(
+                    "doc: piece table (fcClx {fc_clx}, lcbClx {lcb_clx}) lies outside the \
+                     {table_name} stream ({} bytes)",
+                    table.len()
+                ))
+            })?;
+        let pieces = parse_piece_table(clx, None).ok_or_else(|| {
+            ConversionError::Parse(format!(
+                "doc: bad piece table (fcClx {fc_clx}, lcbClx {lcb_clx} in {table_name})"
+            ))
+        })?;
 
         // Styles (istd → sti) and paragraph properties (FC → PAPX).
-        let fc_stsh = u32_at(&word, 162).unwrap_or(0) as usize;
-        let lcb_stsh = u32_at(&word, 166).unwrap_or(0) as usize;
-        let stis = parse_stsh(table.get(fc_stsh..fc_stsh + lcb_stsh).unwrap_or(&[]));
-        let fc_bte = u32_at(&word, 258).unwrap_or(0) as usize;
-        let lcb_bte = u32_at(&word, 262).unwrap_or(0) as usize;
-        let bte = table.get(fc_bte..fc_bte + lcb_bte).unwrap_or(&[]);
+        let stis = parse_stsh(fib.part(&table, Fib::STSHF));
+        let bte = fib.part(&table, Fib::PLCF_BTE_PAPX);
         // Character-run properties (bold/italic): PlcfBteChpx → CHPX FKPs.
-        let fc_btec = u32_at(&word, 250).unwrap_or(0) as usize;
-        let lcb_btec = u32_at(&word, 254).unwrap_or(0) as usize;
-        let btec = table.get(fc_btec..fc_btec + lcb_btec).unwrap_or(&[]);
+        let btec = fib.part(&table, Fib::PLCF_BTE_CHPX);
         let mut chpx_cache = ChpxCache::default();
 
         // List tables: ilfo → numbering kind/start per level (ordered lists).
-        let fc_lst = u32_at(&word, 738).unwrap_or(0) as usize;
-        let lcb_lst = u32_at(&word, 742).unwrap_or(0) as usize;
-        let fc_lfo = u32_at(&word, 746).unwrap_or(0) as usize;
-        let lcb_lfo = u32_at(&word, 750).unwrap_or(0) as usize;
+        let (fc_lst, lcb_lst) = fib.fc_lcb(Fib::PLF_LST);
         // `lcbPlfLst` covers only the LSTF array; the per-list LVL structures
         // follow it directly in the table stream, so hand `parse` the tail.
         let lists = ListTables::parse(
             table.get(fc_lst..).unwrap_or(&[]),
             lcb_lst,
-            table.get(fc_lfo..fc_lfo + lcb_lfo).unwrap_or(&[]),
+            fib.part(&table, Fib::PLF_LFO),
         );
 
         // Pictures: the Data stream holds inline PICFs; the drawing tables
         // (fcDggInfo, in the table stream) + PlcfSpa anchor floating shapes.
         let data = cfb.stream("Data").unwrap_or_default();
-        let fc_spa = u32_at(&word, 474).unwrap_or(0) as usize;
-        let lcb_spa = u32_at(&word, 478).unwrap_or(0) as usize;
-        let spa = parse_plcf_spa(table.get(fc_spa..fc_spa + lcb_spa).unwrap_or(&[]));
-        let fc_dgg = u32_at(&word, 554).unwrap_or(0) as usize;
-        let lcb_dgg = u32_at(&word, 558).unwrap_or(0) as usize;
-        let drawings = Drawings::parse(table.get(fc_dgg..fc_dgg + lcb_dgg).unwrap_or(&[]), &word);
+        let spa = parse_plcf_spa(fib.part(&table, Fib::PLCSPA_MOM));
+        let drawings = Drawings::parse(fib.part(&table, Fib::DGG_INFO), &word);
 
         // Walk the main-document text paragraph by paragraph, assembling nodes.
         let mut doc = DoclingDocument::new(&source.name);
@@ -143,6 +177,145 @@ impl DeclarativeBackend for DocBackend {
     }
 }
 
+/// The Word 97+ FIB, located from the counts the stream declares
+/// ([MS-DOC] 2.5.1): `FibBase` (32 bytes), `csw` + `fibRgW`, `cslw` +
+/// `fibRgLw`, `cbRgFcLcb` + `fibRgFcLcbBlob`. Writers size these arrays by
+/// `nFib`; reading them through the declared counts — rather than the
+/// fixed offsets of the common `csw = 14`, `cslw = 22` layout — keeps a
+/// non-standard or truncated FIB from silently reading garbage.
+struct Fib<'a> {
+    ccp_text: u32,
+    /// `fibRgFcLcbBlob`: `(fc, lcb)` u32 pairs.
+    fc_lcb: &'a [u8],
+}
+
+impl<'a> Fib<'a> {
+    /// Indices into `FibRgFcLcb97` (each an 8-byte `fc`/`lcb` pair).
+    const STSHF: usize = 1;
+    const PLCF_BTE_CHPX: usize = 12;
+    const PLCF_BTE_PAPX: usize = 13;
+    const CLX: usize = 33;
+    const PLCSPA_MOM: usize = 40;
+    const DGG_INFO: usize = 50;
+    const PLF_LST: usize = 73;
+    const PLF_LFO: usize = 74;
+
+    fn parse(word: &'a [u8]) -> Result<Self, ConversionError> {
+        let short = |what: &str, need: usize| {
+            ConversionError::Parse(format!(
+                "doc: FIB truncated — {what} needs {need} bytes, WordDocument has {}",
+                word.len()
+            ))
+        };
+        let csw = u16_at(word, 32).ok_or_else(|| short("csw", 34))? as usize;
+        let cslw_at = 34 + csw * 2;
+        let cslw = u16_at(word, cslw_at).ok_or_else(|| short("cslw", cslw_at + 2))? as usize;
+        let lw_at = cslw_at + 2;
+        if cslw < 4 {
+            return Err(ConversionError::Parse(format!(
+                "doc: FIB's fibRgLw has {cslw} entries, too few for ccpText"
+            )));
+        }
+        let ccp_text = u32_at(word, lw_at + 12).ok_or_else(|| short("ccpText", lw_at + 16))?;
+        let cb_at = lw_at + cslw * 4;
+        let cb = u16_at(word, cb_at).ok_or_else(|| short("cbRgFcLcb", cb_at + 2))? as usize;
+        let blob_at = cb_at + 2;
+        let fc_lcb = word
+            .get(blob_at..blob_at + cb * 8)
+            .ok_or_else(|| short("fibRgFcLcbBlob", blob_at + cb * 8))?;
+        Ok(Self { ccp_text, fc_lcb })
+    }
+
+    /// The `index`-th `(fc, lcb)` pair; `(0, 0)` — "absent" — past the
+    /// writer's `cbRgFcLcb`.
+    fn fc_lcb(&self, index: usize) -> (usize, usize) {
+        let fc = u32_at(self.fc_lcb, index * 8).unwrap_or(0) as usize;
+        let lcb = u32_at(self.fc_lcb, index * 8 + 4).unwrap_or(0) as usize;
+        (fc, lcb)
+    }
+
+    /// The bytes of structure `index` in `stream`; empty when absent or when
+    /// the range overruns the stream (optional structures degrade).
+    fn part<'s>(&self, stream: &'s [u8], index: usize) -> &'s [u8] {
+        let (fc, lcb) = self.fc_lcb(index);
+        fc.checked_add(lcb)
+            .and_then(|end| stream.get(fc..end))
+            .unwrap_or(&[])
+    }
+}
+
+/// Word 6.0 / Word 95 (`nFib` 101–105): main-document text as body
+/// paragraphs (module docs). The pre-97 FIB is fixed-layout: `fcMin` at
+/// 0x18, `ccpText` at 0x34, `fcClx`/`lcbClx` at 0x160 — the CLX lives in
+/// `WordDocument` itself (no table stream) and only matters for a
+/// fast-saved file (`fComplex`); otherwise the text is the `ccpText` bytes
+/// at `fcMin`. `fExtChar` (flag 0x1000, the Far East editions) makes the
+/// text UTF-16LE instead of 8-bit.
+fn convert_word6(name: &str, word: &[u8], flags: u16) -> Result<DoclingDocument, ConversionError> {
+    let field = |o: usize, what: &str| {
+        u32_at(word, o).map(|v| v as usize).ok_or_else(|| {
+            ConversionError::Parse(format!(
+                "doc: Word 6/95 FIB truncated — no {what} at {o:#x} ({} bytes)",
+                word.len()
+            ))
+        })
+    };
+    let fc_min = field(0x18, "fcMin")?;
+    let ccp_text = field(0x34, "ccpText")? as u64;
+    // `fExtChar`: the Far East editions store the text as UTF-16LE.
+    let unicode = flags & 0x1000 != 0;
+    let pieces = if flags & 0x0004 != 0 {
+        let fc_clx = field(0x160, "fcClx")?;
+        let lcb_clx = field(0x164, "lcbClx")?;
+        let clx = fc_clx
+            .checked_add(lcb_clx)
+            .and_then(|end| word.get(fc_clx..end))
+            .ok_or_else(|| {
+                ConversionError::Parse(format!(
+                    "doc: piece table (fcClx {fc_clx}, lcbClx {lcb_clx}) lies outside the \
+                     WordDocument stream ({} bytes)",
+                    word.len()
+                ))
+            })?;
+        parse_piece_table(clx, Some(unicode)).ok_or_else(|| {
+            ConversionError::Parse(format!(
+                "doc: bad piece table (fcClx {fc_clx}, lcbClx {lcb_clx} in WordDocument)"
+            ))
+        })?
+    } else {
+        vec![Piece {
+            cp_start: 0,
+            cp_end: ccp_text,
+            fc: fc_min as u64,
+            compressed: !unicode,
+        }]
+    };
+
+    let mut doc = DoclingDocument::new(name);
+    let mut builder = NodeBuilder::new(ListTables::default());
+    let mut para = ParaAccum::default();
+    let mut cp: u64 = 0;
+    'pieces: for piece in &pieces {
+        for i in 0..piece.cp_end.saturating_sub(piece.cp_start) {
+            if cp >= ccp_text {
+                break 'pieces;
+            }
+            cp += 1;
+            match piece_char(word, piece, i) {
+                // Paragraph / cell / page marks all end a body paragraph:
+                // without the PAPX there is no table structure to rebuild.
+                '\r' | '\u{0007}' | '\u{000C}' => {
+                    para.finish('\r', ParaProps::default(), &[], &mut builder, &mut doc);
+                }
+                ch => para.push(ch, CharFmt::default()),
+            }
+        }
+    }
+    para.finish('\r', ParaProps::default(), &[], &mut builder, &mut doc);
+    builder.flush(&mut doc);
+    Ok(doc)
+}
+
 /// One piece-table entry: characters `cp_start..cp_end` live at byte offset
 /// `fc` (already unmasked) — CP1252 bytes when `compressed`, else UTF-16LE.
 struct Piece {
@@ -175,7 +348,11 @@ fn piece_fc(piece: &Piece, i: u64) -> u64 {
 
 /// Parse the CLX into pieces. The CLX is a run of `Prc` blocks (0x01, skipped)
 /// followed by the `Pcdt` (0x02) holding the PlcPcd.
-fn parse_piece_table(clx: &[u8]) -> Option<Vec<Piece>> {
+///
+/// `word6`: a Word 6.0/95 CLX — `Some(unicode)` — whose PCD `fc` is a plain
+/// byte offset (bit 30 carries no meaning there) to text that is 8-bit, or
+/// UTF-16LE throughout when the FIB's `fExtChar` says so.
+fn parse_piece_table(clx: &[u8], word6: Option<bool>) -> Option<Vec<Piece>> {
     let mut pos = 0usize;
     loop {
         match clx.get(pos)? {
@@ -185,7 +362,7 @@ fn parse_piece_table(clx: &[u8]) -> Option<Vec<Piece>> {
             }
             0x02 => {
                 let lcb = u32_at(clx, pos + 1)? as usize;
-                let plc = clx.get(pos + 5..pos + 5 + lcb)?;
+                let plc = clx.get(pos + 5..(pos + 5).checked_add(lcb)?)?;
                 // n pieces: (n+1) CPs (4 bytes) + n PCDs (8 bytes).
                 let n = (lcb.checked_sub(4)?) / 12;
                 let mut pieces = Vec::with_capacity(n);
@@ -194,8 +371,13 @@ fn parse_piece_table(clx: &[u8]) -> Option<Vec<Piece>> {
                     let cp_end = u32_at(plc, (i + 1) * 4)? as u64;
                     let pcd = (n + 1) * 4 + i * 8;
                     let fc_raw = u32_at(plc, pcd + 2)?;
-                    let compressed = fc_raw & 0x4000_0000 != 0;
-                    let fc = if compressed {
+                    let compressed = match word6 {
+                        Some(unicode) => !unicode,
+                        None => fc_raw & 0x4000_0000 != 0,
+                    };
+                    let fc = if word6.is_some() {
+                        fc_raw as u64
+                    } else if compressed {
                         ((fc_raw & 0x3FFF_FFFF) / 2) as u64
                     } else {
                         fc_raw as u64
@@ -1279,6 +1461,94 @@ pub(crate) fn cp1252(b: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Word 97 FIB of the usual shape (`csw` 14, `cslw` 22) with
+    /// `cbRgFcLcb` pairs, `ccpText` = 1234 and pair 33 (the CLX) = (7, 9).
+    fn fib_bytes(cb: u16) -> Vec<u8> {
+        let mut w = vec![0u8; 32];
+        w[0..2].copy_from_slice(&0xA5ECu16.to_le_bytes());
+        w.extend_from_slice(&14u16.to_le_bytes());
+        w.extend(std::iter::repeat_n(0, 28));
+        w.extend_from_slice(&22u16.to_le_bytes());
+        let mut lw = vec![0u8; 88];
+        lw[12..16].copy_from_slice(&1234u32.to_le_bytes());
+        w.extend(lw);
+        w.extend_from_slice(&cb.to_le_bytes());
+        let mut blob = vec![0u8; cb as usize * 8];
+        if cb > 33 {
+            blob[264..268].copy_from_slice(&7u32.to_le_bytes());
+            blob[268..272].copy_from_slice(&9u32.to_le_bytes());
+        }
+        w.extend(blob);
+        w
+    }
+
+    #[test]
+    fn fib_reads_through_the_declared_counts() {
+        let w = fib_bytes(0x5D);
+        let fib = Fib::parse(&w).expect("well-formed FIB");
+        assert_eq!(fib.ccp_text, 1234);
+        assert_eq!(fib.fc_lcb(Fib::CLX), (7, 9));
+        // The CLX pair sits where the old fixed offsets (418/422) put it.
+        assert_eq!(u32_at(&w, 418), Some(7));
+        assert_eq!(u32_at(&w, 422), Some(9));
+        // A pair past the writer's cbRgFcLcb reads as absent.
+        let short = fib_bytes(20);
+        let fib = Fib::parse(&short).unwrap();
+        assert_eq!(fib.fc_lcb(Fib::CLX), (0, 0));
+        assert!(fib.part(&[1, 2, 3], Fib::CLX).is_empty());
+    }
+
+    #[test]
+    fn truncated_fib_is_an_error_naming_the_field() {
+        let w = fib_bytes(0x5D);
+        for (cut, field) in [
+            (20, "csw"),
+            (40, "cslw"),
+            (70, "ccpText"),
+            (153, "cbRgFcLcb"),
+            (300, "fibRgFcLcbBlob"),
+        ] {
+            let err = Fib::parse(&w[..cut])
+                .err()
+                .expect("truncated FIB must fail");
+            assert!(err.to_string().contains(field), "cut {cut}: {err}");
+        }
+    }
+
+    #[test]
+    fn part_survives_an_overflowing_range() {
+        let mut w = fib_bytes(0x5D);
+        // fcClx = u32::MAX, lcbClx = u32::MAX: no panic, just absent.
+        w[154 + 264..154 + 272].copy_from_slice(&[0xFF; 8]);
+        let fib = Fib::parse(&w).unwrap();
+        assert!(fib.part(&[0u8; 16], Fib::CLX).is_empty());
+    }
+
+    #[test]
+    fn unsupported_word_version_is_named() {
+        let mut data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/doc/sources/docx_lists.doc"
+        ))
+        .unwrap();
+        // The WordDocument stream starts with the FIB magic at a sector
+        // boundary; turn it into an unknown version.
+        let at = (512..data.len())
+            .step_by(512)
+            .find(|&o| data[o..o + 2] == [0xEC, 0xA5])
+            .expect("FIB sector");
+        data[at..at + 4].copy_from_slice(&[0x34, 0x12, 0x40, 0x00]);
+        let src = SourceDocument::from_bytes("x.doc", InputFormat::Doc, data);
+        let Err(err) = DocBackend.convert(&src) else {
+            panic!("an unknown Word version must be rejected");
+        };
+        let err = err.to_string();
+        assert!(
+            err.contains("wIdent 0x1234") && err.contains("nFib 64"),
+            "{err}"
+        );
+    }
     use crate::InputFormat;
 
     fn fixture(name: &str) -> SourceDocument {

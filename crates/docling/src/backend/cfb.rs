@@ -29,8 +29,9 @@ struct DirEntry {
     object_type: u8,
     /// Left/right siblings and first child in the directory's red-black
     /// tree, as entry indices (`NOSTREAM` = none). Office streams are looked
-    /// up flat by name, but .msg storages repeat stream names per
-    /// recipient/attachment, so those walk the tree.
+    /// up by name among the root's children ([`CompoundFile::stream`]);
+    /// .msg storages repeat stream names per recipient/attachment, so those
+    /// walk the tree themselves.
     left: u32,
     right: u32,
     child: u32,
@@ -72,6 +73,15 @@ impl<'a> CompoundFile<'a> {
             return None;
         }
         let sector_size = 1usize << sector_shift;
+        // [MS-CFB] 2.6.3: a version 3 (512-byte sector) file's stream sizes
+        // fit 32 bits, and some older writers left the high half of the
+        // 64-bit size uninitialized — parsers should ignore it, or a valid
+        // stream reads as exabytes and is dropped over the part budget.
+        let size_mask = if sector_shift == 9 {
+            u32::MAX as u64
+        } else {
+            u64::MAX
+        };
         let sector_count = data.len() / sector_size; // bound for every chain walk
 
         // DIFAT: 109 entries in the header, then a chain of DIFAT sectors.
@@ -138,7 +148,8 @@ impl<'a> CompoundFile<'a> {
                 right: u32_at(chunk, 72)?,
                 child: u32_at(chunk, 76)?,
                 start_sector: u32_at(chunk, 116)?,
-                size: u32_at(chunk, 120)? as u64 | ((u32_at(chunk, 124)? as u64) << 32),
+                size: (u32_at(chunk, 120)? as u64 | ((u32_at(chunk, 124)? as u64) << 32))
+                    & size_mask,
             });
         }
 
@@ -166,14 +177,27 @@ impl<'a> CompoundFile<'a> {
         })
     }
 
-    /// Extract a stream's bytes by name (exact match, any storage level —
-    /// the Office streams we need live in the root storage and carry unique
-    /// names). `None` for a missing stream or one over the per-part budget.
+    /// Extract a stream's bytes by name (exact match). The Office streams the
+    /// backends ask for (`WordDocument`, `0Table`/`1Table`, `Data`,
+    /// `PowerPoint Document`, …) are the root storage's, so its direct
+    /// children are searched first: an embedded OLE object — a Word document
+    /// pasted into a Word document, stored under `ObjectPool/_<id>` — brings
+    /// its own `WordDocument`/`1Table`/`Data`, and whichever sorts first in
+    /// the directory used to win, pairing the outer FIB with the inner table
+    /// stream (#512). Only when the root has no such stream is the whole
+    /// directory searched, as before, for producers that nest it. `None`
+    /// for a missing stream or one over the per-part budget.
     pub(crate) fn stream(&self, name: &str) -> Option<Vec<u8>> {
+        let is_match = |i: &usize| {
+            self.entries
+                .get(*i)
+                .is_some_and(|e| e.object_type == 2 && e.name == name)
+        };
         let idx = self
-            .entries
-            .iter()
-            .position(|e| e.object_type == 2 && e.name == name)?;
+            .children_of(None)
+            .into_iter()
+            .find(is_match)
+            .or_else(|| (0..self.entries.len()).find(is_match))?;
         self.stream_by_index(idx)
     }
 
@@ -341,6 +365,48 @@ mod tests {
         let word = cfb.stream("WordDocument").expect("WordDocument stream");
         assert_eq!(&word[..2], &[0xEC, 0xA5], "FIB wIdent magic");
         assert!(cfb.stream("NoSuchStream").is_none());
+    }
+
+    #[test]
+    fn root_streams_win_over_an_embedded_documents_streams() {
+        // A Word document embedding another Word document (#512): the
+        // embedded one's `WordDocument`/`1Table`/`Data` sit under
+        // `ObjectPool/_<id>/` (and one level deeper for its own embed), and
+        // the outer document's must be the ones returned.
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/doc/sources/embedded_word_object.doc"
+        ))
+        .unwrap();
+        let cfb = CompoundFile::open(&data).expect("valid CFB");
+        let tables = cfb.stream_names().filter(|n| *n == "1Table").count();
+        assert_eq!(tables, 2, "fixture must carry a nested 1Table");
+        assert_eq!(cfb.stream("1Table").map(|s| s.len()), Some(11349));
+        assert_eq!(cfb.stream("WordDocument").map(|s| s.len()), Some(4165));
+        // Only nested: still found by the directory-wide fallback.
+        assert_eq!(cfb.stream("\u{1}Ole10Native").map(|s| s.len()), Some(80821));
+    }
+
+    #[test]
+    fn v3_stream_size_ignores_an_uninitialized_high_half() {
+        // [MS-CFB] 2.6.3: older writers left the high 32 bits of a v3
+        // stream size as garbage (Apache POI's Bug51944.doc); reading them
+        // made `WordDocument` look exabytes long and get dropped.
+        let mut data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/doc/sources/docx_lists.doc"
+        ))
+        .unwrap();
+        let clean = CompoundFile::open(&data).unwrap().stream("WordDocument");
+        assert!(clean.is_some());
+        // Poison the high half of every directory entry's size.
+        let dir_start = u32_at(&data, 48).unwrap();
+        let base = sector_offset(dir_start, 512);
+        for e in 0..4 {
+            data[base + e * 128 + 124..base + e * 128 + 128].copy_from_slice(&[0x9F; 4]);
+        }
+        let cfb = CompoundFile::open(&data).expect("valid CFB");
+        assert_eq!(cfb.stream("WordDocument"), clean);
     }
 
     #[test]
