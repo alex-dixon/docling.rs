@@ -248,6 +248,33 @@ def download_models(
     return root
 
 
+_CHUNK_TOKENIZER = "models/chunk/tokenizer.json"
+
+
+def chunk_tokenizer(fetch: bool = False, progress: bool = False) -> "Path | None":
+    """The hybrid chunker's default ``tokenizer.json`` (all-MiniLM-L6-v2's),
+    where the native resolver would find it: ``./.models/chunk/``, then
+    ``$DOCLING_RS_MODELS_DIR/chunk/``, then this package's cache. With
+    ``fetch=True`` a missing tokenizer is downloaded into the cache on its own
+    (~0.5 MB, release asset then Hugging Face) — docling's ``HybridChunker``
+    likewise pulls its tokenizer from the Hub on first use — instead of
+    requiring the full :func:`download_models`. ``None`` when absent (and not
+    fetched)."""
+    candidates = [Path("." + _CHUNK_TOKENIZER)]
+    if env := os.environ.get("DOCLING_RS_MODELS_DIR"):
+        candidates.append(Path(env) / "chunk/tokenizer.json")
+    cached = cache_dir() / _CHUNK_TOKENIZER
+    candidates.append(cached)
+    for p in candidates:
+        if p.exists():
+            return p
+    if not fetch:
+        return None
+    if not _fetch(f"{BASE_URL}/chunk_tokenizer.json", cached, optional=True, progress=progress):
+        _fetch(_FALLBACK_URLS[_CHUNK_TOKENIZER], cached, optional=False, progress=progress)
+    return cached
+
+
 def _asr_presets(asr_model: "str | Iterable[str] | None") -> "list[str]":
     """Normalize ``asr_model`` to a list of known preset names; an unknown one
     raises before anything is downloaded."""

@@ -28,6 +28,13 @@ dependencies = [
     "docling-core>=2.0",
 ]
 
+[project.optional-dependencies]
+# docling_rs.langchain — the port of docling-project/docling-langchain
+# (DoclingLoader + picture description with LangChain chat models).
+langchain = [
+    "langchain-core>=0.3",
+]
+
 [project.urls]
 Repository = "https://github.com/docling-project/docling.rs"
 

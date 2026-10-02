@@ -140,7 +140,7 @@ PY
 | docling.rs | docling counterpart | notes |
 |---|---|---|
 | `DocumentConverter(format_options=None, *, allowed_formats=None, do_ocr=True, do_table_structure=True, force_full_page_ocr=False, no_text_panels=False, heading_hierarchy=False, do_picture_classification=False, do_code_enrichment=False, do_formula_enrichment=False, fetch_images=False, use_web_browser=False, artifacts_path=None, ocr_lang=None, asr_model=None, asr_lang=None, pipeline=None, vlm_endpoint=None, vlm_model=None, vlm_api_key=None, vlm_prompt=None, vlm_max_tokens=None)` | `DocumentConverter(allowed_formats=…, format_options=…)` | Pass `{InputFormat.PDF: PdfFormatOption(pipeline_options=PdfPipelineOptions(…))}` or the shorthand kwargs; `allowed_formats` restricts conversion; `artifacts_path` overrides the model cache dir. |
-| `.convert(path \| DocumentStream) -> ConversionResult` | `.convert(source)` | str / `pathlib.Path` / `DocumentStream`. Releases the GIL during conversion. |
+| `.convert(path \| url \| DocumentStream) -> ConversionResult` | `.convert(source)` | str / `pathlib.Path` / `http(s)://` URL (downloaded first; the format comes from the file name, else the response's `Content-Type`) / `DocumentStream`. Releases the GIL during conversion. |
 | `.convert_all(sources, raises_on_error=True) -> Iterator[ConversionResult]` | same | lazily converts many sources; `raises_on_error=False` yields a `failure` result instead of raising |
 | `.initialize_pipeline(format=None)` | same | pre-loads the PDF/image ML models so the first conversion isn't slow and later PDFs reuse the warm pipeline (no-op for non-ML formats; needs the models available) |
 | `.convert_bytes(name, data)` | `DocumentStream` | extension of `name` drives format detection |
@@ -243,7 +243,12 @@ document tree).
 
 Two deltas from docling: `HybridChunker(tokenizer=...)` takes a **path to a
 HuggingFace `tokenizer.json`** (loaded natively — no `transformers` install),
-and `chunk.meta.doc_items` holds the items' JSON-pointer refs. With no
+and `chunk.meta.doc_items` holds the items' JSON-pointer refs (`"#/texts/12"`)
+rather than the item objects — refs into *your* document: the engine chunks a
+re-imported copy whose numbering drifts (empty items dropped, HTML/DOCX item
+trees, inline runs), so each chunk item is mapped back by kind, reading order
+and text; an item that cannot be placed is left out rather than mis-pointed.
+`chunk.meta.export_json_dict()` gives docling's `DocMeta` JSON shape. With no
 `tokenizer` argument it falls back to MiniLM's tokenizer at
 `models/chunk/tokenizer.json` (the download script's location) or the package
 cache — `docling_rs.download_models()` fetches it with the other assets. Since
@@ -281,6 +286,73 @@ Abandoning the iterator early (`break`, `islice`, dropping the generator)
 cancels the background chunking, and Ctrl-C interrupts a pending `next()`.
 Errors (a bad tokenizer path, malformed document JSON) surface on the first
 `next()`, not at `chunk()` call time.
+
+## LangChain
+
+`docling_rs.langchain` is the port of docling's
+[langchain-docling](https://github.com/docling-project/docling-langchain)
+integration — same classes, same parameters, same output — running on the
+Rust engine (no PyTorch):
+
+```bash
+pip install "docling-rs[langchain]"
+```
+
+```python
+# was:  from langchain_docling import DoclingLoader
+from docling_rs.langchain import DoclingLoader, ExportType
+
+docs = DoclingLoader(file_path=["https://arxiv.org/pdf/2408.09869", "notes.docx"]).load()
+docs[0].page_content                      # heading path + chunk text, ready to embed
+docs[0].metadata["source"]                # the input
+docs[0].metadata["dl_meta"]               # docling's chunk meta: items + page/bbox provenance, headings, origin
+
+DoclingLoader(file_path="report.pdf", export_type=ExportType.MARKDOWN).load()  # one Document per input
+```
+
+| Parameter | Default | |
+|---|---|---|
+| `file_path` | — | path or URL, or an iterable of them |
+| `export_type` | `ExportType.DOC_CHUNKS` | one LangChain `Document` per chunk; `ExportType.MARKDOWN` = one per input |
+| `chunker` | `docling_rs.chunking.HybridChunker()` | any chunker with `chunk()` / `contextualize()` — the native ones or docling's own |
+| `converter` | `docling_rs.DocumentConverter()` | configure it as usual (`do_ocr=False`, `ocr_lang=…`, …); docling's `DocumentConverter` / `DoclingServiceClient` work too |
+| `convert_kwargs` | `{}` | extra kwargs for `converter.convert(source=…)` |
+| `md_export_kwargs` | `{"image_placeholder": ""}` | kwargs for `export_to_markdown()` (Markdown mode) |
+| `meta_extractor` | `MetaExtractor()` | subclass `BaseMetaExtractor` to shape `metadata` |
+
+It reproduces langchain-docling's own test expectations exactly (its
+fixtures run in `tests/test_langchain.py`). The default chunker is the native
+hybrid chunker with docling's defaults (all-MiniLM-L6-v2 tokenizer, 256
+tokens); its `tokenizer.json` (~0.5 MB) is fetched into the model cache on
+the first load when not already there — docling likewise pulls it from the
+Hugging Face Hub. `lazy_load()` converts and chunks one input at a time.
+
+**Picture descriptions with any LangChain chat model** — langchain-docling's
+`PictureDescriptionLangChainOptions`, set on the pipeline options as in
+docling (`do_picture_description`; `allow_external_plugins` is accepted but
+not needed):
+
+```python
+from langchain_openai import ChatOpenAI
+from docling_rs import DocumentConverter, InputFormat, PdfFormatOption, PdfPipelineOptions
+from docling_rs.langchain import PictureDescriptionLangChainOptions
+
+opts = PdfPipelineOptions(do_picture_description=True)
+opts.picture_description_options = PictureDescriptionLangChainOptions(
+    llm=ChatOpenAI(model="gpt-4o-mini"), prompt="Describe the image in three sentences.", provenance="gpt-4o-mini"
+)
+doc = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}).convert("paper.pdf").document
+[p.meta.description.text for p in doc.pictures if p.meta and p.meta.description]
+```
+
+The engine already embeds every picture's crop, so the description pass runs
+on the converted document (`docling_rs.picture_description`, docling's
+selection rules: pictures under 5% of their page skipped,
+`classification_allow` / `classification_deny` filters, batches of 8) and
+applies to every input format the converter handles, not only PDF.
+
+Runnable examples — loader basics, an agentic RAG with page citations, picture
+descriptions — are in [`examples/langchain/`](./examples/langchain/).
 
 ## Not covered (yet)
 

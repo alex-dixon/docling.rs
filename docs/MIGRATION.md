@@ -310,6 +310,23 @@ hierarchical 98.8%, hybrid 96.2% record-identical. The chunker-era
 work (checkbox inputs, fragmented-anchor folding, `<button>` blocks) plus the
 #81 parity fixes also lifted the HTML `.dclx` similarity: 88% mean (was 84%).
 
+**Item refs (`DocMeta.doc_items`).** The scripts above compare text, headings
+and contextualization; the items a chunk lists — what LangChain's `dl_meta`
+carries, with each item's page/bbox provenance — are checked separately on
+the Python side. The engine chunks a re-imported copy of the document whose
+item numbering drifts from the caller's (empty items dropped, HTML/DOCX item
+trees, inline runs sharing their paragraph's number), so `docling_rs.chunking`
+maps every chunk item back to the caller's document by kind, reading order
+and text (an item that cannot be placed is left out, never mis-pointed).
+Measured with `docling_rs.langchain.DoclingLoader` against docling-core
+2.99's Python `HierarchicalChunker` on the groundtruth JSON of all formats:
+of the 101 documents whose chunk texts match, 95 also match `dl_meta`
+exactly (80 before the mapping); on docling.rs's own conversions (HTML, DOCX,
+Markdown, PPTX, XLSX, AsciiDoc, LaTeX, PDF) every listed text item resolves to
+text contained in its chunk (~2,600 items checked, 0 mismatches; before the
+mapping 86% of PDF, 79% of HTML, 37% of DOCX and 15% of Markdown items
+pointed at the wrong item).
+
 ## 3. Output formats
 
 | Output | API / CLI | Notes |
@@ -754,6 +771,13 @@ deliberate scope boundary or a cosmetic, single-fixture polish gap.
   processor and `result.document` is a genuine `docling_core` `DoclingDocument`,
   so its `export_to_markdown()` / `export_to_dict()` / chunkers are docling's
   own code.
+  `docling_rs.langchain` (extra `[langchain]`) ports docling's
+  [langchain-docling](https://github.com/docling-project/docling-langchain):
+  `DoclingLoader` (`ExportType.DOC_CHUNKS` / `MARKDOWN`, pluggable chunker and
+  meta extractor) reproduces that package's own test fixtures exactly, and
+  `PictureDescriptionLangChainOptions` describes pictures with any LangChain
+  chat model (run on the converted document, every input format). URL sources
+  (`convert("https://…")`) download first, as in docling.
 
 ## 7. Testing
 

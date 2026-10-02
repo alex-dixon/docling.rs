@@ -425,6 +425,7 @@ One engine, several front doors. Every surface takes the same options
 | the browser / Tauri / a PWA | `docling.rs-wasm`: `convert(bytes, name, to)` fully client-side, optional in-browser OCR/layout | `npm i docling.rs-wasm` | [In the browser](#in-the-browser--docling-wasm), [crate README](./crates/docling-wasm/README.md) |
 | C, C++, C#/.NET, Go, Java, Swift, Zig, … | `docling-ffi`: `docling_convert(bytes, len, filename, options_json)` behind one `docling.h` | [release archives](https://github.com/docling-project/docling.rs/releases) `docling-ffi-<tag>-<target>` (library + header) | [C ABI](#c-abi-for-embedders--docling-ffi), [language quickstarts](./crates/docling-ffi/README.md#language-quickstarts) |
 | a RAG stack | `docling-rag`: chunk → embed → search, REST API and web UI | `cargo install docling-rag` | [RAG subsystem](#rag-subsystem) |
+| a LangChain pipeline | `docling_rs.langchain.DoclingLoader` — langchain-docling's loader (and picture descriptions) on the Rust engine | `pip install "docling-rs[langchain]"` | [Python bindings](#python-bindings), [examples](./crates/docling-py/examples/langchain/) |
 
 Which one to pick: **Rust** when you're already in Cargo; **CLI** for scripts
 and batch jobs (the ML models load once per run); **serve** when several
@@ -1314,6 +1315,23 @@ API, local build steps, and a step-by-step
 [migration guide from Python docling](./crates/docling-py/README.md#migrating-from-python-docling)
 (swap the install, rewrite the imports, fetch the models — the code below the
 imports stays unchanged).
+
+**LangChain:** `pip install "docling-rs[langchain]"` adds
+`docling_rs.langchain` — the port of docling's
+[langchain-docling](https://github.com/docling-project/docling-langchain)
+(`DoclingLoader`, `ExportType`, picture descriptions with any LangChain chat
+model), reproducing that package's own test expectations exactly:
+
+```python
+# was:  from langchain_docling import DoclingLoader
+from docling_rs.langchain import DoclingLoader
+
+docs = DoclingLoader(file_path=["https://arxiv.org/pdf/2408.09869"]).load()  # chunks + docling metadata
+```
+
+See the [LangChain section](./crates/docling-py/README.md#langchain) and the
+[examples](./crates/docling-py/examples/langchain/) (loader basics, an agentic
+RAG with page citations, picture descriptions).
 
 ## C ABI for embedders — `docling-ffi`
 
