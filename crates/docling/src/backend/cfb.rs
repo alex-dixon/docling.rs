@@ -188,17 +188,26 @@ impl<'a> CompoundFile<'a> {
     /// directory searched, as before, for producers that nest it. `None`
     /// for a missing stream or one over the per-part budget.
     pub(crate) fn stream(&self, name: &str) -> Option<Vec<u8>> {
+        self.stream_by_index(self.find_stream(name)?)
+    }
+
+    /// Whether the directory names this stream — telling a missing stream
+    /// apart from one [`stream`](Self::stream) cannot read (cut off by a
+    /// truncated file, over the part budget) for the error message.
+    pub(crate) fn has_stream(&self, name: &str) -> bool {
+        self.find_stream(name).is_some()
+    }
+
+    fn find_stream(&self, name: &str) -> Option<usize> {
         let is_match = |i: &usize| {
             self.entries
                 .get(*i)
                 .is_some_and(|e| e.object_type == 2 && e.name == name)
         };
-        let idx = self
-            .children_of(None)
+        self.children_of(None)
             .into_iter()
             .find(is_match)
-            .or_else(|| (0..self.entries.len()).find(is_match))?;
-        self.stream_by_index(idx)
+            .or_else(|| (0..self.entries.len()).find(is_match))
     }
 
     /// The entry indices of a storage's children (`None` = the root storage),
@@ -273,6 +282,27 @@ impl<'a> CompoundFile<'a> {
         }
     }
 
+    /// The error for a file [`open`](Self::open) rejected or whose `name`
+    /// stream [`stream`](Self::stream) could not read, prefixed `fmt:` — a
+    /// damaged compound file (the signature is there) reads differently from
+    /// a file of another kind, and a stream the directory names but the
+    /// sectors cannot supply from one that is absent.
+    pub(crate) fn open_error(fmt: &str, data: &[u8]) -> String {
+        if Self::detect(data) {
+            format!("{fmt}: damaged compound file (truncated or corrupt)")
+        } else {
+            format!("{fmt}: not a compound file")
+        }
+    }
+
+    pub(crate) fn stream_error(&self, fmt: &str, name: &str) -> String {
+        if self.has_stream(name) {
+            format!("{fmt}: {name} stream unreadable (file truncated or corrupt)")
+        } else {
+            format!("{fmt}: no {name} stream")
+        }
+    }
+
     /// Names of all stream entries.
     #[cfg(test)]
     pub(crate) fn stream_names(&self) -> impl Iterator<Item = &str> {
@@ -288,8 +318,19 @@ fn sector_offset(n: u32, sector_size: usize) -> usize {
     512 + n as usize * sector_size
 }
 
-/// Follow a FAT chain from `start`, concatenating sectors, truncated to `size`.
-/// Bounded by the FAT length — a cyclic chain terminates instead of spinning.
+/// Follow a FAT chain from `start`, concatenating sectors, truncated to `size`
+/// (`u64::MAX` for the structural chains — directory, mini FAT — which run to
+/// `ENDOFCHAIN`). Bounded by the FAT length — a cyclic chain terminates
+/// instead of spinning.
+///
+/// The file's last sector may be short (#521): pre-97 writers (Word 6.0/95
+/// among them) did not pad the file to a whole sector, against [MS-CFB] 2.3
+/// but common in the wild. Its bytes are read as far as the file goes, as
+/// long as only the unused tail is missing — the stream ends inside them, or
+/// a structural chain ends on that sector (a directory entry cut off by the
+/// end of file is dropped by the 128-byte chunking). A sector that *starts*
+/// past the end of the file, or a short one the chain still needs more bytes
+/// from, is a truncated file ([MS-CFB] 5) and fails as before.
 fn read_chain(
     data: &[u8],
     fat: &[u32],
@@ -306,11 +347,19 @@ fn read_chain(
             return None; // cycle
         }
         let base = sector_offset(sector, sector_size);
-        out.extend_from_slice(data.get(base..base + sector_size)?);
+        if base >= data.len() {
+            return None;
+        }
+        let end = data.len().min(base + sector_size);
+        out.extend_from_slice(&data[base..end]);
         if out.len() as u64 >= size {
             break;
         }
-        sector = *fat.get(sector as usize)?;
+        let next = *fat.get(sector as usize)?;
+        if end - base < sector_size && (next != ENDOFCHAIN || size != u64::MAX) {
+            return None; // the missing bytes were data
+        }
+        sector = next;
     }
     if sector == ENDOFCHAIN || out.len() as u64 >= size {
         out.truncate(out.len().min(size.try_into().unwrap_or(usize::MAX)));
@@ -320,7 +369,11 @@ fn read_chain(
     }
 }
 
-/// Follow a mini-FAT chain through the mini stream (64-byte sectors).
+/// Follow a mini-FAT chain through the mini stream (64-byte sectors). A mini
+/// sector past the mini stream's end fails the read like
+/// [`read_chain`]'s sector past the end of file — notably when the mini
+/// stream itself could not be read (a truncated file, #521), which used to
+/// hand every small stream back empty instead of missing.
 fn read_mini_chain(mini_stream: &[u8], mini_fat: &[u32], start: u32, size: u64) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut sector = start;
@@ -331,7 +384,10 @@ fn read_mini_chain(mini_stream: &[u8], mini_fat: &[u32], start: u32, size: u64) 
             return None; // cycle
         }
         let base = sector as usize * 64;
-        out.extend_from_slice(mini_stream.get(base..(base + 64).min(mini_stream.len()))?);
+        if base >= mini_stream.len() {
+            return None;
+        }
+        out.extend_from_slice(&mini_stream[base..(base + 64).min(mini_stream.len())]);
         if out.len() as u64 >= size {
             break;
         }
@@ -407,6 +463,88 @@ mod tests {
         }
         let cfb = CompoundFile::open(&data).expect("valid CFB");
         assert_eq!(cfb.stream("WordDocument"), clean);
+    }
+
+    /// Every named stream of `cfb` with its bytes, in directory order (a
+    /// directory entry cut off by the end of file is an unused one here).
+    fn all_streams(cfb: &CompoundFile) -> Vec<(String, Option<Vec<u8>>)> {
+        (0..cfb.entries.len())
+            .filter(|&i| cfb.entries[i].object_type == 2)
+            .map(|i| (cfb.entries[i].name.clone(), cfb.stream_by_index(i)))
+            .collect()
+    }
+
+    /// #521: pre-97 writers (Word 6.0/95) leave the file's last sector short.
+    /// Cutting into the unused tail of whichever structure owns that sector
+    /// — the directory, the root's mini stream, a FAT-chained stream — must
+    /// read every stream exactly as the padded file does; one byte further
+    /// cuts into data and must fail, never return a short stream.
+    #[test]
+    fn short_last_sector_reads_like_the_padded_file() {
+        let own = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/doc/sources/");
+        // (fixture, owner of the last sector, bytes of it the owner doesn't
+        // use, a stream that loses data when the cut goes one byte further)
+        for (file, owner, unused, lost) in [
+            ("poi_word95.doc", "directory", 8, None),
+            // The root entry's chain *is* the mini stream: every stream under
+            // 4096 bytes lives in it.
+            (
+                "poi_word6_sections2.doc",
+                "mini stream",
+                128,
+                Some("\u{1}CompObj"),
+            ),
+            (
+                "embedded_word_object.doc",
+                "WordDocument",
+                443,
+                Some("WordDocument"),
+            ),
+        ] {
+            let data = std::fs::read(format!("{own}{file}")).unwrap();
+            let padded = CompoundFile::open(&data).expect("valid CFB");
+            let want = all_streams(&padded);
+            for cut in [1, 8, unused] {
+                let short = &data[..data.len() - cut];
+                let cfb = CompoundFile::open(short)
+                    .unwrap_or_else(|| panic!("{file} ({owner}) cut by {cut}: open failed"));
+                assert!(
+                    all_streams(&cfb) == want,
+                    "{file} ({owner}) cut by {cut}: streams differ"
+                );
+            }
+            if let Some(lost) = lost {
+                let short = &data[..data.len() - unused - 1];
+                let cfb = CompoundFile::open(short).expect("directory intact");
+                assert!(cfb.stream(lost).is_none(), "{file}: {lost} lost data");
+                assert_eq!(
+                    cfb.stream_error("doc", lost),
+                    format!("doc: {lost} stream unreadable (file truncated or corrupt)")
+                );
+            }
+        }
+    }
+
+    /// A chain sector that starts past the end of the file is a truncated
+    /// file, not a short final sector ([MS-CFB] 5).
+    #[test]
+    fn sector_past_the_end_of_file_is_rejected() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/doc/sources/poi_word95.doc"
+        ))
+        .unwrap();
+        // The directory chain is sectors 197, 198 — the last two.
+        let short = &data[..data.len() - 512];
+        assert!(CompoundFile::open(short).is_none());
+        assert_eq!(
+            CompoundFile::open_error("doc", short),
+            "doc: damaged compound file (truncated or corrupt)"
+        );
+        assert_eq!(
+            CompoundFile::open_error("doc", b"PK\x03\x04"),
+            "doc: not a compound file"
+        );
     }
 
     #[test]
