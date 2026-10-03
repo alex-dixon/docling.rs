@@ -1600,6 +1600,12 @@ let converter = DocumentConverter::new()
   (EfficientNet, 26 figure classes: `bar_chart`, `logo`, `signature`, …). The
   full prediction distribution lands on the JSON picture item as docling's
   `classification` annotation + `meta.classification`; Markdown is unchanged.
+  On an ONNX Runtime older than 1.29 (the linked builds carry 1.28) its
+  session stops at the `EXTENDED` optimization level (#517): those
+  runtimes' x86 NCHWc rewrite turns this graph into one that returns the
+  same distribution for every picture (`table` 0.091 first). That costs
+  ~5 ms per picture; a 1.29+ library (`ort-load-dynamic`) runs fully
+  optimized.
 * **Code enrichment** — `docling-project/CodeFormulaV2` (an Idefics3/SmolVLM-
   class VLM exported to ONNX by `scripts/install/export_code_formula.py`, its
   greedy decode verified token-identical to `transformers.generate`). Rewrites
@@ -1839,8 +1845,9 @@ and enrichment warn and skip, DOCX/HTML/XLSX/… and `docling-rs --to md` on a
 DOCX never touch it.
 
 **The s390x runtime itself** ships in the models release as
-`onnxruntime-linux-s390x.tar.gz`: ONNX Runtime 1.28.0 (the version behind
-`ort`'s prebuilt binaries) cross-compiled from source by
+`onnxruntime-linux-s390x.tar.gz`: ONNX Runtime 1.29.0 (the first release
+without the picture-classifier bug of #517 — pyke's linked x86_64/aarch64
+builds stay on 1.28 until `ort` ships a newer one) cross-compiled from source by
 `.github/workflows/onnxruntime-s390x.yml` with
 `scripts/install/build_onnxruntime_s390x.sh` — zig as the compiler
 (`zig cc -target s390x-linux-gnu.2.28 -mcpu=z15`: a glibc 2.28 floor and

@@ -109,3 +109,46 @@ fn heif_without_feature_reports_clearly() {
     #[cfg(feature = "heif")]
     assert!(msg.contains("heif"), "unexpected error: {msg}");
 }
+
+/// #517: ONNX Runtime 1.26–1.28's x86 NCHWc rewrite collapsed the picture
+/// classifier onto one distribution for every input (`table` 0.091 first).
+/// Three unambiguous figures from the corpus must each win their own class
+/// clearly (ONNX Runtime 1.29 gives them 0.985–0.999; the bar is 0.9).
+#[test]
+fn picture_classifier_tells_pictures_apart() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let model = root.join(".models/picture_classifier.onnx");
+    if !model.exists() {
+        eprintln!(
+            "skipping picture-classifier check: {} not found",
+            model.display()
+        );
+        return;
+    }
+    std::env::set_var("DOCLING_PICTURE_CLASSIFIER_ONNX", &model);
+    let mut classifier =
+        docling_pdf::enrich::PictureClassifier::load_with(1).expect("classifier loads");
+    for (file, class) in [
+        (
+            "latex/sources/2310.06825/images/230927_bars.png",
+            "bar_chart",
+        ),
+        (
+            "latex/sources/1706.03762/Figures/ModalNet-21.png",
+            "flow_chart",
+        ),
+        ("scanned/sources/qr_bill_example.jpg", "qr_code"),
+    ] {
+        let img = image::open(root.join("tests/data").join(file))
+            .expect("fixture image")
+            .to_rgb8();
+        let preds = classifier.classify(&img).expect("classify");
+        let top = &preds[0];
+        assert!(
+            top.class_name == class && top.confidence > 0.9,
+            "{file}: expected {class}, got {} {:.3}",
+            top.class_name,
+            top.confidence
+        );
+    }
+}

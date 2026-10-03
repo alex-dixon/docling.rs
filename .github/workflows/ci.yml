@@ -110,9 +110,21 @@ jobs:
           key: ${{ runner.os }}-cargo-v2-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-test-
 
+      # The one model this job fetches (17 MB): the picture classifier, so
+      # docling-pdf's `picture_classifier_tells_pictures_apart` runs on an
+      # x86_64 runner — #517 was an x86 NCHWc miscompile in ONNX Runtime
+      # 1.26–1.28 that returned one distribution for every picture. A failed
+      # download only skips that test.
+      - name: Fetch the picture classifier
+        run: |
+          mkdir -p .models
+          curl -fsSL --retry 3 -o .models/picture_classifier.onnx \
+            https://github.com/docling-project/docling.rs/releases/download/models-v1/picture_classifier.onnx \
+            || { rm -f .models/picture_classifier.onnx; echo "::warning::picture classifier download failed; its test skips"; }
+
       # Pure-Rust unit tests + the output-regression suite. The PDF/image/METS
-      # snapshot tests need the ONNX models, so they are NOT run here —
-      # this job downloads no ML models and stays fast. --locked doubles as the
+      # snapshot tests need the layout/OCR/TableFormer models, so they are NOT
+      # run here — this job stays fast. --locked doubles as the
       # guard that keeps the committed Cargo.lock in sync with the manifests
       # (a Cargo.toml change without its lock update fails here).
       - name: Test

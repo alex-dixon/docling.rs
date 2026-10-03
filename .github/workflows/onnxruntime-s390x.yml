@@ -21,8 +21,8 @@
 # Trigger: manual. Re-running with the same tag clobbers the asset;
 # publish-models.yml's prune step leaves it alone.
 #
-#   gh workflow run onnxruntime-s390x.yml                    # tag = models-v1, ORT v1.28.0
-#   gh workflow run onnxruntime-s390x.yml -f ort_tag=v1.29.0
+#   gh workflow run onnxruntime-s390x.yml                    # tag = models-v1, ORT v1.29.0
+#   gh workflow run onnxruntime-s390x.yml -f ort_tag=v1.30.0
 
 name: ONNX Runtime s390x
 
@@ -34,9 +34,9 @@ on:
         required: false
         default: "models-v1"
       ort_tag:
-        description: "ONNX Runtime tag to build (default: the version behind ort's prebuilt binaries)."
+        description: "ONNX Runtime tag to build (default: 1.29.0, the first without the #517 classifier bug)."
         required: false
-        default: "v1.28.0"
+        default: "v1.29.0"
       publish:
         description: "Upload into the release (off = build + smoke test only)."
         type: boolean

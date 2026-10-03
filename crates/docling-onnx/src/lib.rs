@@ -471,6 +471,82 @@ pub fn creation_guard() -> Option<MutexGuard<'static, ()>> {
     Some(CREATION.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
+/// The ONNX Runtime library's own `(major, minor)` version — its
+/// `OrtApiBase::GetVersionString`, read once. The statically linked runtime
+/// answers through its entry point; a `load-dynamic` build (#504) asks the
+/// library [`runtime_library`] loaded, whatever the machine provided. `None`
+/// when that library is unavailable or the string does not parse. (The
+/// build-info string is no substitute: Microsoft's release builds report
+/// `git-branch=HEAD`, pyke's `rel-1.28.0`.)
+pub fn runtime_version() -> Option<(u32, u32)> {
+    static VERSION: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *VERSION.get_or_init(|| parse_version(&version_string()?))
+}
+
+#[cfg(not(feature = "load-dynamic"))]
+fn version_string() -> Option<String> {
+    // SAFETY: the linked runtime's C entry point; it returns a pointer to a
+    // static table whose `GetVersionString` yields a static C string.
+    unsafe { read_version(ort::sys::OrtGetApiBase()) }
+}
+
+#[cfg(feature = "load-dynamic")]
+fn version_string() -> Option<String> {
+    let path = runtime_library().ok()?;
+    // SAFETY: `runtime_library` already opened this library through `ort`;
+    // reopening it only bumps the loader's reference count, and the symbol
+    // is ONNX Runtime's documented C entry point.
+    unsafe {
+        let lib = libloading::Library::new(path).ok()?;
+        let base: libloading::Symbol<unsafe extern "C" fn() -> *const ort::sys::OrtApiBase> =
+            lib.get(b"OrtGetApiBase").ok()?;
+        read_version(base())
+    }
+}
+
+/// # Safety
+/// `base` is null or ONNX Runtime's `OrtApiBase`.
+unsafe fn read_version(base: *const ort::sys::OrtApiBase) -> Option<String> {
+    if base.is_null() {
+        return None;
+    }
+    let s = ((*base).GetVersionString)();
+    (!s.is_null()).then(|| std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned())
+}
+
+/// `"1.28.0"` → `(1, 28)`.
+fn parse_version(s: &str) -> Option<(u32, u32)> {
+    let mut parts = s.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Cap `builder` below the layout-level graph optimizations when the runtime
+/// predates ONNX Runtime 1.29 (#517): on x86-64 with AVX2/AVX-512, 1.26–1.28's
+/// `NchwcTransformer` rewrites the picture classifier into a graph that
+/// returns the same logits for every input — every picture came out `table`
+/// 0.091 / `logo` 0.085 / `icon` 0.078. Disabling that one transformer, or
+/// `EXTENDED` (Level2), restores the reference output exactly; 1.29 fixed it
+/// at every level. The cost is the NCHWc speed-up, ~5 ms per picture. An
+/// unknown version is treated as affected — the capped graph is correct on
+/// every runtime, the uncapped one is not. Only the classifier opts in: the
+/// layout, TableFormer and OCR graphs are pinned by the conformance
+/// snapshots at the full level.
+pub fn cap_before_1_29(builder: SessionBuilder) -> Result<SessionBuilder, String> {
+    let version = runtime_version();
+    if version.is_some_and(|v| v >= (1, 29)) {
+        return Ok(builder);
+    }
+    docling_core::debug_log!(
+        "docling-onnx: ONNX Runtime {version:?} predates 1.29 — graph optimization capped at \
+         EXTENDED (#517)"
+    );
+    builder
+        .with_optimization_level(GraphOptimizationLevel::Level2)
+        .map_err(|e| e.to_string())
+}
+
 /// Create the session for `model_path` the plain way (no graph cache) under
 /// the [`creation_guard`] — for the models whose graph is not worth caching
 /// (enrichment, Whisper, the embedder) but which must still serialize their
@@ -749,6 +825,27 @@ mod tests {
         // would turn every later model load into a hang.
         let g = creation_guard();
         assert_eq!(g.is_some(), dispatches().is_some());
+    }
+
+    #[test]
+    fn version_strings_parse() {
+        assert_eq!(parse_version("1.28.0"), Some((1, 28)));
+        assert_eq!(parse_version(" 1.30.1\n"), Some((1, 30)));
+        assert_eq!(parse_version("1"), None);
+        assert_eq!(parse_version("dev"), None);
+    }
+
+    /// The linked runtime reports a version, and it is one `ort` accepts.
+    #[test]
+    #[cfg(not(feature = "load-dynamic"))]
+    fn linked_runtime_reports_its_version() {
+        let (major, minor) = runtime_version().expect("version string");
+        assert_eq!(major, 1);
+        assert!(
+            minor >= ort::MINOR_VERSION,
+            "1.{minor} < 1.{}",
+            ort::MINOR_VERSION
+        );
     }
 
     #[test]
