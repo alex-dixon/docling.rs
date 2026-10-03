@@ -76,6 +76,13 @@ async function main() {
     assert.ok(Array.isArray(doc.texts))
   })
 
+  await check('convert (bytes) → Pandoc AST for pandoc -f json', () => {
+    const res = convert({ name: 'doc', data: Buffer.from(MD), format: 'md' }, { to: 'pandoc' })
+    const ast = JSON.parse(res.content)
+    assert.deepEqual(ast['pandoc-api-version'], [1, 23, 1, 1])
+    assert.equal(ast.blocks[0].t, 'Header')
+  })
+
   await check('format inferred from name when omitted', () => {
     const res = convert({ name: 'notes.md', data: Buffer.from(MD) })
     assert.equal(res.format, 'md')

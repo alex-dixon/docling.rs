@@ -74,7 +74,7 @@
   </nav>
 </header>
 <main>
-<p class="sub">Convert documents to Markdown, docling JSON, DocLang archives, LaTeX, or chunk records —
+<p class="sub">Convert documents to Markdown, docling JSON, DocLang archives, LaTeX, HTML, Pandoc AST, or chunk records —
 over <a href="https://github.com/docling-project/docling.rs">docling.rs</a>, on this server.
 The API is described by <a href="/openapi.yaml"><code>/openapi.yaml</code></a> (OpenAPI 3.1).</p>
 
@@ -100,6 +100,7 @@ The API is described by <a href="/openapi.yaml"><code>/openapi.yaml</code></a> (
         <option value="dclx">DocLang archive (.dclx)</option>
         <option value="latex">LaTeX (.tex)</option>
         <option value="html">HTML (.html)</option>
+        <option value="pandoc">Pandoc AST (JSON, for pandoc -f json)</option>
         <option value="images">page images (PDF → PNG)</option>
       </select>
     </label>
@@ -191,8 +192,9 @@ The API is described by <a href="/openapi.yaml"><code>/openapi.yaml</code></a> (
 <p>As query parameters, multipart text fields, or JSON keys (body wins over query):</p>
 <table>
   <tr><th>Option</th><th>Values</th><th>Description</th></tr>
-  <tr><td><code>to</code></td><td><code>md</code> (default) | <code>json</code> | <code>html</code> | <code>dclx</code> | <code>chunks</code> | <code>latex</code> | <code>images</code></td>
-      <td>Markdown (streamed) · docling <code>DoclingDocument</code> JSON · DocLang OPC archive (download) · chunker records (hierarchical + hybrid when a tokenizer is installed) · per-page PNG renders of a PDF (no conversion; combines with <code>pages</code>, capped at 100 pages per request by default).</td></tr>
+  <tr><td><code>to</code></td><td><code>md</code> (default) | <code>json</code> | <code>html</code> | <code>dclx</code> | <code>chunks</code> | <code>latex</code> | <code>pandoc</code> | <code>images</code></td>
+      <td>Markdown (streamed) · docling <code>DoclingDocument</code> JSON · HTML page · DocLang OPC archive (download) · LaTeX document · Pandoc's AST as JSON (pipe it into <code>pandoc -f json -t docx</code>, odt, rst, typst, …; pictures per <code>images</code>) · chunker records (hierarchical + hybrid when a tokenizer is installed) · per-page PNG renders of a PDF (no conversion; combines with <code>pages</code>, capped at 100 pages per request by default).</td></tr>
+  <tr><td><code>pandoc_api_version</code></td><td><code>1.23</code></td><td><code>to=pandoc</code>: the Pandoc API your <code>pandoc</code> reads. Only 1.23 (Pandoc 3.x) is written; another version is a 400 instead of a document Pandoc would reject.</td></tr>
   <tr><td><code>strict</code></td><td><code>true</code>/<code>false</code></td><td>Cleaner strict Markdown dialect instead of byte-for-byte docling-legacy output.</td></tr>
   <tr><td><code>images</code></td><td><code>placeholder</code> (default) | <code>embedded</code></td><td>Markdown picture handling (embedded = base64 data URIs).</td></tr>
   <tr><td><code>no_ocr</code></td><td><code>true</code>/<code>false</code></td><td>PDF/image: skip layout/OCR/TableFormer entirely; emit the embedded text layer only.</td></tr>
@@ -275,7 +277,7 @@ for (const radio of document.querySelectorAll('input[name=mode]')) {
     }
   } catch { /* config endpoint unavailable — leave the UI as-is */ }
 })();
-// Pull embedded pictures (data URIs) out of the Markdown / docling JSON,
+// Pull embedded pictures (data URIs) out of the Markdown / docling JSON / Pandoc AST,
 // show them as a gallery under the text, and shorten the base64 blobs in
 // the text panel so it stays readable. Markdown embeds only with the
 // "embed images" box checked (images=embedded); JSON always embeds.
@@ -310,7 +312,7 @@ function findDataImageSpans(text) {
 }
 
 function renderImages(text, to) {
-  if (to !== 'md' && to !== 'json') return;
+  if (to !== 'md' && to !== 'json' && to !== 'pandoc') return;
   const spans = findDataImageSpans(text);
   if (!spans.length) return;
   const gallery = $('gallery');

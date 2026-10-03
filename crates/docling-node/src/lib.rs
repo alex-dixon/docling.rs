@@ -175,9 +175,10 @@ pub struct ConverterOptions {
 #[derive(Clone, Default)]
 pub struct OutputOptions {
     /// `"markdown"` (default), `"json"` (docling-core DoclingDocument wire
-    /// format), `"latex"` (a complete LaTeX document, #317) or `"html"` (a
+    /// format), `"latex"` (a complete LaTeX document, #317), `"html"` (a
     /// complete HTML document, docling-core's `HTMLDocSerializer`, #492 —
-    /// pictures follow `imageMode` like Markdown).
+    /// pictures follow `imageMode` like Markdown) or `"pandoc"` (Pandoc's
+    /// JSON AST for `pandoc -f json`, #515 — pictures follow `imageMode`).
     pub to: Option<String>,
     /// Picture handling for Markdown: `"placeholder"` (default), `"embedded"`
     /// (base64 data URIs inline), or `"referenced"` (returns image files in
@@ -401,6 +402,9 @@ enum OutputKind {
     /// A complete HTML document (docling-core's `HTMLDocSerializer`, #492);
     /// pictures follow `imageMode` like the Markdown export.
     Html,
+    /// Pandoc's JSON AST (#515), for `pandoc -f json`; pictures follow
+    /// `imageMode` like the Markdown export.
+    Pandoc,
 }
 
 /// A Send-safe conversion result (raw bytes, no `Buffer`), so it can be produced
@@ -720,6 +724,14 @@ fn render_doc(
             ImageMode::Placeholder => (doc.export_to_html(), Vec::new()),
             mode => doc.export_to_html_with_images(mode, &cfg.artifacts_dir),
         },
+        OutputKind::Pandoc => doc
+            .export_to_pandoc_json_with(&docling::pandoc::PandocExportOptions {
+                image_mode: cfg.image_mode,
+                artifacts_dir: cfg.artifacts_dir.clone(),
+                ..Default::default()
+            })
+            // Only an explicit `api_version` can fail, and none is set.
+            .expect("Pandoc export at the default API version"),
         OutputKind::Markdown => match cfg.image_mode {
             ImageMode::Placeholder => (doc.export_to_markdown(), Vec::new()),
             mode => doc.export_to_markdown_with_images(mode, &cfg.artifacts_dir),
@@ -2038,9 +2050,10 @@ fn parse_output_kind(to: Option<&str>) -> Result<OutputKind> {
         Some("json") => Ok(OutputKind::Json),
         Some("latex") => Ok(OutputKind::Latex),
         Some("html") => Ok(OutputKind::Html),
+        Some("pandoc") => Ok(OutputKind::Pandoc),
         Some(other) => Err(Error::new(
             Status::InvalidArg,
-            format!("unknown `to` '{other}' (expected: markdown, json, html, latex)"),
+            format!("unknown `to` '{other}' (expected: markdown, json, html, latex, pandoc)"),
         )),
     }
 }

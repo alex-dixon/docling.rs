@@ -41,7 +41,8 @@ use serde::Deserialize;
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Options {
-    /// Output format: `md` (default) | `json` | `dclx` | `latex` | `html`.
+    /// Output format: `md` (default) | `json` | `dclx` | `latex` | `html` |
+    /// `pandoc` (Pandoc's JSON AST, #515).
     to: Option<String>,
     /// Strict (docling-faithful) Markdown instead of the readable default.
     strict: Option<bool>,
@@ -197,8 +198,16 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
         "dclx" => Ok(docling::dclx::to_dclx_bytes(&document)),
         "latex" => Ok(document.export_to_latex().into_bytes()),
         "html" => Ok(document.export_to_html().into_bytes()),
+        // #515: pictures follow `images` like Markdown.
+        "pandoc" => document
+            .export_to_pandoc_json_with(&docling::pandoc::PandocExportOptions {
+                image_mode,
+                ..Default::default()
+            })
+            .map(|(json, _)| json.into_bytes())
+            .map_err(|e| e.to_string()),
         other => Err(format!(
-            "unknown to={other:?} (expected: md, json, dclx, latex, html)"
+            "unknown to={other:?} (expected: md, json, dclx, latex, html, pandoc)"
         )),
     }
 }
@@ -269,7 +278,8 @@ pub unsafe extern "C" fn docling_convert(
 }
 
 /// The converted output, or NULL when the conversion failed. NUL-terminated
-/// (readable as a C string for `to` = `md` / `json` / `latex`); for binary output
+/// (readable as a C string for `to` = `md` / `json` / `latex` / `html` /
+/// `pandoc`); for binary output
 /// (`dclx`) pair it with [`docling_result_output_len`]. Owned by the result —
 /// valid until [`docling_result_free`].
 ///
@@ -394,6 +404,13 @@ mod tests {
         let tex = output_string(r);
         assert!(tex.starts_with("\\documentclass"), "{tex}");
         assert!(tex.ends_with("\\end{document}"), "{tex}");
+        unsafe { docling_result_free(r) };
+        let r = convert(md, "note.md", r#"{"to":"pandoc"}"#);
+        let ast = output_string(r);
+        assert!(
+            ast.starts_with("{\"pandoc-api-version\":[1,23,1,1]"),
+            "{ast}"
+        );
         unsafe { docling_result_free(r) };
         let r = convert(md, "note.md", r#"{"to":"dclx"}"#);
         unsafe {

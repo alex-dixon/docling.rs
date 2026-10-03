@@ -46,7 +46,7 @@ mapping, and per-format conformance.
 
 **▶ [Try it in your browser](https://docling-project.github.io/docling.rs/)** —
 the whole converter compiled to wasm: drop a DOCX, PDF, XLSX, EPUB … and get
-Markdown, docling JSON, DocLang XML or LaTeX back. Nothing is uploaded; the page runs
+Markdown, docling JSON, DocLang XML, LaTeX or a Pandoc AST back. Nothing is uploaded; the page runs
 entirely on your device, phone included. Scanned pages can be OCR'd there too
 (layout + PP-OCR + TableFormer via ONNX Runtime Web) once you point it at the
 models. See [`crates/docling-wasm`](./crates/docling-wasm/README.md).
@@ -58,7 +58,7 @@ Developed with **Claude Code** and _[TENET](https://github.com/artiz/tenet/tree/
 The public API works end to end across **Markdown, CSV, HTML, AsciiDoc, DOCX,
 PPTX, XLSX, legacy DOC/XLS/PPT, Apple iWork, EPUB, ODF, RTF, WebVTT, Email, MHTML, JATS, USPTO,
 XBRL, LaTeX, JSON, PDF, images, METS, audio and video** — with Markdown, docling-JSON,
-DocLang `.dclx`, LaTeX and chunk output, plus image extraction. The full extension map (`InputFormat::from_extension`, mirroring
+DocLang `.dclx`, LaTeX, HTML, Pandoc AST and chunk output, plus image extraction. The full extension map (`InputFormat::from_extension`, mirroring
 docling's `FormatToExtensions`):
 
 | Category | Extensions |
@@ -311,7 +311,7 @@ honoring `pages=A-B` and a `scale` of 0.1–4.0 pixels per PDF point (default
 2.0 = 144 dpi). Capped at 100 pages per request
 (`DOCLING_RS_MAX_RASTER_PAGES`); narrow big documents with `pages`.
 
-Options per request: `to=md|json|html|dclx|chunks|latex|images`, `strict`, `images=placeholder|embedded`,
+Options per request: `to=md|json|html|dclx|chunks|latex|pandoc|images` (`pandoc_api_version` checks the Pandoc API a `to=pandoc` caller expects), `strict`, `images=placeholder|embedded`,
 `skip_empty_cells`, `compact_tables`, `md_page_break_placeholder` (text between pages in Markdown),
 `no_ocr`, `skip_ocr`, `no_table_former`, `no_text_panels`, `heading_hierarchy`, `force_full_page_ocr`, `pages`,
 `do_picture_classification`, `do_code_enrichment`, `do_formula_enrichment` (#423: the
@@ -385,7 +385,7 @@ env var the feature is inert.
 The declarative converters (everything except the PDF/image/audio ML
 pipelines) compile to `wasm32-unknown-unknown`:
 [`crates/docling-wasm`](./crates/docling-wasm) exposes
-`convert(bytes, filename, to)` → Markdown / docling JSON / DocLang / LaTeX via
+`convert(bytes, filename, to)` → Markdown / docling JSON / DocLang / LaTeX / HTML / Pandoc AST via
 `wasm-bindgen`, so DOCX/HTML/XLSX/PPTX/EPUB/… convert **fully client-side** —
 no server, ~3.4 MB gzipped module, no models to download for the declarative
 formats (the default-on browser-OCR feature does fetch its ONNX models) —
@@ -413,12 +413,12 @@ feature slices behind this (`pdf` / `asr` / `fetch-images`) all stay in the
 One engine, several front doors. Every surface takes the same options
 (`to`, `strict`, `images`, `no_ocr`, `ocr_mode`, `heading_hierarchy`,
 `pages`, …) and returns the same outputs (Markdown, docling JSON, DocLang
-`.dclx`, LaTeX, chunk records).
+`.dclx`, LaTeX, HTML, Pandoc AST, chunk records).
 
 | You write… | Use | Install | Details |
 |---|---|---|---|
 | Rust | the `docling` crate: `DocumentConverter` + `SourceDocument` | `cargo add docling` | [The API](#the-api) |
-| a shell / CI job | the `docling-rs` CLI (`--to md\|json\|html\|dclx\|chunks\|latex\|images`, `--input`/`--output` batch mode) | `cargo install docling-cli` · [release binaries](https://github.com/docling-project/docling.rs/releases) · `ghcr.io/docling-project/docling-rs` | [Batch conversion](#batch-conversion--input----output), [Install](#install-locally--in-ci-one-liner) |
+| a shell / CI job | the `docling-rs` CLI (`--to md\|json\|html\|dclx\|chunks\|latex\|pandoc\|images`, `--input`/`--output` batch mode) | `cargo install docling-cli` · [release binaries](https://github.com/docling-project/docling.rs/releases) · `ghcr.io/docling-project/docling-rs` | [Batch conversion](#batch-conversion--input----output), [Install](#install-locally--in-ci-one-liner) |
 | anything that speaks HTTP | `docling-serve`: `POST /v1/convert` (multipart or JSON), async jobs, OpenAPI 3.1 | `docker run -p 5001:5001 ghcr.io/docling-project/docling-rs-serve` · `cargo install docling-serve` | [HTTP conversion API](#http-conversion-api--docling-rs-serve), [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) |
 | Node.js / Bun / Electron | `docling.rs` (N-API addon): `convertFile`, `convert`, streaming, chunking, warm `Pipeline` | `npm i docling.rs` (`docling.rs-cuda` for GPU) | [Node bindings](#nodejs--bun-bindings), [crate README](./crates/docling-node/README.md) |
 | Python | `docling-rs` — a drop-in for docling's `DocumentConverter` over the Rust engine | `pip install docling-rs` (`docling-rs-cuda` for GPU) | [Python bindings](#python-bindings), [migration guide](./crates/docling-py/README.md#migrating-from-python-docling) |
@@ -702,6 +702,65 @@ DocLang also reads back **in**: `.dclg`/`.dclg.xml` (bare DocLang XML) and
 `convert(SourceDocument::from_file("doc.dclx")?)` — scored byte-for-byte
 against live docling reading the same archives (15/15 exact,
 `tests/data/doclang`).
+
+### Pandoc AST (`--to pandoc`) output
+
+`export_to_pandoc_json()` writes the document as Pandoc's JSON AST (#515) —
+the serialization of Pandoc's own `Pandoc` type that `pandoc -f json` reads —
+so every Pandoc writer (DOCX, ODT, EPUB, reStructuredText, Org, Typst,
+AsciiDoc, JATS, …) sits behind docling.rs's parsing, PDF layout analysis
+included:
+
+```bash
+docling-rs paper.pdf --to pandoc | pandoc -f json -t docx -o paper.docx
+docling-rs paper.pdf --to pandoc --images embedded | pandoc -f json -t epub -o paper.epub
+```
+
+It is built from the same docling-JSON structure the HTML and LaTeX exports
+walk, mapped to Pandoc's constructors:
+
+| docling | Pandoc |
+|---|---|
+| `title` / `section_header` (level *n*) | `Header 1` / `Header (n+1)` (capped at 6) |
+| `text`, `paragraph`, `inline` groups | `Para` of `Str`/`Space` runs (`Plain` inside lists and cells) |
+| bold / italic / underline / strikethrough / sub / superscript, hyperlinks | `Strong` / `Emph` / `Underline` / `Strikeout` / `Subscript` / `Superscript`, `Link` |
+| `list` groups | `BulletList` / `OrderedList` (start from the first marker), nested lists inside their item |
+| `code` | `CodeBlock` with the language as class (`Code` inline) |
+| `formula` | `Math DisplayMath` (`InlineMath` inside a paragraph) |
+| `checkbox_selected` / `_unselected` | `☒` / `☐` + the text — Pandoc's task-list convention |
+| `table` | `Table`: leading all-header rows as `TableHead`, `rowspan`/`colspan`, rich cells as blocks, captions |
+| `picture` | `Figure` with the `Image` per `--images` (`embedded` → `data:` URI, `referenced` → `<stem>_artifacts/` files), caption, a chart's data as a `Table`; a caption-less placeholder is docling's `<!-- image -->` as raw HTML |
+| table / picture footnotes | `Note` in the caption |
+| key-value graphs, form field regions | `Div .key-value-region` / `.form-container` / `.field-region` holding a `DefinitionList` |
+| any other label (`page_header`, `reference`, `handwritten_text`, …) | `Div .docling-<label>` |
+
+Not mapped, because Pandoc has no place for it: page provenance and bounding
+boxes, confidence / classification meta, form field geometry, comment
+authorship; furniture and notes stay out like in the HTML export. The output
+is stamped `pandoc-api-version` **1.23.1.1** (`pandoc-types` for Pandoc 3.x;
+`docling_core::pandoc::PANDOC_API_VERSION`) — the only version written.
+`--pandoc-api-version V` (serve `pandoc_api_version`, the library's
+`PandocExportOptions::api_version`) states the version a consumer needs;
+anything Pandoc would not read as 1.23 fails with `unsupported Pandoc API
+version '…'` instead of producing a document Pandoc rejects. Every
+convertible declarative fixture (305) and the PDF corpus pass `pandoc -f json
+-t native`; `crates/docling/tests/pandoc.rs` pins 13 documents both as JSON
+and as Pandoc's `native` reading of it.
+
+```rust
+println!("{}", result.document.export_to_pandoc_json()); // {"pandoc-api-version":[1,23,1,1],…}
+```
+
+The CLI's batch mode writes `<stem>.pandoc.json`, serve answers `to=pandoc`
+as `application/json` (inline under `pandoc` in a batch), the Node bindings
+take `to: 'pandoc'`, the FFI `"to":"pandoc"`, wasm and the browser demo
+`"pandoc"`; Python runs the same serializer on any `DoclingDocument`:
+
+```python
+from docling_rs.pandoc import export_to_pandoc, save_as_pandoc
+ast = export_to_pandoc(result.document)              # str
+save_as_pandoc(result.document, "paper.pandoc.json", image_mode="referenced")
+```
 
 ### Chunking (docling's Hierarchical & Hybrid chunkers)
 
@@ -1222,7 +1281,7 @@ stdout carries one document.
 The PDF/image ML pipeline loads its models **once** and every matched file
 reuses the warm sessions — the same amortization `docling-rs serve` does
 across requests, without running a server. Extensions follow `--to` (`.md`,
-`.json`, `.dclx`, `.chunks.json`, `.tex`), `--images referenced` writes each
+`.json`, `.dclx`, `.chunks.json`, `.tex`, `.pandoc.json`), `--images referenced` writes each
 document's pictures into a sibling `<stem>_artifacts/` directory, and every
 other flag (`--strict`, `--pages`, `--ocr-lang`, `--pipeline vlm`, enrichment,
 …) applies to the whole batch. `--jobs N` converts declarative formats in
@@ -1338,7 +1397,7 @@ RAG with page citations, picture descriptions).
 Embedding from C, C++, C#, Go, Java, Swift or anything else with FFI takes
 one shared (or static) library and one header:
 [`crates/docling-ffi`](./crates/docling-ffi) exposes a minimal `extern "C"`
-surface — `docling_convert()` in, Markdown / docling JSON / DCLX / LaTeX out, with
+surface — `docling_convert()` in, Markdown / docling JSON / DCLX / LaTeX / HTML / Pandoc AST out, with
 conversion options as a single JSON object mirroring docling-serve's request
 options. The [`include/docling.h`](./crates/docling-ffi/include/docling.h)
 header is generated by cbindgen and committed.

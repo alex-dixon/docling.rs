@@ -1131,6 +1131,27 @@ impl DoclingDocument {
         crate::latex::to_latex(self)
     }
 
+    /// Serialize to Pandoc's AST as JSON (`pandoc -f json`, #515) with the
+    /// default options: pictures as captioned figures without image data,
+    /// body layer only, the [`PANDOC_API_VERSION`](crate::pandoc::PANDOC_API_VERSION)
+    /// API. One line, no trailing newline. See [`crate::pandoc`].
+    pub fn export_to_pandoc_json(&self) -> String {
+        crate::pandoc::to_pandoc(self, &crate::pandoc::PandocExportOptions::default())
+            .expect("the default Pandoc API version is always supported")
+            .0
+    }
+
+    /// Pandoc JSON per `options` (image mode, artifacts directory, content
+    /// layers, required API version). Returns the JSON and, for
+    /// [`ImageMode::Referenced`], the `(path, bytes)` image files; an
+    /// unsupported `api_version` is an error.
+    pub fn export_to_pandoc_json_with(
+        &self,
+        options: &crate::pandoc::PandocExportOptions,
+    ) -> Result<crate::pandoc::PandocOutput, crate::pandoc::PandocError> {
+        crate::pandoc::to_pandoc(self, options)
+    }
+
     /// Serialize to DocLang XML (`<doclang version="0.7">…`), the markup that
     /// lives inside a `.dclx` archive — the Rust counterpart of docling-core's
     /// `export_to_doclang()` with default parameters. No trailing newline; the

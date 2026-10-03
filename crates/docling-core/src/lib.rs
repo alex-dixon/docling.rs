@@ -24,6 +24,7 @@ mod labels;
 mod latex;
 mod markdown;
 mod mathml;
+pub mod pandoc;
 pub mod tree;
 
 pub use confidence::{ConfidenceReport, PageConfidence, QualityGrade};

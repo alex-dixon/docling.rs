@@ -569,3 +569,32 @@ fn to_html_writes_a_complete_document() {
     let written = std::fs::read_to_string(out.0.join("duck.html")).unwrap();
     assert_eq!(written.trim_end(), stdout.trim_end());
 }
+
+/// `--to pandoc` (#515): Pandoc's JSON AST on stdout, `<stem>.pandoc.json`
+/// in batch mode; `--pandoc-api-version` other than 1.23 is a usage error
+/// named before anything converts.
+#[test]
+fn to_pandoc_writes_the_ast_and_checks_the_api_version() {
+    let src = format!("{MD_FIXTURES}/duck.md");
+    let (code, stdout, stderr) = run(&["--to", "pandoc", &src]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.starts_with("{\"pandoc-api-version\":[1,23,1,1],\"meta\":{},\"blocks\":["),
+        "{stdout}"
+    );
+
+    let out = Scratch::new("to-pandoc");
+    let (code, _, stderr) = run(&["--to", "pandoc", "--output", &out.path(""), &src]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let written = std::fs::read_to_string(out.0.join("duck.pandoc.json")).unwrap();
+    assert_eq!(written.trim_end(), stdout.trim_end());
+
+    let (code, _, stderr) = run(&["--to", "pandoc", "--pandoc-api-version", "1.23", &src]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (code, stdout, stderr) = run(&["--to", "pandoc", "--pandoc-api-version", "1.22", &src]);
+    assert_eq!(code, 2, "stdout: {stdout}");
+    assert!(
+        stderr.contains("unsupported Pandoc API version '1.22'"),
+        "stderr: {stderr}"
+    );
+}

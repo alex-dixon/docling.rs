@@ -167,6 +167,7 @@ async fn serves_its_logo_and_openapi_description() {
         "encoding:",
         "video_frames:",
         "xbrl_taxonomy:",
+        "pandoc_api_version:",
     ] {
         assert!(spec.contains(opt), "option {opt} missing from openapi.yaml");
     }
@@ -1518,6 +1519,57 @@ async fn put_target_refuses_a_private_address_without_the_escape_hatch() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(body_string(response).await.contains("private/loopback"));
+}
+
+// --- #515: Pandoc AST output ----------------------------------------------
+
+#[tokio::test]
+async fn pandoc_output_is_the_ast_as_json() {
+    let (ct, body) = multipart(
+        "note.md",
+        b"# Title\n\nHello **world**.\n\n- one\n- two\n",
+        &[("to", "pandoc")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert_eq!(v["pandoc-api-version"], serde_json::json!([1, 23, 1, 1]));
+    let kinds: Vec<&str> = v["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["t"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["Header", "Para", "BulletList"], "{v}");
+}
+
+#[tokio::test]
+async fn pandoc_batch_items_and_api_version_check() {
+    // Batch: the AST inline as an object per item.
+    let (ct, body) = multipart_files(
+        &[("a.md", b"# A\n"), ("b.md", b"# B\n")],
+        &[("to", "pandoc"), ("pandoc_api_version", "1.23")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let results = v["results"].as_array().expect("batch shape");
+    assert_eq!(results[1]["pandoc"]["blocks"][0]["t"], "Header", "{v}");
+
+    // An API version this export does not write is refused up front.
+    let (ct, body) = multipart(
+        "note.md",
+        b"# A\n",
+        &[("to", "pandoc"), ("pandoc_api_version", "1.22")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let msg = body_string(response).await;
+    assert!(
+        msg.contains("unsupported Pandoc API version '1.22'"),
+        "{msg}"
+    );
 }
 
 // --- #317: LaTeX output --------------------------------------------------

@@ -418,7 +418,9 @@ constructor; output options (`to`, `imageMode`, `artifactsDir`) are per call.
 
 ### Options
 
-- `to`: `"markdown"` (default) or `"json"`.
+- `to`: `"markdown"` (default), `"json"`, `"html"`, `"latex"` or `"pandoc"`
+  (Pandoc's JSON AST — pipe it to `pandoc -f json -t docx`; pictures follow
+  `imageMode`).
 - `imageMode`: `"placeholder"` (default), `"embedded"`, or `"referenced"`.
 - `artifactsDir`: directory name used in `referenced` links (default `"artifacts"`).
 - `pageBreakPlaceholder`: text inserted between pages in Markdown output —
