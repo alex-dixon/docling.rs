@@ -126,11 +126,24 @@ fi
 # --skip_submodule_sync: the clone above is complete. onnxruntime_USE_KLEIDIAI=OFF:
 # ARM-only, and build.py turns it on unconditionally. The toolchain file
 # carries the Eigen flag (see there).
+#
+# --no_telemetry (1.29+): build.py turns ONNX Runtime's 1DS telemetry on by
+# default for Linux from 1.29 — cpp_client_telemetry with a bundled curl,
+# mbedTLS and sqlite compiled into libonnxruntime.so, uploading usage events
+# to Microsoft. A runtime we ship to mainframes must not phone home, and the
+# bundle does not link with zig anyway (`--exclude-libs`, which hides the
+# embedded curl/mbedTLS symbols, is an unsupported linker arg there). 1.28's
+# build.py has no such flag — telemetry was opt-in (`--use_telemetry`) — so it
+# is passed only when this checkout knows it.
+NO_TELEMETRY=()
+if grep -q -- '"--no_telemetry"' "$SRC/tools/ci_build/build_args.py" 2>/dev/null; then
+  NO_TELEMETRY=(--no_telemetry)
+fi
 cd "$SRC"
 # shellcheck disable=SC2086
 ./build.sh --config Release --build_shared_lib --parallel "$JOBS" \
   --skip_tests --skip_submodule_sync --allow_running_as_root \
-  --compile_no_warning_as_error \
+  --compile_no_warning_as_error "${NO_TELEMETRY[@]}" \
   --path_to_protoc_exe "$PROTOC" \
   --cmake_extra_defines "CMAKE_TOOLCHAIN_FILE=$TOOLCHAIN" onnxruntime_CROSS_COMPILING=ON \
     onnxruntime_USE_KLEIDIAI=OFF onnxruntime_BUILD_UNIT_TESTS=OFF \

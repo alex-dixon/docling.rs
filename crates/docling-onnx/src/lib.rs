@@ -99,6 +99,7 @@ pub fn runtime_library() -> Result<&'static Path, String> {
         };
         match ort::init_from(&candidate) {
             Ok(env) => {
+                let env = env.with_telemetry(false);
                 // `commit` is false when an environment was configured
                 // before this call — the library is loaded either way.
                 let _ = env.commit();
@@ -126,9 +127,26 @@ pub fn runtime_library() -> Result<&'static Path, String> {
 /// Runtime library ([`runtime_library`]) and returns its error as a plain
 /// message instead of the panic `ort` raises when the library is missing at
 /// the first API call; in a linked build it is `Session::builder()`.
+///
+/// Either way the process environment is committed with ONNX Runtime's
+/// telemetry off. `ort` defaults it *on* (`EnableTelemetryEvents`): a no-op
+/// for pyke's linked builds, which carry no telemetry provider, but
+/// Microsoft's own libraries do — ETW on Windows and, from 1.29, the 1DS SDK
+/// on Linux and macOS, uploading model metadata and run statistics — and a
+/// `load-dynamic` build runs whatever library the machine provides. A
+/// document converter does not report its users' models to anyone.
 pub fn session_builder() -> Result<SessionBuilder, String> {
     #[cfg(feature = "load-dynamic")]
     runtime_library()?;
+    #[cfg(not(feature = "load-dynamic"))]
+    {
+        static ENV: std::sync::Once = std::sync::Once::new();
+        // `false` when something configured the environment first — nothing
+        // in the workspace does; the setting then stays as that caller left it.
+        ENV.call_once(|| {
+            let _ = ort::init().with_telemetry(false).commit();
+        });
+    }
     Session::builder().map_err(|e| e.to_string())
 }
 
