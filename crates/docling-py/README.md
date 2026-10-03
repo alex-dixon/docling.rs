@@ -94,7 +94,7 @@ the engine bundles ONNX Runtime.
 **4. Check the divergences** if your code goes beyond the common path:
 the full-VLM pipeline (SmolDocling) and per-format backend selection are not
 ported; some `PdfPipelineOptions` fields are accepted for compatibility but
-inert (`images_scale`, `generate_page_images`, …); inline formatting is
+inert (`table_structure_options.mode`, …); inline formatting is
 rendered into the text rather than structured `formatting` fields. The
 [API surface](#api-surface-docling-shaped) table below lists what acts, and
 [`docs/MIGRATION.md`](../../docs/MIGRATION.md) §4 the documented output
@@ -195,8 +195,15 @@ flags `do_picture_classification` / `do_code_enrichment` /
 `scripts/install/download_dependencies.sh` run; the code/formula models need
 its `--enrich` flag), and
 `accelerator_options.num_threads` (→ ONNX Runtime intra-op threads via
-`DOCLING_RS_PDF_THREADS`). The remaining `PdfPipelineOptions` fields
-(`images_scale`, `generate_page_images`, `table_structure_options.mode`, …) are
+`DOCLING_RS_PDF_THREADS`), and the image outputs (#520):
+`generate_page_images` keeps each page's render as `document.pages[n].image`
+(so docling-core's `TableItem.get_image(doc)` works), and `images_scale` sets
+the picture-crop / page-image resolution once `generate_picture_images` or
+`generate_page_images` is on — docling renders images only then; picture
+crops are always extracted here, at the engine's 2.0 px/pt otherwise. Every
+picture's `image.dpi` is 72·scale (#519). `convert(source, page_range=(a, b))`
+narrows a PDF to that page window per call, as in docling (#518). The
+remaining `PdfPipelineOptions` fields (`table_structure_options.mode`, …) are
 accepted for API compatibility but do not change the pipeline. `InputFormat`,
 `DocumentStream` and `ImageRefMode` are re-exported too (the last straight from
 `docling_core`, for `export_to_markdown(image_mode=…)`). A GPU

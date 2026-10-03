@@ -293,7 +293,9 @@ parallel calls.
 
 The constructor takes the same PDF/image options as the one-shot calls —
 `ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`, `skipOcr`, `forceFullPageOcr`,
-`noTextPanels`, `headingHierarchy`, `pages`, `documentTimeout` (a per-document
+`noTextPanels`, `headingHierarchy`, `pages`, `imagesScale` / `pageImages`
+(picture-crop resolution in px per point and the JSON page images, docling's
+`images_scale` / `generate_page_images`, #520), `documentTimeout` (a per-document
 budget in seconds, docling's `document_timeout`: once spent, the pages done so
 far are the document, `status` is `"partial_success"` and `errors` says why,
 #497) and the enrichment switches — and
@@ -408,7 +410,8 @@ then `convertFile` / `convert` / `convertFileAsync` / `convertAsync` /
 `convertFileStreaming` / `streamFileMarkdown`. It reads `strict`, the
 enrichment switches and every PDF/image option (`ocrEngine`, `ocrLang`,
 `ocrMode`, `ocrScale`, `skipOcr`, `forceFullPageOcr`, `noTextPanels`,
-`headingHierarchy`, `pages`) from `converterOptions` (#471).
+`headingHierarchy`, `pages`, `imagesScale`, `pageImages`) from
+`converterOptions` (#471).
 
 `DocumentConverter` is the reusable form: `new DocumentConverter(converterOptions)`
 then `convert` / `convertFile` / `convertFileAsync` / `convertAsync` /

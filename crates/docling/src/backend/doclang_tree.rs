@@ -1300,6 +1300,7 @@ impl Builder<'_> {
         };
         let (width, height) = crate::backend::rtf::image_size(&mimetype, &data)?;
         Some(PictureImage {
+            dpi: PictureImage::DEFAULT_DPI,
             mimetype,
             width,
             height,

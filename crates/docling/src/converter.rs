@@ -119,6 +119,12 @@ pub struct DocumentConverter {
     ocr_engine: Option<String>,
     /// OCR render scale in px/pt (#254); validated at the ML call sites.
     ocr_scale: Option<f32>,
+    /// Picture-crop / page-image scale in px/pt (docling's `images_scale`,
+    /// #520); `None` = the pipeline's 2.0 render.
+    images_scale: Option<f32>,
+    /// Keep page renders as the document's page images (docling's
+    /// `generate_page_images`, #520).
+    generate_page_images: bool,
     /// Infer PDF/image section-header levels after assembly (#302, docling's
     /// `HeadingHierarchyModel`): bookmarks > numbering > font style. Off by
     /// default — heading levels then stay exactly as detected.
@@ -206,6 +212,8 @@ impl Default for DocumentConverter {
             ocr_mode: None,
             ocr_engine: None,
             ocr_scale: None,
+            images_scale: None,
+            generate_page_images: false,
             heading_hierarchy: false,
             use_web_browser: false,
             asr_model: None,
@@ -300,6 +308,8 @@ impl DocumentConverter {
             .tesseract_lang(self.tesseract_lang_choice())
             .ocr_mode(self.ocr_mode_choice())
             .ocr_scale(self.ocr_scale_choice())
+            .images_scale(self.images_scale)
+            .generate_page_images(self.generate_page_images)
             .heading_hierarchy(docling_pdf::HeadingHierarchyOptions::enabled(
                 self.heading_hierarchy,
             ))
@@ -726,6 +736,28 @@ impl DocumentConverter {
         self
     }
 
+    /// Pixels per PDF point for picture crops and page images — docling's
+    /// `images_scale` (#520). Unset delivers crops at the pipeline's own 2.0
+    /// px/pt render (144 dpi), as before; another value resamples it (above
+    /// 2.0 that upsamples, it does not re-render). The picture's `dpi` in the
+    /// JSON export is 72·scale either way (#519). Non-finite or non-positive
+    /// values are ignored. PDF/image ML pipeline only.
+    pub fn images_scale(mut self, scale: f32) -> Self {
+        self.images_scale = Some(scale).filter(|s| s.is_finite() && *s > 0.0);
+        self
+    }
+
+    /// Keep every page's render as a page image — docling's
+    /// `generate_page_images` (#520): the JSON export carries it as
+    /// `pages[n].image` at [`Self::images_scale`], which docling-core's
+    /// `TableItem.get_image` / `FormulaItem.get_image` crop from. Off by
+    /// default (one full-page PNG per page in memory). PDF/image ML pipeline
+    /// only; text-layer-only (`no_ocr`) and streaming conversions get none.
+    pub fn generate_page_images(mut self, enabled: bool) -> Self {
+        self.generate_page_images = enabled;
+        self
+    }
+
     /// Classify each detected picture with the DocumentFigureClassifier model
     /// (docling's `do_picture_classification`). Off by default.
     ///
@@ -866,6 +898,7 @@ impl DocumentConverter {
             tesseract_lang: self.tesseract_lang_choice(),
             ocr_mode: self.ocr_mode_choice(),
             ocr_scale: self.ocr_scale_choice(),
+            images_scale: self.images_scale,
             artifacts_dir: self.artifacts_dir.clone(),
             page_break_placeholder: self.page_break_placeholder.clone(),
             compact_tables: self.compact_tables,

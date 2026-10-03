@@ -125,9 +125,14 @@ class PdfPipelineOptions:
     paragraphs) and
     ``accelerator_options.num_threads``. ``do_picture_description`` with
     ``picture_description_options`` runs in Python on the converted document
-    (:mod:`docling_rs.picture_description`). The remaining fields are accepted so
-    docling code constructs unchanged, but do not alter the pipeline (images are
-    always extracted; the export image mode is chosen by docling-core at
+    (:mod:`docling_rs.picture_description`). ``generate_page_images`` keeps
+    each page's render as ``document.pages[n].image``, and ``images_scale``
+    sets the picture-crop / page-image resolution once either
+    ``generate_picture_images`` or ``generate_page_images`` is on (#520 —
+    docling renders images only then; otherwise crops keep the engine's 2.0
+    px/pt render, since picture images are always extracted here). The
+    remaining fields are accepted so docling code constructs unchanged, but do
+    not alter the pipeline (the export image mode is chosen by docling-core at
     ``export_to_markdown(...)`` time)."""
 
     do_ocr: bool = True

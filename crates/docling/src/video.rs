@@ -89,6 +89,7 @@ fn picture_node(frame: VideoFrame) -> Node {
         caption: Some(format!("[time: {}]", docling_asr::fmt_seconds(frame.ts))),
         caption_href: None,
         image: Some(PictureImage {
+            dpi: PictureImage::DEFAULT_DPI,
             mimetype: "image/png".to_string(),
             width,
             height,

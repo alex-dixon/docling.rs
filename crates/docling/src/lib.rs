@@ -61,8 +61,8 @@ pub use docling_core::{
 #[cfg(feature = "pdf")]
 pub use docling_pdf::{
     model_inventory, page_count as pdf_page_count, render_pages as render_pdf_pages,
-    tesseract_lang_arg, EnrichmentOptions, HeadingHierarchyOptions, ModelEntry, OcrEngine, OcrLang,
-    OcrMode, Pipeline, RenderedPage,
+    tesseract_lang_arg, EnrichmentOptions, HeadingHierarchyOptions, ImageOutput, ModelEntry,
+    OcrEngine, OcrLang, OcrMode, Pipeline, RenderedPage,
 };
 // The pure-Rust text-layer extraction (no pdfium, no models) — compiled with
 // either PDF feature. The CLI uses it as the `--no-ocr` fallback when the

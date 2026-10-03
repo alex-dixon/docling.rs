@@ -16,7 +16,8 @@
 //! Options are one JSON object whose keys mirror docling-serve's request
 //! options (`to`, `strict`, `images`, `no_ocr`, `force_full_page_ocr`,
 //! `no_table_former`, `no_text_panels`, `fetch_images`, `asr_model`,
-//! `asr_lang`, `encoding`, `video_frames`, `xbrl_taxonomy`, `pages`, `ocr_lang`); unknown keys fail the
+//! `asr_lang`, `encoding`, `video_frames`, `xbrl_taxonomy`, `pages`, `ocr_lang`,
+//! `images_scale`, `page_images`, …); unknown keys fail the
 //! conversion with a clear message rather than silently doing nothing — an
 //! embedder's typo should not go unnoticed. `NULL` or `""` means defaults.
 //!
@@ -85,6 +86,12 @@ struct Options {
     /// OCR render scale in px per PDF point (docling's `OcrOptions.scale`,
     /// #254); unset reads the pipeline's own 2.0 px/pt render.
     ocr_scale: Option<f32>,
+    /// Picture crops (and page images) in px per PDF point — docling's
+    /// `images_scale` (#520), 0.1–4.0; unset keeps the 2.0 render.
+    images_scale: Option<f32>,
+    /// Keep each page's render as the JSON `pages[n].image` — docling's
+    /// `generate_page_images` (#520).
+    page_images: Option<bool>,
     /// Unpadded `| a | b |` Markdown tables (#271, docling.rs extension).
     compact_tables: Option<bool>,
     /// Omit empty cells from sparse XLSX/XLS grids (#271, docling.rs extension).
@@ -148,6 +155,15 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
     if let Some(scale) = options.ocr_scale {
         converter = converter.ocr_scale(scale);
     }
+    if let Some(scale) = options.images_scale {
+        if !(0.1..=4.0).contains(&scale) {
+            return Err(format!(
+                "images_scale must be a number in 0.1-4.0, got {scale}"
+            ));
+        }
+        converter = converter.images_scale(scale);
+    }
+    converter = converter.generate_page_images(options.page_images.unwrap_or(false));
     if let Some(pages) = &options.pages {
         let (first, last) = docling::parse_page_range(pages).map_err(|e| format!("pages: {e}"))?;
         converter = converter.page_range(first, last);

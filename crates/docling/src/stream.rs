@@ -95,6 +95,8 @@ pub(crate) struct StreamSettings {
     pub tesseract_lang: Option<String>,
     pub ocr_mode: Option<docling_pdf::OcrMode>,
     pub ocr_scale: Option<f32>,
+    /// Picture-crop scale (#520); page images have no place in a stream.
+    pub images_scale: Option<f32>,
     pub artifacts_dir: String,
     /// [`DocumentConverter::page_break_placeholder`] for the streamer — the
     /// PDF path never builds a `DoclingDocument` to carry it.
@@ -181,6 +183,7 @@ fn run_pdf(
             .tesseract_lang(settings.tesseract_lang.clone())
             .ocr_mode(settings.ocr_mode)
             .ocr_scale(settings.ocr_scale)
+            .images_scale(settings.images_scale)
             .enrichments(settings.enrich)
             .pages(settings.page_range)
             .document_timeout(settings.document_timeout)

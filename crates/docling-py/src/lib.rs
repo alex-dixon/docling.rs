@@ -106,6 +106,8 @@ struct PyDocumentConverter {
     tesseract_lang: Option<String>,
     ocr_mode: Option<docling::OcrMode>,
     ocr_scale: Option<f32>,
+    /// Picture-crop scale and page images (#519/#520), for the warm pipeline.
+    images: docling::ImageOutput,
     page_range: Option<(usize, usize)>,
     /// docling's `document_timeout` (#497), for the warm pipeline.
     document_timeout: Option<std::time::Duration>,
@@ -159,6 +161,14 @@ impl PyDocumentConverter {
     /// * `ocr_scale` — OCR render scale in px per PDF point (docling's
     ///   `OcrOptions.scale`, #254); `None` reads the pipeline's own 2.0 px/pt
     ///   render (docling's default is 3 = 216 dpi).
+    /// * `images_scale` — picture crops (and page images) in px per PDF
+    ///   point, docling's `images_scale` (#520), 0.1–4.0; `None` keeps the
+    ///   pipeline's 2.0 px/pt render. The picture `dpi` in the JSON is
+    ///   72·scale either way (#519).
+    /// * `generate_page_images` — keep each page's render as
+    ///   `document.pages[n].image` (docling's `generate_page_images`, #520),
+    ///   which docling-core's `TableItem.get_image` / `FormulaItem.get_image`
+    ///   crop from.
     /// * `ocr_engine` — which OCR engine reads scanned pages (#460):
     ///   `"ppocr"` (default, the built-in PP-OCRv3 recognizer) or
     ///   `"tesseract"` (the system `tesseract` binary, docling's
@@ -218,6 +228,8 @@ impl PyDocumentConverter {
         ocr_scale = None,
         ocr_engine = None,
         allowed_formats = None,
+        images_scale = None,
+        generate_page_images = false,
         text_layer_only = false,
         list_attachments = false,
         skip_empty_cells = false,
@@ -254,6 +266,8 @@ impl PyDocumentConverter {
         ocr_scale: Option<f32>,
         ocr_engine: Option<String>,
         allowed_formats: Option<Vec<String>>,
+        images_scale: Option<f32>,
+        generate_page_images: bool,
         text_layer_only: bool,
         list_attachments: bool,
         skip_empty_cells: bool,
@@ -280,6 +294,9 @@ impl PyDocumentConverter {
             }
             None => None,
         };
+        // A malformed window (0-based, reversed) raises here instead of
+        // silently selecting nothing (#518).
+        let page_range = check_page_range(page_range)?;
         let vlm = resolve_vlm(
             pipeline.as_deref(),
             vlm_endpoint,
@@ -376,6 +393,23 @@ impl PyDocumentConverter {
                 )));
             }
         }
+        // `images_scale` (#520): the CLI's / serve's 0.1–4.0 window.
+        if let Some(s) = images_scale {
+            if !(0.1..=4.0).contains(&s) {
+                return Err(PyValueError::new_err(format!(
+                    "images_scale must be a number in 0.1-4.0, got {s}"
+                )));
+            }
+        }
+        let images = docling::ImageOutput {
+            scale: images_scale,
+            page_images: generate_page_images,
+        };
+        let base = match images_scale {
+            Some(s) => base.images_scale(s),
+            None => base,
+        };
+        let base = base.generate_page_images(generate_page_images);
         let base = match ocr_lang {
             Some(lang) => base.ocr_lang(lang),
             None => base,
@@ -425,6 +459,7 @@ impl PyDocumentConverter {
             tesseract_lang,
             ocr_mode: ocr_mode_choice,
             ocr_scale,
+            images,
             page_range,
             document_timeout,
             vlm,
@@ -460,6 +495,7 @@ impl PyDocumentConverter {
         let tesseract_lang = self.tesseract_lang.clone();
         let ocr_mode = self.ocr_mode;
         let ocr_scale = self.ocr_scale;
+        let images = self.images;
         let page_range = self.page_range;
         let document_timeout = self.document_timeout;
         run_interruptible(py, move || {
@@ -481,6 +517,8 @@ impl PyDocumentConverter {
                     .tesseract_lang(tesseract_lang)
                     .ocr_mode(ocr_mode)
                     .ocr_scale(ocr_scale)
+                    .images_scale(images.scale)
+                    .generate_page_images(images.page_images)
                     .pages(page_range)
                     .document_timeout(document_timeout)
                     .enrichments(enrich);
@@ -495,21 +533,33 @@ impl PyDocumentConverter {
 
     /// Convert a document from a filesystem path (str / os.PathLike).
     /// Runs the (potentially long) conversion off the Python thread with the
-    /// GIL released, so Ctrl-C interrupts it.
-    fn convert(&self, py: Python<'_>, source: PathLike) -> PyResult<PyNativeResult> {
+    /// GIL released, so Ctrl-C interrupts it. `page_range=(first, last)`
+    /// overrides the constructor's window for this call only — docling's
+    /// `convert(source, page_range=…)` (#518).
+    #[pyo3(signature = (source, page_range = None))]
+    fn convert(
+        &self,
+        py: Python<'_>,
+        source: PathLike,
+        page_range: Option<(usize, usize)>,
+    ) -> PyResult<PyNativeResult> {
         let src = SourceDocument::from_file(&source.0)
             .map_err(|e| ConversionError::new_err(e.to_string()))?;
-        self.convert_source(py, src)
+        self.convert_source(py, src, check_page_range(page_range)?)
     }
 
     /// Convert in-memory bytes; `name` (with extension) drives format detection,
     /// mirroring docling's `DocumentStream(name=..., stream=...)`.
+    /// `page_range` as in [`convert`](Self::convert).
+    #[pyo3(signature = (name, data, page_range = None))]
     fn convert_bytes(
         &self,
         py: Python<'_>,
         name: String,
         data: Bound<'_, PyBytes>,
+        page_range: Option<(usize, usize)>,
     ) -> PyResult<PyNativeResult> {
+        let page_range = check_page_range(page_range)?;
         let bytes = data.as_bytes().to_vec();
         let ext = std::path::Path::new(&name)
             .extension()
@@ -518,7 +568,19 @@ impl PyDocumentConverter {
         let format = docling::InputFormat::from_extension(ext).ok_or_else(|| {
             ConversionError::new_err(format!("cannot detect input format from name {name:?}"))
         })?;
-        self.convert_source(py, SourceDocument::from_bytes(&name, format, bytes))
+        self.convert_source(py, SourceDocument::from_bytes(&name, format, bytes), page_range)
+    }
+}
+
+/// A per-call `page_range` (#518): 1-based and ordered, like the
+/// constructor's (`last` may exceed the page count — docling's default
+/// window is `(1, sys.maxsize)`).
+fn check_page_range(range: Option<(usize, usize)>) -> PyResult<Option<(usize, usize)>> {
+    match range {
+        Some((first, last)) if first == 0 || last < first => Err(PyValueError::new_err(format!(
+            "page_range must be (first, last) with 1 <= first <= last, got ({first}, {last})"
+        ))),
+        other => Ok(other),
     }
 }
 
@@ -526,12 +588,21 @@ impl PyDocumentConverter {
     /// Convert a prepared [`SourceDocument`], routing PDFs through the warm
     /// pipeline when `initialize_pipeline` has primed it (otherwise the transient
     /// `inner` path, which reloads models per call).
-    fn convert_source(&self, py: Python<'_>, src: SourceDocument) -> PyResult<PyNativeResult> {
+    /// `page_range`: a per-call window overriding the constructor's (#518).
+    fn convert_source(
+        &self,
+        py: Python<'_>,
+        src: SourceDocument,
+        page_range: Option<(usize, usize)>,
+    ) -> PyResult<PyNativeResult> {
         // `pipeline="vlm"` (#304) is a sibling path: the remote model does the
         // reading, so neither the warm pipeline nor the declarative converter
         // applies. A conversion failure raises `ConversionError`, docling's
         // catchable exception — never a crash.
-        if let Some(vlm) = self.vlm.clone() {
+        if let Some(mut vlm) = self.vlm.clone() {
+            if page_range.is_some() {
+                vlm.page_range = page_range;
+            }
             return run_interruptible(py, move || {
                 let doc = docling::vlm::convert_vlm(&src, &vlm)
                     .map_err(|e| ConversionError::new_err(e.to_string()))?;
@@ -545,16 +616,21 @@ impl PyDocumentConverter {
         }
         if src.format == docling::InputFormat::Pdf && self.pdf_pipeline.lock().unwrap().is_some() {
             let slot = std::sync::Arc::clone(&self.pdf_pipeline);
+            let window = page_range.or(self.page_range);
+            let default_window = self.page_range;
             return run_interruptible(py, move || {
                 let mut slot = slot.lock().unwrap();
                 let pipeline = slot
                     .as_mut()
                     .ok_or_else(|| ConversionError::new_err("PDF pipeline not initialized"))?;
+                // The warm pipeline is shared across calls: apply this call's
+                // window and put the constructor's back afterwards.
+                pipeline.set_pages(window);
+                let outcome = pipeline.convert_outcome(&src.bytes, None, &src.name);
+                pipeline.set_pages(default_window);
                 // docling's PARTIAL_SUCCESS (#497): a spent budget leaves the
                 // pages done so far and says so in `errors`.
-                let c = pipeline
-                    .convert_outcome(&src.bytes, None, &src.name)
-                    .map_err(|e| ConversionError::new_err(e.to_string()))?;
+                let c = outcome.map_err(|e| ConversionError::new_err(e.to_string()))?;
                 let errors: Vec<docling::ErrorItem> = c
                     .completion
                     .message()
@@ -574,7 +650,10 @@ impl PyDocumentConverter {
                 })
             });
         }
-        let converter = self.inner.clone();
+        let converter = match page_range {
+            Some((first, last)) => self.inner.clone().page_range(first, last),
+            None => self.inner.clone(),
+        };
         run_interruptible(py, move || {
             let result = converter
                 .convert(src)

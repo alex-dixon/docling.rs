@@ -1007,6 +1007,7 @@ impl Converter {
         }
         (
             Some(PictureImage {
+                dpi: PictureImage::DEFAULT_DPI,
                 mimetype: "image/png".into(),
                 width: decoded.width(),
                 height: decoded.height(),

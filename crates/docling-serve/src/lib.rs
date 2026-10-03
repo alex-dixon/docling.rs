@@ -64,6 +64,11 @@
 //! - `ocr_scale` — OCR render scale in px per PDF point (docling's
 //!   `OcrOptions.scale`, #254); unset reads the pipeline's own 2.0 px/pt
 //!   render, docling's default is 3 (216 dpi)
+//! - `images_scale` — picture crops (and page images) in px per PDF point,
+//!   0.1–4.0 (docling's `images_scale`, #520); unset keeps the pipeline's
+//!   2.0 px/pt render. The JSON picture `dpi` is 72·scale (#519)
+//! - `page_images` — keep each page's render as the JSON `pages[n].image`
+//!   (docling's `generate_page_images`, #520; off by default)
 //! - `fetch_images` — resolve external `<img src>` for HTML/EPUB/MHTML/JATS (outbound
 //!   fetch, so honored only under `--allow-url-fetch`)
 //! - `skip_empty_cells` — omit empty cells from sparse XLSX/XLS table grids
@@ -511,6 +516,12 @@ struct ConvertOptions {
     /// OCR render scale in px per PDF point (docling's `OcrOptions.scale`,
     /// #254); unset reads the pipeline's own 2.0 px/pt render.
     ocr_scale: Option<f32>,
+    /// Picture crops and page images in px per PDF point (docling's
+    /// `images_scale`, #520), 0.1–4.0; unset keeps the pipeline's 2.0 render.
+    images_scale: Option<f32>,
+    /// Keep each page's render as the JSON page image (docling's
+    /// `generate_page_images`, #520).
+    page_images: Option<bool>,
     /// `to=images` render scale in pixels per PDF point (#243): default 2.0
     /// (144 dpi, the pipeline's own render scale), accepted range 0.1–4.0.
     scale: Option<f32>,
@@ -589,6 +600,8 @@ impl ConvertOptions {
             ocr_mode: self.ocr_mode.or(base.ocr_mode),
             ocr_engine: self.ocr_engine.or(base.ocr_engine),
             ocr_scale: self.ocr_scale.or(base.ocr_scale),
+            images_scale: self.images_scale.or(base.images_scale),
+            page_images: self.page_images.or(base.page_images),
             scale: self.scale.or(base.scale),
             chunker: self.chunker.or(base.chunker),
             chunk_tokenizer: self.chunk_tokenizer.or(base.chunk_tokenizer),
@@ -868,6 +881,7 @@ fn validate_output(options: &ConvertOptions) -> Result<(String, ImageMode), ApiE
     // and a bad option deserves a plain 400 up front.
     parse_ocr_mode(options.ocr_mode.as_deref())?;
     parse_ocr_scale(options.ocr_scale)?;
+    parse_images_scale(options.images_scale)?;
     parse_ocr_engine(options.ocr_engine.as_deref())?;
     parse_ocr_lang(options)?;
     parse_chunk_options(options)?;
@@ -1980,6 +1994,12 @@ async fn read_multipart(
                     ApiError::Bad(format!("ocr_scale must be a number, got {v:?}"))
                 })?);
             }
+            "images_scale" => {
+                let v = text_field(field).await?;
+                body_opts.images_scale = Some(v.parse().map_err(|_| {
+                    ApiError::Bad(format!("images_scale must be a number, got {v:?}"))
+                })?);
+            }
             "ebcdic_layout" => body_opts.ebcdic_layout = Some(text_field(field).await?),
             "md_page_break_placeholder" => {
                 body_opts.md_page_break_placeholder = Some(text_field(field).await?)
@@ -2038,6 +2058,7 @@ async fn read_multipart(
             | "list_attachments"
             | "skip_empty_cells"
             | "compact_tables"
+            | "page_images"
             | "chunk_merge_peers" => {
                 let v = text_field(field).await?;
                 let b = matches!(v.as_str(), "1" | "true" | "yes" | "on");
@@ -2056,6 +2077,7 @@ async fn read_multipart(
                     "skip_empty_cells" => body_opts.skip_empty_cells = Some(b),
                     "compact_tables" => body_opts.compact_tables = Some(b),
                     "chunk_merge_peers" => body_opts.chunk_merge_peers = Some(b),
+                    "page_images" => body_opts.page_images = Some(b),
                     _ => body_opts.fetch_images = Some(b),
                 }
             }
@@ -2483,6 +2505,11 @@ fn convert_document_inner(
             pipeline.set_force_full_page_ocr(options.force_full_page_ocr.unwrap_or(false));
             pipeline.set_ocr_mode(parse_ocr_mode(options.ocr_mode.as_deref())?);
             pipeline.set_ocr_scale(parse_ocr_scale(options.ocr_scale)?);
+            // Picture-crop scale and page images (#519/#520): per request too.
+            pipeline.set_images(docling::ImageOutput {
+                scale: parse_images_scale(options.images_scale)?,
+                page_images: options.page_images.unwrap_or(false),
+            });
             // #302: pure per-request post-processing configuration, set
             // unconditionally like the page window.
             pipeline.set_heading_hierarchy(docling::HeadingHierarchyOptions::enabled(
@@ -2651,6 +2678,10 @@ fn request_converter(
     if let Some(s) = parse_ocr_scale(options.ocr_scale)? {
         converter = converter.ocr_scale(s);
     }
+    if let Some(s) = parse_images_scale(options.images_scale)? {
+        converter = converter.images_scale(s);
+    }
+    converter = converter.generate_page_images(options.page_images.unwrap_or(false));
     // A server-local directory, held to the same rule as `chunk_tokenizer`:
     // relative, no `..` — a request must not name arbitrary server paths.
     if let Some(dir) = options.xbrl_taxonomy.as_deref() {
@@ -2696,6 +2727,17 @@ fn parse_document_timeout(raw: Option<f64>) -> Result<Option<std::time::Duration
         ))),
         Some(s) => Ok(Some(std::time::Duration::from_secs_f64(s))),
         None => Ok(None),
+    }
+}
+
+/// Validate a request's `images_scale` (#520): 0.1–4.0 like `scale`, or
+/// unset (the pipeline's 2.0 render).
+fn parse_images_scale(raw: Option<f32>) -> Result<Option<f32>, ApiError> {
+    match raw {
+        Some(s) if !(0.1..=4.0).contains(&s) => Err(ApiError::Bad(format!(
+            "images_scale must be a number in 0.1-4.0, got {s}"
+        ))),
+        other => Ok(other),
     }
 }
 

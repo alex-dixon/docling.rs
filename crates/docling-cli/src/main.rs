@@ -11,7 +11,7 @@
 //! optional features the binary carries (execution providers, `serve`,
 //! chunking) — both answer without models present.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
 //!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
 //!                      md --to json`): each document converts once and is
 //!                      written in every format named, `<stem>.md` +
@@ -261,6 +261,10 @@ PDF / IMAGE PIPELINE
                           zh-Hans, zh-TW; docling's iso: prefix accepted)
   --ocr-mode MODE         auto (default) | full_page | layout_regions
   --ocr-scale X           OCR input scale in px per point
+  --images-scale X        picture crops (and page images) in px per point,
+                          0.1-4.0 (docling's images_scale; default: the 2.0 render)
+  --page-images           keep each page's render as the JSON page image
+                          (docling's generate_page_images)
   --enrich-picture-classes | --enrich-code | --enrich-formula
                           optional enrichment models (off by default)
 
@@ -370,6 +374,8 @@ fn main() -> ExitCode {
     let mut ocr_mode: Option<String> = None;
     let mut ocr_engine: Option<String> = None;
     let mut ocr_scale: Option<f32> = None;
+    let mut images_scale: Option<f32> = None;
+    let mut page_images = false;
     let mut chunk_opts = docling::chunks::ChunkOptions::default();
     let mut pipeline: Option<String> = None;
     let mut vlm_endpoint: Option<String> = None;
@@ -631,6 +637,19 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
+            // Picture crops / page images in px per PDF point (docling's
+            // images_scale, #520); the same 0.1-4.0 window as `--scale`.
+            "--images-scale" => match args.next().and_then(|v| v.trim().parse::<f32>().ok()) {
+                Some(v) if (0.1..=4.0).contains(&v) => images_scale = Some(v),
+                _ => {
+                    eprintln!(
+                        "error: --images-scale needs a number in 0.1-4.0 \
+                         (pixels per PDF point; unset = the 2.0 render)"
+                    );
+                    return ExitCode::from(2);
+                }
+            },
+            "--page-images" => page_images = true,
             // Per-run `--to chunks` configuration (#256, mirrors the serve
             // fields / docling's service-datamodel `HybridChunkerOptions`);
             // the DOCLING_CHUNK_* env knobs stay the defaults.
@@ -859,6 +878,8 @@ fn main() -> ExitCode {
             ocr_mode,
             ocr_engine,
             ocr_scale,
+            images_scale,
+            page_images,
             scale,
             chunk: chunk_opts.clone(),
             vlm,
@@ -1005,7 +1026,12 @@ fn main() -> ExitCode {
     if let Some(s) = ocr_scale {
         converter = converter.ocr_scale(s);
     }
-    converter = converter.document_timeout(document_timeout);
+    if let Some(s) = images_scale {
+        converter = converter.images_scale(s);
+    }
+    converter = converter
+        .generate_page_images(page_images)
+        .document_timeout(document_timeout);
 
     // Stream Markdown by default: print each chunk as the converter produces it
     // (page by page for PDF). Referenced images stream too (#80): each page's
@@ -1213,6 +1239,10 @@ struct BatchCfg {
     ocr_engine: Option<String>,
     /// OCR render scale in px/pt (docling's `OcrOptions.scale`, #254).
     ocr_scale: Option<f32>,
+    /// Picture-crop / page-image scale (docling's `images_scale`, #520).
+    images_scale: Option<f32>,
+    /// Keep page renders as JSON page images (`generate_page_images`, #520).
+    page_images: bool,
     /// `--to images` render scale (pixels per PDF point, #243).
     scale: f32,
     /// Per-run `--to chunks` configuration (#256).
@@ -1528,7 +1558,12 @@ fn batch_converter(cfg: &BatchCfg) -> DocumentConverter {
     if let Some(s) = cfg.ocr_scale {
         converter = converter.ocr_scale(s);
     }
-    converter.document_timeout(cfg.document_timeout)
+    if let Some(s) = cfg.images_scale {
+        converter = converter.images_scale(s);
+    }
+    converter
+        .generate_page_images(cfg.page_images)
+        .document_timeout(cfg.document_timeout)
 }
 
 /// The lazily-built warm PDF/image pipeline shared by every batch worker —
@@ -1564,6 +1599,8 @@ fn batch_pipeline<'a>(
                 None
             })
             .ocr_scale(cfg.ocr_scale)
+            .images_scale(cfg.images_scale)
+            .generate_page_images(cfg.page_images)
             .enrichments(docling::EnrichmentOptions {
                 picture_classification: cfg.enrich_picture_classes,
                 code: cfg.enrich_code,

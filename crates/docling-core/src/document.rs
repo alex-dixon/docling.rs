@@ -49,6 +49,13 @@ pub struct DoclingDocument {
     /// item numbering, inline groups, formatting and content layers. Every
     /// other serializer reads `nodes`. See [`crate::tree`].
     pub tree: Option<crate::tree::ItemTree>,
+    /// Rendered page images by 1-based page number — docling's
+    /// `PageItem.image`, filled by the PDF/image pipeline only when page
+    /// images are requested (docling's `generate_page_images`, #520). The
+    /// JSON export writes each as the page's `image`, so docling-core's
+    /// `TableItem.get_image` / `FormulaItem.get_image` can crop from it.
+    /// Empty otherwise; no other export reads it.
+    pub page_images: std::collections::BTreeMap<usize, PictureImage>,
 }
 
 /// A single piece of document content.
@@ -644,9 +651,25 @@ pub struct PictureImage {
     pub height: u32,
     /// The image file bytes, exactly as embedded (PNG/JPEG/…).
     pub data: Vec<u8>,
+    /// Pixels per inch of the image relative to the page it came from —
+    /// docling-core's `ImageRef.dpi`, which consumers use to map pixels back
+    /// to points. A crop rendered from a PDF page at `s` px/pt is `72·s`
+    /// (docling: `int(72 * images_scale)`, #519); an image embedded in an
+    /// office file has no render scale and keeps docling's `72`
+    /// ([`Self::DEFAULT_DPI`]).
+    pub dpi: u32,
 }
 
 impl PictureImage {
+    /// docling's `ImageRef` default when no render scale applies.
+    pub const DEFAULT_DPI: u32 = 72;
+
+    /// The `dpi` of an image rendered at `scale` pixels per PDF point
+    /// (`72·scale`, rounded — `int()` would floor 143.99… to 143).
+    pub fn dpi_for_scale(scale: f32) -> u32 {
+        (72.0 * scale).round().max(1.0) as u32
+    }
+
     /// A `data:` URI for the image (`data:<mimetype>;base64,<…>`).
     pub fn data_uri(&self) -> String {
         format!(
@@ -1028,6 +1051,7 @@ impl DoclingDocument {
             links: Vec::new(),
             confidence: None,
             tree: None,
+            page_images: std::collections::BTreeMap::new(),
         }
     }
 

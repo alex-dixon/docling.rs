@@ -482,11 +482,18 @@ fn picture_image(item: &Value) -> Option<PictureImage> {
     let declared = |k: &str| image["size"][k].as_f64().unwrap_or(0.0).round().max(0.0) as u32;
     let (width, height) = crate::backend::rtf::image_size(&mimetype, &data)
         .unwrap_or((declared("width"), declared("height")));
+    // The declared dpi round-trips (a PDF crop's 144 stays 144, #519).
+    let dpi = image["dpi"]
+        .as_u64()
+        .and_then(|d| u32::try_from(d).ok())
+        .filter(|&d| d > 0)
+        .unwrap_or(PictureImage::DEFAULT_DPI);
     Some(PictureImage {
         mimetype,
         width,
         height,
         data,
+        dpi,
     })
 }
 
