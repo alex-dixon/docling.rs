@@ -695,7 +695,11 @@ deliberate scope boundary or a cosmetic, single-fixture polish gap.
   every PDF/image option of `ConverterOptions`, `ocrEngine` / `ocrLang` /
   `ocrMode` / `ocrScale` / `skipOcr` / `forceFullPageOcr` / `noTextPanels` /
   `headingHierarchy` / `pages`, validated like `DocumentConverter`);
-  conformance-checked by `scripts/conformance/enrich_conformance.sh`.)
+  conformance-checked by `scripts/conformance/enrich_conformance.sh`. Since
+  #517 the classifier's session stops at ONNX Runtime's `EXTENDED`
+  optimization level on runtimes before 1.29 — 1.26–1.28's x86 NCHWc rewrite
+  returned one distribution for every picture — so the linked 1.28 builds
+  classify like Python docling on 1.29+.)
 
 **Now migrated (previously listed here):**
 

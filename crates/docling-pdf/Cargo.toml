@@ -120,6 +120,8 @@ lopdf = { version = "0.44", features = ["wasm_js"] }
 # The text-layer diagnostic example reaches for lopdf directly to tell a load
 # failure apart from "loaded, but no text came out".
 [dev-dependencies]
+# Decodes the corpus figures the picture-classifier test (#517) feeds the model.
+image = "0.25"
 lopdf = "0.44"
 
 [lib]

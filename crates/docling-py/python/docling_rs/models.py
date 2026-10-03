@@ -101,7 +101,7 @@ _ENRICH_FP32_DECODER = ("cf_decoder_kv.onnx", "models/code_formula/decoder_kv.on
 # none for the target — and dlopens libonnxruntime.so from ``ORT_DYLIB_PATH``,
 # else ``<models dir>/onnxruntime/`` (``DOCLING_RS_MODELS_DIR``, which
 # ensure_env points at the cache), else the library search path. The models
-# release hosts the library (ONNX Runtime 1.28.0, cross-compiled by the
+# release hosts the library (ONNX Runtime 1.29.0, cross-compiled by the
 # onnxruntime-s390x.yml workflow) as a tarball that unpacks into that
 # directory; fetched on s390x hosts only.
 _ORT_S390X = ("onnxruntime-linux-s390x.tar.gz", "models/onnxruntime")

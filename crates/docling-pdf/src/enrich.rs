@@ -99,6 +99,7 @@ impl PictureClassifier {
             .with_intra_threads(intra)
             .ok()?;
         let builder = docling_onnx::apply(builder)
+            .and_then(docling_onnx::cap_before_1_29)
             .map_err(|e| eprintln!("docling-pdf: picture classifier: {e}"))
             .ok()?;
         let session = docling_onnx::commit_uncached(builder, &path)
