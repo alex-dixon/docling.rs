@@ -655,6 +655,26 @@ These are deliberate or unavoidable divergences, not bugs.
     stage needs the whole assembled document; streamed output stays
     byte-identical to buffered).
 
+18. **Image outputs** (#518–#520): docling's `images_scale` and
+    `generate_page_images` act on every surface (`--images-scale` /
+    `--page-images`, `images_scale` / `page_images` in serve and the FFI,
+    `imagesScale` / `pageImages` in Node, the Python kwargs and the
+    docling-shaped `PdfPipelineOptions`). Page images land on
+    `pages[n].image` in the JSON (docling-core's `PageItem.image`), which
+    makes `TableItem.get_image` / `FormulaItem.get_image` work on the loaded
+    document. Picture `ImageRef.dpi` is now the crop's real render scale,
+    72·scale — 144 for the default 2× crops, where it said 72 (#519); office
+    images keep docling's 72, and a docling-JSON input's dpi round-trips.
+    Divergences: picture crops are always extracted (docling only with
+    `generate_picture_images`), so the Python facade applies `images_scale`
+    only once docling would render images and otherwise keeps the 2× crop;
+    other scales resample the pipeline's 2.0 px/pt render instead of
+    re-rendering the page (CatmullRom ≙ PIL BICUBIC, so above 2.0 it
+    upsamples); text-layer-only (`no_ocr`) pages and streamed Markdown carry
+    no page image. Python's `convert(source, page_range=(a, b))` now takes
+    docling's per-call window (#518; it was a native-only constructor
+    kwarg).
+
 ---
 
 ## 5. Not migrated / out of scope
@@ -863,200 +883,4 @@ process instead of a guess:
    moved. The committed PDF groundtruth is regenerated from live docling
    (`scripts/conformance/pdf_groundtruth.sh`) whenever upstream output legitimately
    changes, so "exact" always means *exact against current docling*.
-4. **New formats/features** follow the same recipe the existing 30 formats
-   did: a backend module + fixtures + conformance scoring, tracked in §2.
-
-### Running the comparison yourself
-
-The yardstick is **Markdown output**: both projects expose the same operation —
-`convert(file).document.export_to_markdown()` — so diffing the two Markdown
-strings is a direct, apples-to-apples comparison. Two axes: **correctness**
-(A, B) and **performance** (C). Current numbers live in §2; this section is
-how to reproduce them.
-
-#### Local docling setup
-
-The comparison scripts install the **latest published** `docling` from PyPI into
-an isolated `docling.rs/.venv-compare` (via `uv`) on first run:
-
-```bash
-scripts/conformance/setup-docling.sh      # optional; the other scripts call this automatically
-```
-
-Published docling 2.x bundles every format backend plus the full PDF pipeline
-(torch + models), so the first install pulls a few hundred MB. For the
-declarative formats the Python side still calls the format backend directly (see
-`scripts/conformance/docling_convert.py`) rather than `DocumentConverter`, so it avoids
-paying the `torch` import cost on every run — the same conversion work, kept
-apples-to-apples with what `docling.rs` does.
-
-### A. Scoring against docling across a corpus
-
-This repo ships a regression corpus under `tests/data/<format>/`:
-
-```text
-tests/data/html/sources/example_01.html          # input
-tests/data/html/groundtruth/example_01.html.md    # older committed reference
-```
-
-`conformance.sh` scores the Rust port against the **latest published docling**
-(installed from PyPI on first run — see `_common.sh`), per format:
-
-```bash
-scripts/conformance/conformance.sh html
-scripts/conformance/conformance.sh docx
-```
-
-It prints a per-fixture diff-line count and a summary:
-
-```text
-FIXTURE                                        DIFF-LINES
-example_01.html                                         5
-example_02.html                                      EXACT
-...
-Exact (strict):                10 / 32
-Whitespace-normalized matches: 12 / 32
-```
-
-The second metric ignores spacing-only differences (collapsing runs of
-whitespace, trimming line ends) — useful when our output is the more faithful
-one, e.g. dropping docling's spurious double space in a fraction. A row that
-matches only after normalization is flagged `N (ws-ok)`.
-
-> The reference is always the installed docling. The committed groundtruth `.md`
-> is used only as a fallback for sources docling can't convert — it predates
-> docling-core's current serializer (e.g. its compact `| - |` tables), so it is
-> not the source of truth.
-
-### B. Live, head-to-head on any file
-
-To compare on a file that isn't in the corpus — or to confirm the groundtruth
-hasn't drifted — run both implementations and diff:
-
-```bash
-scripts/conformance/compare.sh tests/data/html/sources/example_03.html
-scripts/conformance/compare.sh /path/to/your/own.html
-```
-
-`compare.sh` runs the local Python docling backend and the Rust CLI on the same
-file, normalizes trailing newlines, and shows a unified diff (or `✅ IDENTICAL`).
-The local docling install is set up automatically on first run (see above).
-
-Do it by hand if you prefer:
-
-```bash
-# Python (using the local install in .venv-compare)
-.venv-compare/bin/python scripts/conformance/docling_convert.py in.html > py.md
-
-# Rust
-cargo run -p docling-cli -- in.html > rs.md
-
-diff -u py.md rs.md
-```
-
-### C. Performance (time, CPU, memory)
-
-`scripts/test/performance.sh` measures the processing cost of each engine on one
-file — wall-clock time, CPU utilization, and peak resident memory — using GNU
-`/usr/bin/time`. The Rust side is built in `--release`; the Python side runs the
-installed docling (declarative backends, no `torch` import).
-
-```bash
-scripts/test/performance.sh tests/data/html/sources/wiki_duck.html 10   # 10 runs
-```
-
-```text
-================ end-to-end (whole process) ================
-ENGINE                     RUNS   TIME-min   TIME-avg      CPU     PEAK-MEM
-docling (python)              6      1.39s      1.41s     363%     125.5 MB
-docling.rs (rust)           6   0.00755s   0.00755s     100%       4.8 MB
-
-  wall-time speedup (avg):  186.8x faster (rust)
-  peak-memory ratio:        26.4x less (rust)
-
-================ conversion only (startup excluded) ========
-  python (warm, in-process): 0.4736s/doc, peak 134.6 MB
-  rust   (whole process incl. startup): 0.00755s/doc — startup is negligible
-  warm-conversion speedup:   62.7x faster (rust)
-```
-
-**Reading the numbers fairly.** The end-to-end Python time includes interpreter
-startup plus importing docling/beautifulsoup4/numpy (~0.3–0.6s), which dominates
-on small inputs — a real cost for one-shot CLI use, but not representative of a
-long-running service. The script therefore also reports a **warm** number:
-Python imports once, then converts in a loop, isolating the actual parse work.
-Rust's process startup is ~1 ms, so its end-to-end figure already *is* its warm
-figure. Use larger inputs (e.g. `wiki_duck.html`) to see steady-state behavior;
-tiny files mostly measure Python's startup.
-
-### Worked example
-
-`tests/data/html/sources/example_01.html` → Python (left) vs Rust (right):
-
-```diff
-  # Introduction
-
-  This is the first paragraph of the introduction.
-
-  ## Background
-
-  Some background information here.
-
-  Example image
-
-  <!-- image -->
-
-  - First item in unordered list
-  - Second item in unordered list
-
-  1. First item in ordered list
-  2. Second item in ordered list
--
-- 42. First item in ordered list with start
-- 43. Second item in ordered list with start
-+ 3. First item in ordered list with start
-+ 4. Second item in ordered list with start
-```
-
-Headings, paragraphs, the image placeholder, unordered list, and the first
-ordered list are byte-identical. The only difference is the `<ol start="42">`
-case — see the divergence table below.
-
-### How to read the numbers
-
-`conformance.sh` counts **diff lines** (`diff` `<`/`>` markers): one changed line
-shows as `2`. It reports two summary counts — **Exact (strict)** byte-for-byte and
-**Whitespace-normalized matches** (spacing-only diffs ignored; a fixture that
-matches only after normalization is flagged `N (ws-ok)`). The point isn't the
-absolute score — it's the trend as gaps in the table get closed, and catching
-regressions when a change makes a previously-matching fixture diverge.
-
-For CI, gate on the summary (e.g. fail if the exact-match count drops): it
-compares against the docling version actually installed, so it won't flag
-differences that are really just a stale committed corpus.
-
-What this cannot absorb automatically: upstream features that need new model
-*architectures* (the VLM full-page pipeline — out of scope per §5) and
-places where the document models intentionally differ (§4). Those are
-documented divergences rather than drift.
-
----
-
-## Appendix — original phased plan (history)
-
-The port followed roughly: **Phase 0** skeleton & API → **Phase 2** text/markup
-(Markdown, CSV, HTML, AsciiDoc, DeepSeek) → **Phase 3** Office & e-book (DOCX,
-PPTX, XLSX, EPUB, ODF) → **Phase 4** long tail (XML families, LaTeX, Email,
-WebVTT, JSON) → **Phase 5–6** the PDF/image ML pipeline (ONNX layout/OCR
-+ geometric tables) → output formats (strict Markdown, JSON, image extraction) →
-**Phase 7** audio/ASR (symphonia + ONNX Whisper). The Node.js/Bun (`docling-node`)
-and Python (`docling-py`, PyO3) interop bindings followed.
-
-## The meat-grinder mascot 🦀
-
-The mascot — a duck feeding a document into a meat grinder
-([`docs/assets/logo.svg`](./assets/logo.svg)) — captures what this does: a
-grinder is the machine you push anything through to get a single, uniform mince,
-which is exactly what happens to documents here — PDF, DOCX, HTML, XLSX … all
-come out as one `DoclingDocument`. And it's written in Rust, so Ferris the crab
-🦀 still gets a seat.
+4. **New formats/features** follow the same recipe the existing 30 fo

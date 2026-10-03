@@ -298,7 +298,8 @@ pub fn convert_text_layer_pages(
         assemble::add_orphan_regions(&mut regions, &page.cells);
         let table_rows = vec![None; regions.len()];
         let enrich_out = vec![None; regions.len()];
-        let (mut nodes, links) = assemble::assemble_page(&page, regions, &table_rows, &enrich_out);
+        let (mut nodes, links) =
+            assemble::assemble_page(&page, regions, &table_rows, &enrich_out, None);
         assemble::stamp_page_no(&mut nodes, i + 1);
         doc.nodes.extend(nodes);
         doc.links.extend(links);
@@ -549,6 +550,21 @@ fn decode_image_with_max_side(bytes: &[u8], max_side: u32) -> Result<image::RgbI
     Ok(img.into_rgb8())
 }
 
+/// Image outputs of the PDF/image pipeline (#519/#520): the scale picture
+/// crops are delivered at and whether each page's render is kept as the
+/// document's page image. See [`Pipeline::images_scale`] /
+/// [`Pipeline::generate_page_images`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ImageOutput {
+    /// Pixels per PDF point for picture crops and page images — docling's
+    /// `images_scale`. `None` keeps the pipeline's own page render (2.0
+    /// px/pt), resampling nothing.
+    pub scale: Option<f32>,
+    /// Keep every page's render as the document's page image — docling's
+    /// `generate_page_images`.
+    pub page_images: bool,
+}
+
 #[cfg(feature = "ml")]
 /// One page's assembled output: typed nodes plus the page's hyperlinks (kept
 /// separate so pages processed out of order can be stitched back in page
@@ -557,6 +573,8 @@ type PageOut = (
     Vec<Node>,
     Vec<(String, String)>,
     docling_core::confidence::PageConfidence,
+    // The page image, when page images are requested (#520).
+    Option<docling_core::PictureImage>,
 );
 
 #[cfg(feature = "ml")]
@@ -734,6 +752,8 @@ struct Worker {
     tesseract_lang: Option<String>,
     /// OCR render scale override (px/pt, #254). See [`Pipeline::ocr_scale`].
     ocr_scale: Option<f32>,
+    /// Picture-crop scale and page images (#519/#520). See [`ImageOutput`].
+    images: ImageOutput,
 }
 
 #[cfg(feature = "ml")]
@@ -811,8 +831,10 @@ impl Worker {
         ocr_engine: ocr::OcrEngine,
         tesseract_lang: Option<String>,
         ocr_scale: Option<f32>,
+        images: ImageOutput,
     ) -> Result<Self, PdfError> {
         Ok(Self {
+            images,
             layout: if no_ocr {
                 None
             } else {
@@ -930,9 +952,9 @@ impl Worker {
             let enrich_out = vec![None; regions.len()];
             let conf = quality::page_confidence(parse, &regions, &[]);
             let (nodes, links) = timing::timed("assemble_page", || {
-                assemble::assemble_page(page, regions, &table_rows, &enrich_out)
+                assemble::assemble_page(page, regions, &table_rows, &enrich_out, self.images.scale)
             });
-            return Ok((nodes, links, conf));
+            return Ok((nodes, links, conf, self.page_image(n, page)));
         }
         self.normalize_orientation(n, page)?;
         let det_pages = self.det_candidates(std::slice::from_ref(&(n, &*page)))?;
@@ -954,6 +976,21 @@ impl Worker {
         }
         .map_err(|e| PdfError::Layout(format!("page {}: {e}", n + 1)))?;
         self.finish_page(n, page, regions)
+    }
+
+    /// The page's render as docling's `PageItem.image` (#520), at
+    /// [`ImageOutput::scale`] — `None` unless page images were requested, or
+    /// when the page has no bitmap (the text-layer-only `no_ocr` path never
+    /// renders one).
+    fn page_image(&self, n: usize, page: &PdfPage) -> Option<docling_core::PictureImage> {
+        if !self.images.page_images {
+            return None;
+        }
+        let image = assemble::page_image(page, self.images.scale);
+        if image.is_none() {
+            docling_core::debug_log!("page {}: no page bitmap for the page image", n + 1);
+        }
+        image
     }
 
     /// The pages of a batch the text detector should sweep (#429): bitmap
@@ -1880,9 +1917,9 @@ impl Worker {
             .collect();
         let conf = quality::page_confidence(parse, &elements, &ocr_confs);
         let (nodes, links) = timing::timed("assemble_page", || {
-            assemble::assemble_page(page, regions, &table_rows, &enrich_out)
+            assemble::assemble_page(page, regions, &table_rows, &enrich_out, self.images.scale)
         });
-        Ok((nodes, links, conf))
+        Ok((nodes, links, conf, self.page_image(n, page)))
     }
 }
 
@@ -2004,6 +2041,9 @@ pub struct Pipeline {
     ocr_mode: ocr::OcrMode,
     /// OCR render scale override in px/pt (#254). See [`Pipeline::ocr_scale`].
     ocr_scale: Option<f32>,
+    /// Picture-crop scale and page images (#519/#520). See
+    /// [`Pipeline::images_scale`] / [`Pipeline::generate_page_images`].
+    images: ImageOutput,
     /// Heading-level inference (#302). See [`Pipeline::heading_hierarchy`].
     heading_hierarchy: HeadingHierarchyOptions,
     /// Optional per-page progress hook `(done, selected_total)`, invoked after
@@ -2041,6 +2081,7 @@ impl Pipeline {
             tesseract_lang: None,
             ocr_mode: ocr::OcrMode::from_env(),
             ocr_scale: ocr::scale_from_env(),
+            images: ImageOutput::default(),
             heading_hierarchy: HeadingHierarchyOptions::default(),
             progress: None,
             document_timeout: None,
@@ -2387,6 +2428,53 @@ impl Pipeline {
         }
     }
 
+    /// Pixels per PDF point for picture crops and page images — docling's
+    /// `images_scale` (#519/#520). `None` (the default) delivers crops at the
+    /// pipeline's own page render, 2.0 px/pt (144 dpi), untouched. Another
+    /// value resamples that render (CatmullRom, docling's PIL BICUBIC), so
+    /// values above 2.0 upsample rather than re-render. Each picture's
+    /// `dpi` (docling-core's `ImageRef.dpi`) is 72·scale, so consumers mapping
+    /// pixels back to points stay exact. Layout, OCR and TableFormer inputs
+    /// are unaffected. Non-positive values are ignored.
+    pub fn images_scale(mut self, scale: Option<f32>) -> Self {
+        self.set_images(ImageOutput {
+            scale,
+            ..self.images
+        });
+        self
+    }
+
+    /// Keep each page's render as the document's page image — docling's
+    /// `generate_page_images` (#520): the JSON export writes it as the page's
+    /// `image` (docling-core's `PageItem.image`, at [`Self::images_scale`],
+    /// `dpi` = 72·scale), which is what docling-core's
+    /// `TableItem.get_image` / `FormulaItem.get_image` crop from. Off by
+    /// default: a page image is a full-page PNG per page held in memory.
+    /// Pages converted with `no_ocr` (text layer only) are never rendered and
+    /// get none; streaming conversions carry no page map and drop them.
+    pub fn generate_page_images(mut self, enabled: bool) -> Self {
+        self.set_images(ImageOutput {
+            page_images: enabled,
+            ..self.images
+        });
+        self
+    }
+
+    /// Both image outputs at once, also on already-loaded workers — the
+    /// per-request form a warm pipeline (serve, the Node `Pipeline`) uses,
+    /// like [`set_ocr_scale`](Self::set_ocr_scale). A non-finite or
+    /// non-positive scale reads as unset.
+    pub fn set_images(&mut self, images: ImageOutput) {
+        self.images = ImageOutput {
+            scale: images.scale.filter(|s| s.is_finite() && *s > 0.0),
+            ..images
+        };
+        let images = self.images;
+        for worker in self.primary.iter_mut().chain(self.pool.iter_mut()) {
+            worker.images = images;
+        }
+    }
+
     /// OCR render scale in pixels per PDF point — docling's `OcrOptions.scale`
     /// (#254, upstream docling#3877; their default 3 = 216 dpi). `None`
     /// (default: `DOCLING_RS_OCR_SCALE`, else unset) feeds the recognizer the
@@ -2456,6 +2544,7 @@ impl Pipeline {
                 self.ocr_engine,
                 self.tesseract_lang.clone(),
                 self.ocr_scale,
+                self.images,
             )?);
         }
         Ok(self.primary.as_mut().unwrap())
@@ -2536,8 +2625,11 @@ impl Pipeline {
                 if expired(deadline) {
                     return Err(timeout_sentinel());
                 }
-                let (mut nodes, links, conf) = worker.process(n, &mut page)?;
+                let (mut nodes, links, conf, page_image) = worker.process(n, &mut page)?;
                 assemble::stamp_page_no(&mut nodes, n + 1);
+                if let Some(img) = page_image {
+                    doc.page_images.insert(n + 1, img);
+                }
                 doc.nodes.extend(nodes);
                 doc.links.extend(links);
                 confs.insert(n + 1, conf);
@@ -2674,8 +2766,11 @@ impl Pipeline {
         let done = results.len();
         let mut doc = DoclingDocument::new(name);
         let mut confs = std::collections::BTreeMap::new();
-        for (idx, (mut nodes, links, conf)) in results {
+        for (idx, (mut nodes, links, conf, page_image)) in results {
             assemble::stamp_page_no(&mut nodes, idx + 1);
+            if let Some(img) = page_image {
+                doc.page_images.insert(idx + 1, img);
+            }
             doc.nodes.extend(nodes);
             doc.links.extend(links);
             confs.insert(idx + 1, conf);
@@ -2773,7 +2868,7 @@ impl Pipeline {
                 // Confidence is dropped on the streaming path: the report is
                 // only complete once every page has run, which defeats
                 // page-by-page emission — buffered `convert` carries it.
-                let (nodes, links, _conf) = worker.process(n, &mut page)?;
+                let (nodes, links, _conf, _page_image) = worker.process(n, &mut page)?;
                 done += 1;
                 emit(asm.push(nodes), links)
             },
@@ -2890,7 +2985,9 @@ impl Pipeline {
                         if first_err.is_some() {
                             continue; // keep draining so the threads can exit
                         }
-                        while let Some((nodes, links, _conf)) = buffer.remove(&next) {
+                        // A stream carries Markdown, not the page map: page
+                        // images (#520) have nowhere to go and are dropped.
+                        while let Some((nodes, links, _conf, _page_image)) = buffer.remove(&next) {
                             if let Err(e) = emit(asm.push(nodes), links) {
                                 first_err = Some(e);
                                 break;
@@ -2935,6 +3032,7 @@ impl Pipeline {
         let ocr_engine = self.ocr_engine;
         let tesseract_lang = self.tesseract_lang.clone();
         let ocr_scale = self.ocr_scale;
+        let images = self.images;
         let enrich = self.enrich;
         let tables = self.tables_slot();
         let enrich_slots = self.enrich_slots();
@@ -2958,6 +3056,7 @@ impl Pipeline {
                             ocr_engine,
                             tesseract_lang,
                             ocr_scale,
+                            images,
                         )
                     })
                 })
@@ -3007,8 +3106,11 @@ impl Pipeline {
         let mut confs = std::collections::BTreeMap::new();
         let worker = self.primary()?;
         for (n, page) in pages.iter_mut().enumerate() {
-            let (mut nodes, links, conf) = worker.process(n, page)?;
+            let (mut nodes, links, conf, page_image) = worker.process(n, page)?;
             assemble::stamp_page_no(&mut nodes, n + 1);
+            if let Some(img) = page_image {
+                doc.page_images.insert(n + 1, img);
+            }
             doc.nodes.extend(nodes);
             doc.links.extend(links);
             confs.insert(n + 1, conf);

@@ -526,6 +526,7 @@ impl<'a> Parser<'a> {
             caption: None,
             caption_href: None,
             image: Some(PictureImage {
+                dpi: PictureImage::DEFAULT_DPI,
                 mimetype: mimetype.to_string(),
                 width,
                 height,

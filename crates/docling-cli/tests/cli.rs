@@ -598,3 +598,14 @@ fn to_pandoc_writes_the_ast_and_checks_the_api_version() {
         "stderr: {stderr}"
     );
 }
+
+/// `--images-scale` (#520) takes the same 0.1-4.0 window as `--scale`; a
+/// value outside it is a usage error before anything converts.
+#[test]
+fn images_scale_out_of_range_is_a_usage_error() {
+    for bad in ["0", "9", "abc"] {
+        let (code, _, err) = run(&["--images-scale", bad, "x.pdf"]);
+        assert_eq!(code, 2, "--images-scale {bad}");
+        assert!(err.contains("--images-scale"), "{err}");
+    }
+}

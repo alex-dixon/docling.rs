@@ -6,7 +6,7 @@
 //! (two-column aware), and each becomes a typed node by its layout label.
 
 use docling_core::{CaptionParent, Node, PictureClass, PictureImage, Table};
-#[cfg(feature = "ml")]
+#[cfg(any(feature = "ml", feature = "ocr-prep"))]
 use image::RgbImage;
 
 use crate::layout::Region;
@@ -2379,11 +2379,52 @@ pub fn crop_region_scaled(page: &PdfPage, bbox: [f32; 4], target_scale: f32) -> 
     ))
 }
 
+/// Resample `img` (rendered at `from` px/pt, covering `w_pt`×`h_pt` points)
+/// to `to` px/pt — docling's `round(points * scale)` pixel geometry, PIL's
+/// BICUBIC ≙ CatmullRom. Unchanged when the geometry already matches.
+#[cfg(feature = "ocr-prep")]
+fn rescale(img: RgbImage, w_pt: f32, h_pt: f32, to: f32) -> RgbImage {
+    let tw = (w_pt * to).round().max(1.0) as u32;
+    let th = (h_pt * to).round().max(1.0) as u32;
+    if (tw, th) == img.dimensions() {
+        return img;
+    }
+    image::imageops::resize(&img, tw, th, image::imageops::FilterType::CatmullRom)
+}
+
+/// Encode `img` as a PNG [`PictureImage`] rendered at `scale` px/pt.
+#[cfg(feature = "ocr-prep")]
+fn png_image(img: &RgbImage, scale: f32) -> Option<PictureImage> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
+    Some(PictureImage {
+        mimetype: "image/png".into(),
+        width: img.width(),
+        height: img.height(),
+        data: buf.into_inner(),
+        dpi: PictureImage::dpi_for_scale(scale),
+    })
+}
+
+/// The whole page render as docling's `PageItem.image` (#520): at `scale`
+/// px/pt (`None` = the render's own), `None` when the page has no bitmap.
+#[cfg(feature = "ocr-prep")]
+pub fn page_image(page: &PdfPage, scale: Option<f32>) -> Option<PictureImage> {
+    if page.image.width() == 0 || page.image.height() == 0 || page.scale <= 0.0 {
+        return None;
+    }
+    let scale = scale.unwrap_or(page.scale);
+    let img = rescale(page.image.clone(), page.width, page.height, scale);
+    png_image(&img, scale)
+}
+
 /// Crop a layout region from the rendered page image and encode it as PNG (the
 /// figure bytes docling stores on a `PictureItem`). Region coordinates are page
-/// points; the image is rendered at `page.scale`.
+/// points; the image is rendered at `page.scale` and resampled to `scale`
+/// px/pt when one is given (docling's `images_scale`, #520). The image's `dpi`
+/// is 72·scale (#519).
 #[cfg(feature = "ocr-prep")]
-fn crop_region(page: &PdfPage, region: &Region) -> Option<PictureImage> {
+fn crop_region(page: &PdfPage, region: &Region, scale: Option<f32>) -> Option<PictureImage> {
     let s = page.scale;
     let (iw, ih) = (page.image.width(), page.image.height());
     let x = (region.l * s).max(0.0) as u32;
@@ -2397,14 +2438,15 @@ fn crop_region(page: &PdfPage, region: &Region) -> Option<PictureImage> {
         return None;
     }
     let sub = image::imageops::crop_imm(&page.image, x, y, w, h).to_image();
-    let mut buf = std::io::Cursor::new(Vec::new());
-    sub.write_to(&mut buf, image::ImageFormat::Png).ok()?;
-    Some(PictureImage {
-        mimetype: "image/png".into(),
-        width: w,
-        height: h,
-        data: buf.into_inner(),
-    })
+    match scale {
+        Some(to) if (to - s).abs() > f32::EPSILON => {
+            // The crop's own point extent (the pixel box, back in points), so
+            // the resampled geometry is `round(points * scale)`.
+            let img = rescale(sub, w as f32 / s, h as f32 / s, to);
+            png_image(&img, to)
+        }
+        _ => png_image(&sub, s),
+    }
 }
 
 /// For each `picture` region, find the `caption` region closest below it (and
@@ -2738,7 +2780,13 @@ pub fn assemble_page(
     regions: Vec<Region>,
     table_rows: &[Option<TableGrid>],
     enrichments: &[Option<Enrichment>],
+    // Picture-crop scale in px/pt (docling's `images_scale`, #520); `None`
+    // keeps the page render's own scale.
+    picture_scale: Option<f32>,
 ) -> (Vec<Node>, Vec<(String, String)>) {
+    // Without pixels (the text-layer-only wasm build) no picture is cropped.
+    #[cfg(not(feature = "ocr-prep"))]
+    let _ = picture_scale;
     let mut nodes: Vec<Node> = Vec::new();
     // Every page opens with an invisible page marker carrying its size in
     // points — what the JSON export needs to build docling's `pages` map and
@@ -2950,7 +2998,8 @@ pub fn assemble_page(
             // Without the page render (text-layer-only build) a picture keeps
             // its caption/classification but carries no cropped pixels.
             #[cfg(feature = "ocr-prep")]
-            let image = crate::timing::timed("crop_region", || crop_region(page, region));
+            let image =
+                crate::timing::timed("crop_region", || crop_region(page, region, picture_scale));
             #[cfg(not(feature = "ocr-prep"))]
             let image: Option<PictureImage> = None;
             nodes.push(located(
@@ -3073,7 +3122,7 @@ pub fn assemble_page(
                                 _ => None,
                             };
                             #[cfg(feature = "ocr-prep")]
-                            let image = crop_region(page, &regions[p]);
+                            let image = crop_region(page, &regions[p], picture_scale);
                             #[cfg(not(feature = "ocr-prep"))]
                             let image: Option<PictureImage> = None;
                             cell_nodes.push(located(
@@ -3665,7 +3714,7 @@ mod tests {
 
         let page = PdfPage::from_cells(200.0, 200.0, 2.0, cells);
         let n = regions.len();
-        let (nodes, _) = super::assemble_page(&page, regions, &vec![None; n], &vec![None; n]);
+        let (nodes, _) = super::assemble_page(&page, regions, &vec![None; n], &vec![None; n], None);
         let children: Vec<&Node> = nodes
             .iter()
             .filter_map(|n| match n {
@@ -4008,7 +4057,7 @@ mod tests {
             r: 60.0,
             b: 80.0,
         };
-        let (nodes, _) = super::assemble_page(&page, vec![region], &[None], &[None]);
+        let (nodes, _) = super::assemble_page(&page, vec![region], &[None], &[None], None);
         // Layout-derived nodes carry provenance, so the picture arrives wrapped.
         let image = nodes
             .iter()

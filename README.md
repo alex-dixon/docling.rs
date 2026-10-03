@@ -909,6 +909,9 @@ in memory instead of all of them until export.
 Python) converts only that 1-based inclusive PDF page window. Out-of-window
 pages are skipped *before* rasterization, so 3 pages of a 500-page PDF cost 3
 pages; `B` past the end clamps, and a window that selects nothing is an error.
+In Python the window also goes per call, as docling takes it —
+`converter.convert(source, page_range=(2, 3))` (also `convert_all` /
+`convert_bytes`), overriding a constructor `page_range=` (#518).
 
 `--document-timeout SECONDS` (#497; docling's `PipelineOptions.document_timeout`
 — also `DocumentConverter::document_timeout` / `Pipeline::document_timeout`
@@ -1060,6 +1063,28 @@ kwarg, Node option):
   (layout and TableFormer pixels are untouched). docling's default is 3
   (216 dpi); lower it when the source raster is already high-resolution and
   upscaling degrades recognition.
+- `--images-scale X` — docling's `images_scale` (#520): the resolution of
+  picture crops (and page images), in pixels per PDF point, 0.1–4.0. Unset,
+  crops come straight out of the pipeline's 2.0 px/pt render, as before;
+  another value resamples that render (above 2.0 that upsamples, it does not
+  re-render). Each picture's `image.dpi` in the JSON is 72·scale, so code
+  mapping pixels back to points stays exact — 144 by default (#519; it used
+  to say 72 for a 2× crop).
+- `--page-images` — docling's `generate_page_images` (#520): keep every
+  page's render, at `--images-scale`, as the JSON `pages[n].image`
+  (docling-core's `PageItem.image`), so docling-core's
+  `TableItem.get_image(doc)` / `FormulaItem.get_image(doc)` crop from it and
+  full-page consumers need not re-render the PDF. Off by default (a PNG per
+  page, held in memory); `--no-ocr` (text layer only) pages have no render,
+  and streamed Markdown carries no page map. Both options are on every
+  surface: `DocumentConverter::images_scale` / `::generate_page_images` and
+  `Pipeline::images_scale` / `::generate_page_images` / `::set_images`,
+  `images_scale` / `page_images` in serve and the FFI options,
+  `imagesScale` / `pageImages` in Node, `images_scale=` /
+  `generate_page_images=` in Python (also docling-shaped through
+  `PdfPipelineOptions`, where `images_scale` applies once
+  `generate_picture_images` or `generate_page_images` is on — docling renders
+  images only then).
 Turn it on for image-extraction workflows over scanned documents whose
 uncaptioned figures carry enough label text to look panel-like. Available on
 every surface: `no_text_panels(bool)` on the library builder, a

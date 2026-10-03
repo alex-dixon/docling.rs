@@ -389,6 +389,15 @@ async fn images_scale_is_validated() {
     assert!(body_string(response).await.contains("scale"));
 }
 
+/// `images_scale` (#520) outside 0.1–4.0 is a 400 before any page renders.
+#[tokio::test]
+async fn images_scale_option_is_validated() {
+    let (ct, body) = multipart("x.pdf", b"%PDF-1.4", &[("images_scale", "9")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(body_string(response).await.contains("images_scale"));
+}
+
 /// End-to-end rasterization over a real one-page fixture — the pure-Rust
 /// renderer, so it runs in plain CI.
 #[tokio::test]

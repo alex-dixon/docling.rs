@@ -231,6 +231,17 @@ fn track_json(t: &crate::tree::TreeTrack) -> Value {
     Value::Object(m)
 }
 
+/// docling-core's `ImageRef` (pydantic field order: mimetype, dpi, size —
+/// as floats — uri), with the bytes inlined as a `data:` URI.
+fn image_ref_json(img: &crate::PictureImage) -> Value {
+    json!({
+        "mimetype": img.mimetype,
+        "dpi": img.dpi,
+        "size": { "width": img.width as f64, "height": img.height as f64 },
+        "uri": img.data_uri(),
+    })
+}
+
 /// Build the docling-core JSON object for `doc`.
 pub fn to_json(doc: &DoclingDocument) -> Value {
     let mut b = Builder::default();
@@ -290,10 +301,15 @@ pub fn to_json(doc: &DoclingDocument) -> Value {
         "form_items": [],
         "pages": b.pages.iter().map(|(n, w, h)| {
             let r2 = |v: f64| (v * 100.0).round() / 100.0;
-            (n.to_string(), json!({
-                "size": { "width": r2(*w), "height": r2(*h) },
-                "page_no": n,
-            }))
+            // docling-core's `PageItem` field order: size, image, page_no
+            // (#520 — the image only when page images were generated).
+            let mut page = serde_json::Map::new();
+            page.insert("size".into(), json!({ "width": r2(*w), "height": r2(*h) }));
+            if let Some(img) = doc.page_images.get(n) {
+                page.insert("image".into(), image_ref_json(img));
+            }
+            page.insert("page_no".into(), json!(n));
+            (n.to_string(), Value::Object(page))
         }).collect::<serde_json::Map<String, Value>>(),
     });
 
@@ -1772,12 +1788,7 @@ impl Builder {
         // field order, which `preserve_order` lets us reproduce by rebuilding
         // the tail.
         if let Some(img) = image {
-            let image = json!({
-                "mimetype": img.mimetype,
-                "dpi": 72,
-                "size": { "width": img.width as f64, "height": img.height as f64 },
-                "uri": img.data_uri(),
-            });
+            let image = image_ref_json(img);
             if let Some(obj) = item.as_object_mut() {
                 let annotations = obj.remove("annotations").unwrap_or_else(|| json!([]));
                 obj.insert("image".into(), image);
@@ -2048,6 +2059,7 @@ mod tests {
             caption: Some("Fig 1".into()),
             caption_href: None,
             image: Some(PictureImage {
+                dpi: crate::PictureImage::DEFAULT_DPI,
                 mimetype: "image/png".into(),
                 width: 4,
                 height: 2,
@@ -2675,6 +2687,7 @@ mod tests {
             TreeKind::Picture {
                 captions: Vec::new(),
                 image: Some(crate::PictureImage {
+                    dpi: crate::PictureImage::DEFAULT_DPI,
                     mimetype: "image/png".into(),
                     width: 2,
                     height: 2,

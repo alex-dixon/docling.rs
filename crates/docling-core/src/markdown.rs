@@ -1302,6 +1302,7 @@ mod tests {
             caption: None,
             caption_href: None,
             image: Some(PictureImage {
+                dpi: PictureImage::DEFAULT_DPI,
                 mimetype: "image/png".into(),
                 width: 1,
                 height: 1,
@@ -1632,6 +1633,7 @@ mod tests {
             caption: Some("Fig 1".into()),
             caption_href: None,
             image: Some(PictureImage {
+                dpi: PictureImage::DEFAULT_DPI,
                 mimetype: "image/png".into(),
                 width: 2,
                 height: 2,
@@ -1647,6 +1649,7 @@ mod tests {
             caption: None,
             caption_href: None,
             image: Some(PictureImage {
+                dpi: PictureImage::DEFAULT_DPI,
                 mimetype: "image/png".into(),
                 width: 2,
                 height: 2,

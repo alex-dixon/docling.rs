@@ -219,6 +219,7 @@ pub fn picture_image(path: &str, data: Vec<u8>) -> Option<PictureImage> {
         .into_dimensions()
         .ok()?;
     Some(PictureImage {
+        dpi: PictureImage::DEFAULT_DPI,
         mimetype: mime_for(path).to_string(),
         width,
         height,

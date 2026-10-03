@@ -37,7 +37,7 @@ import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, Optional, Union
+from typing import Dict, Iterable, Iterator, Optional, Tuple, Union
 
 from docling_core.types.doc import DoclingDocument, ImageRefMode
 
@@ -224,6 +224,20 @@ class DocumentConverter:
       the result is a ``PARTIAL_SUCCESS`` whose ``.errors`` says why. ``None``
       (default) is unlimited. Also accepted docling-shaped, via
       ``pipeline_options.document_timeout``.
+    * ``page_range`` — ``(first, last)``, a 1-based inclusive PDF page window
+      for every conversion (#518). docling takes it per call —
+      ``convert(source, page_range=(a, b))`` — which works here too and wins
+      over this default.
+    * ``images_scale`` / ``generate_page_images`` — docling's
+      ``PdfPipelineOptions`` fields of the same names (#520): picture crops
+      (and page images) at ``images_scale`` px per PDF point, and each page's
+      render kept as ``document.pages[n].image`` so docling-core's
+      ``TableItem.get_image`` / ``FormulaItem.get_image`` work. Also accepted
+      docling-shaped via ``pipeline_options``, where ``images_scale`` applies
+      once ``generate_picture_images`` or ``generate_page_images`` is set
+      (docling only renders images then; without either, crops keep the
+      engine's 2.0 px/pt render). Every picture's ``image.dpi`` is
+      72·scale (#519).
     * ``artifacts_path`` — override the model cache dir (docling's
       ``artifacts_path``); defaults to ``~/.cache/docling.rs``.
     """
@@ -259,6 +273,9 @@ class DocumentConverter:
         vlm_prompt: Optional[str] = None,
         vlm_max_tokens: Optional[int] = None,
         document_timeout: Optional[float] = None,
+        page_range: Optional[Tuple[int, int]] = None,
+        images_scale: Optional[float] = None,
+        generate_page_images: bool = False,
         artifacts_path=None,
     ):
         ensure_env(artifacts_path)
@@ -293,6 +310,15 @@ class DocumentConverter:
             dt = getattr(pdf_opts, "document_timeout", None)
             if dt is not None:
                 document_timeout = float(dt)
+            # docling's image outputs (#520): page images on request, and
+            # images_scale whenever docling would render images at all.
+            generate_page_images = bool(
+                getattr(pdf_opts, "generate_page_images", generate_page_images)
+            )
+            if generate_page_images or getattr(pdf_opts, "generate_picture_images", False):
+                scale = getattr(pdf_opts, "images_scale", None)
+                if scale is not None:
+                    images_scale = float(scale)
             # Map docling's ocr_options.lang (a list of language ids) onto the
             # engine's en/ch recognition-model switch. First entry wins;
             # anything that isn't recognisably English/Chinese is ignored with
@@ -401,6 +427,9 @@ class DocumentConverter:
             vlm_prompt=vlm_prompt,
             vlm_max_tokens=vlm_max_tokens,
             document_timeout=document_timeout,
+            page_range=_page_range(page_range),
+            images_scale=images_scale,
+            generate_page_images=generate_page_images,
             allowed_formats=(
                 [InputFormat(f).value for f in allowed_formats]
                 if allowed_formats is not None
@@ -437,42 +466,57 @@ class DocumentConverter:
             InputFormat(format).value if format is not None else None
         )
 
-    def convert(self, source: Union[str, os.PathLike, DocumentStream]) -> ConversionResult:
+    def convert(
+        self,
+        source: Union[str, os.PathLike, DocumentStream],
+        page_range: Optional[Tuple[int, int]] = None,
+    ) -> ConversionResult:
         """Convert a filesystem path (str / pathlib.Path), an ``http(s)://``
         URL (downloaded first, as docling does) or an in-memory
-        :class:`DocumentStream`."""
-        return self._finish(_wrap(self._convert_native(source)))
+        :class:`DocumentStream`. ``page_range=(first, last)`` converts only
+        that 1-based inclusive PDF page window, as docling's
+        ``convert(source, page_range=…)`` does (#518); ``None`` keeps the
+        constructor's window (all pages by default)."""
+        return self._finish(_wrap(self._convert_native(source, page_range)))
 
     def convert_all(
         self,
         sources: Iterable[Union[str, os.PathLike, DocumentStream]],
         raises_on_error: bool = True,
+        page_range: Optional[Tuple[int, int]] = None,
     ) -> Iterator[ConversionResult]:
         """Convert many sources, yielding a :class:`ConversionResult` each
         (docling's ``convert_all``). With ``raises_on_error=False`` a failing
-        source yields a ``failure`` result (empty document) instead of raising."""
+        source yields a ``failure`` result (empty document) instead of raising.
+        ``page_range`` as in :meth:`convert`."""
         for source in sources:
             try:
-                yield self._finish(_wrap(self._convert_native(source)))
+                yield self._finish(_wrap(self._convert_native(source, page_range)))
             except Exception:
                 if raises_on_error:
                     raise
                 name = source.name if isinstance(source, DocumentStream) else str(source)
                 yield ConversionResult("failure", name, DoclingDocument(name=Path(name).name))
 
-    def convert_bytes(self, name: str, data: bytes) -> ConversionResult:
+    def convert_bytes(
+        self, name: str, data: bytes, page_range: Optional[Tuple[int, int]] = None
+    ) -> ConversionResult:
         """Convert in-memory bytes; ``name``'s extension drives format detection
-        (docling's ``DocumentStream`` counterpart)."""
-        native = self._inner.convert_bytes(name, data)
+        (docling's ``DocumentStream`` counterpart). ``page_range`` as in
+        :meth:`convert`."""
+        native = self._inner.convert_bytes(name, data, page_range=_page_range(page_range))
         return self._finish(_wrap(native))
 
-    def _convert_native(self, source):
+    def _convert_native(self, source, page_range=None):
+        page_range = _page_range(page_range)
         if isinstance(source, DocumentStream):
-            return self._inner.convert_bytes(source.name, source.stream.read())
+            return self._inner.convert_bytes(
+                source.name, source.stream.read(), page_range=page_range
+            )
         if isinstance(source, str) and _is_url(source):
             name, data = _fetch_url(source)
-            return self._inner.convert_bytes(name, data)
-        return self._inner.convert(source)
+            return self._inner.convert_bytes(name, data, page_range=page_range)
+        return self._inner.convert(source, page_range=page_range)
 
     def _finish(self, result: ConversionResult) -> ConversionResult:
         if self._picture_description is not None and result.status != "failure":
@@ -494,6 +538,21 @@ def _pdf_pipeline_options(
         if fo is not None and getattr(fo, "pipeline_options", None) is not None:
             return fo.pipeline_options
     return None
+
+
+def _page_range(page_range) -> Optional[Tuple[int, int]]:
+    """docling's ``page_range`` argument as the engine's ``(first, last)``:
+    any two-item sequence of integers; ``None`` stays ``None``. docling's
+    default window ``(1, sys.maxsize)`` simply means "all pages"."""
+    if page_range is None:
+        return None
+    try:
+        first, last = page_range
+        return (int(first), int(last))
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"page_range must be a (first, last) pair of page numbers, got {page_range!r}"
+        ) from None
 
 
 def _is_url(source: str) -> bool:

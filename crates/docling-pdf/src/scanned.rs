@@ -123,7 +123,7 @@ pub fn assemble_page_with_tables(
 ) -> AssembledPage {
     table_rows.resize(regions.len(), None);
     let enrich = vec![None; regions.len()];
-    crate::assemble::assemble_page(page, regions, &table_rows, &enrich)
+    crate::assemble::assemble_page(page, regions, &table_rows, &enrich, None)
 }
 
 /// Stitch per-page results into a document: cross-page paragraph

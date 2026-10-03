@@ -365,6 +365,7 @@ pub(crate) fn build_picture(mimetype: impl Into<String>, data: Vec<u8>) -> Optio
         .into_dimensions()
         .ok()?;
     Some(PictureImage {
+        dpi: PictureImage::DEFAULT_DPI,
         mimetype: mimetype.into(),
         width,
         height,

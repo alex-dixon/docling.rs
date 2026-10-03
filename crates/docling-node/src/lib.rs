@@ -72,6 +72,13 @@ pub struct ConverterOptions {
     /// #254); unset reads the pipeline's own 2.0 px/pt render (docling's
     /// default is 3 = 216 dpi).
     pub ocr_scale: Option<f64>,
+    /// Picture crops (and page images) in px per PDF point — docling's
+    /// `images_scale` (#520), 0.1–4.0; unset keeps the pipeline's 2.0 px/pt
+    /// render. The JSON picture `dpi` is 72·scale (#519).
+    pub images_scale: Option<f64>,
+    /// Keep each page's render as the JSON `pages[n].image` — docling's
+    /// `generate_page_images` (#520). Default `false`.
+    pub page_images: Option<bool>,
     /// Which OCR engine reads scanned pages (#460): `"ppocr"` (default, the
     /// built-in PP-OCRv3 recognizer) | `"tesseract"` (the system `tesseract`
     /// binary). Under Tesseract `ocrLang` is its language list — tessdata
@@ -228,6 +235,13 @@ pub struct ConvertOptions {
     /// OCR render scale in px per PDF point (docling's `OcrOptions.scale`,
     /// #254); unset reads the pipeline's own 2.0 px/pt render.
     pub ocr_scale: Option<f64>,
+    /// Picture crops (and page images) in px per PDF point — docling's
+    /// `images_scale` (#520), 0.1–4.0; unset keeps the pipeline's 2.0 px/pt
+    /// render. The JSON picture `dpi` is 72·scale (#519).
+    pub images_scale: Option<f64>,
+    /// Keep each page's render as the JSON `pages[n].image` — docling's
+    /// `generate_page_images` (#520). Default `false`.
+    pub page_images: Option<bool>,
     /// Which OCR engine reads scanned pages (#460): `"ppocr"` (default) |
     /// `"tesseract"`.
     pub ocr_engine: Option<String>,
@@ -371,6 +385,8 @@ struct ConvertConfig {
     ocr_mode: Option<String>,
     ocr_engine: Option<String>,
     ocr_scale: Option<f32>,
+    images_scale: Option<f32>,
+    page_images: bool,
     list_attachments: bool,
     skip_empty_cells: bool,
     compact_tables: bool,
@@ -464,6 +480,8 @@ fn build_config(o: ConvertOptions) -> Result<ConvertConfig> {
         ocr_mode: parse_ocr_mode(o.ocr_mode)?,
         ocr_engine: parse_ocr_engine(o.ocr_engine)?,
         ocr_scale: parse_ocr_scale(o.ocr_scale)?,
+        images_scale: parse_images_scale(o.images_scale)?,
+        page_images: o.page_images.unwrap_or(false),
         list_attachments: o.list_attachments.unwrap_or(false),
         skip_empty_cells: o.skip_empty_cells.unwrap_or(false),
         compact_tables: o.compact_tables.unwrap_or(false),
@@ -637,6 +655,17 @@ fn parse_document_timeout(s: Option<f64>) -> Result<Option<std::time::Duration>>
     }
 }
 
+/// `imagesScale` (#520): 0.1–4.0, the CLI's and serve's window.
+fn parse_images_scale(s: Option<f64>) -> Result<Option<f32>> {
+    match s {
+        Some(v) if (0.1..=4.0).contains(&v) => Ok(Some(v as f32)),
+        Some(v) => Err(Error::from_reason(format!(
+            "imagesScale must be a number in 0.1-4.0, got {v}"
+        ))),
+        None => Ok(None),
+    }
+}
+
 fn parse_ocr_scale(s: Option<f64>) -> Result<Option<f32>> {
     match s {
         Some(v) if v.is_finite() && v > 0.0 => Ok(Some(v as f32)),
@@ -701,10 +730,15 @@ fn build_converter(cfg: &ConvertConfig) -> RsConverter {
         Some(engine) => base.ocr_engine(engine.clone()),
         None => base,
     };
-    match cfg.ocr_scale {
+    let base = match cfg.ocr_scale {
         Some(s) => base.ocr_scale(s),
         None => base,
-    }
+    };
+    let base = match cfg.images_scale {
+        Some(s) => base.images_scale(s),
+        None => base,
+    };
+    base.generate_page_images(cfg.page_images)
 }
 
 /// Render an already-converted document to Markdown/JSON per the config. The
@@ -937,6 +971,8 @@ pub struct DocumentConverter {
     ocr_mode: Option<String>,
     ocr_engine: Option<String>,
     ocr_scale: Option<f32>,
+    images_scale: Option<f32>,
+    page_images: bool,
     list_attachments: bool,
     skip_empty_cells: bool,
     compact_tables: bool,
@@ -982,6 +1018,8 @@ impl DocumentConverter {
             ocr_mode: parse_ocr_mode(o.ocr_mode.clone())?,
             ocr_engine: parse_ocr_engine(o.ocr_engine.clone())?,
             ocr_scale: parse_ocr_scale(o.ocr_scale)?,
+            images_scale: parse_images_scale(o.images_scale)?,
+            page_images: o.page_images.unwrap_or(false),
             list_attachments: o.list_attachments.unwrap_or(false),
             skip_empty_cells: o.skip_empty_cells.unwrap_or(false),
             compact_tables: o.compact_tables.unwrap_or(false),
@@ -1024,6 +1062,8 @@ impl DocumentConverter {
             ocr_mode: self.ocr_mode.clone(),
             ocr_engine: self.ocr_engine.clone(),
             ocr_scale: self.ocr_scale,
+            images_scale: self.images_scale,
+            page_images: self.page_images,
             list_attachments: self.list_attachments,
             skip_empty_cells: self.skip_empty_cells,
             compact_tables: self.compact_tables,
@@ -1233,6 +1273,8 @@ struct WarmPipelineConfig {
     tesseract_lang: Option<String>,
     ocr_mode: Option<docling::OcrMode>,
     ocr_scale: Option<f32>,
+    /// Picture-crop scale and page images (#519/#520).
+    images: docling::ImageOutput,
     enrich: docling::EnrichmentOptions,
 }
 
@@ -1275,6 +1317,10 @@ fn warm_pipeline_config(o: &ConverterOptions) -> Result<WarmPipelineConfig> {
             .as_deref()
             .and_then(docling::OcrMode::parse),
         ocr_scale: parse_ocr_scale(o.ocr_scale)?,
+        images: docling::ImageOutput {
+            scale: parse_images_scale(o.images_scale)?,
+            page_images: o.page_images.unwrap_or(false),
+        },
         enrich: enrichments(
             o.do_picture_classification,
             o.do_code_enrichment,
@@ -1338,6 +1384,8 @@ impl Pipeline {
             .tesseract_lang(warm.tesseract_lang)
             .ocr_mode(warm.ocr_mode)
             .ocr_scale(warm.ocr_scale)
+            .images_scale(warm.images.scale)
+            .generate_page_images(warm.images.page_images)
             .pages(warm.page_range)
             .document_timeout(warm.document_timeout)
             .enrichments(warm.enrich);
@@ -1647,6 +1695,8 @@ fn output_config(out: Option<OutputOptions>, strict: bool) -> Result<ConvertConf
         ocr_mode: None,
         ocr_engine: None,
         ocr_scale: None,
+        images_scale: None,
+        page_images: false,
         allowed_formats: None,
         to: parse_output_kind(out.to.as_deref())?,
         image_mode: parse_image_mode(out.image_mode.as_deref())?,
@@ -2247,6 +2297,8 @@ mod tests {
             ocr_lang: Some("por+eng".into()),
             ocr_mode: Some("full_page".into()),
             ocr_scale: Some(3.0),
+            images_scale: Some(1.5),
+            page_images: Some(true),
             skip_ocr: Some(false),
             force_full_page_ocr: Some(true),
             no_text_panels: Some(true),
@@ -2261,6 +2313,13 @@ mod tests {
         assert_eq!(got.ocr_lang, None, "under Tesseract ocrLang is its -l list");
         assert_eq!(got.ocr_mode, Some(docling::OcrMode::FullPage));
         assert_eq!(got.ocr_scale, Some(3.0));
+        assert_eq!(
+            got.images,
+            docling::ImageOutput {
+                scale: Some(1.5),
+                page_images: true
+            }
+        );
         assert!(!got.skip_ocr);
         assert!(got.force_full_page_ocr);
         assert!(got.no_text_panels);
@@ -2299,6 +2358,7 @@ mod tests {
                 tesseract_lang: None,
                 ocr_mode: None,
                 ocr_scale: None,
+                images: docling::ImageOutput::default(),
                 enrich: docling::EnrichmentOptions::default(),
             }
         );
@@ -2331,6 +2391,10 @@ mod tests {
             },
             ConverterOptions {
                 ocr_scale: Some(0.0),
+                ..Default::default()
+            },
+            ConverterOptions {
+                images_scale: Some(9.0),
                 ..Default::default()
             },
             ConverterOptions {

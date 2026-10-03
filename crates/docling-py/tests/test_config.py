@@ -215,6 +215,74 @@ def test_no_text_panels_reaches_the_native_converter():
         assert "homepage" in result.document.export_to_markdown().lower()
 
 
+def test_page_range_is_accepted_like_docling():
+    """#518: docling takes ``page_range`` per call — ``convert(source,
+    page_range=(a, b))`` — and the README documents it for this wrapper; the
+    public converter used to reject it with a TypeError (only the native
+    class had it). Constructor default, per-call override, ``convert_all``
+    and ``convert_bytes`` all accept it (the window only narrows PDFs, so
+    the declarative fixture converts unchanged), and a malformed window is
+    a ``ValueError``, not a crash."""
+    import sys
+
+    from docling_rs import DocumentConverter, DocumentStream
+
+    converter = DocumentConverter(page_range=(2, 3))
+    assert "homepage" in converter.convert(HTML).document.export_to_markdown().lower()
+    plain = DocumentConverter()
+    # docling's own default window spelled out.
+    for window in ((1, 2), [1, 1], (1, sys.maxsize)):
+        md = plain.convert(HTML, page_range=window).document.export_to_markdown()
+        assert "homepage" in md.lower()
+    assert next(iter(plain.convert_all([HTML], page_range=(1, 1)))).status == "success"
+    data = HTML.read_bytes()
+    assert plain.convert_bytes(HTML.name, data, page_range=(1, 1)).status == "success"
+    stream = DocumentStream(name=HTML.name, stream=io.BytesIO(data))
+    assert plain.convert(stream, page_range=(1, 1)).status == "success"
+    for bad in ((0, 2), (3, 1), (1,), "1-2"):
+        with pytest.raises(ValueError):
+            plain.convert(HTML, page_range=bad)
+    with pytest.raises(ValueError):
+        DocumentConverter(page_range=(0, 1))
+
+
+def test_image_options_forward_and_validate():
+    """#520: ``images_scale`` / ``generate_page_images`` reach the engine —
+    directly and docling-shaped through ``PdfPipelineOptions`` — and an
+    out-of-range scale raises at construction."""
+    from docling_rs import (
+        DocumentConverter,
+        InputFormat,
+        PdfFormatOption,
+        PdfPipelineOptions,
+    )
+
+    for converter in (
+        DocumentConverter(images_scale=1.5, generate_page_images=True),
+        DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(
+                    pipeline_options=PdfPipelineOptions(
+                        images_scale=2.0,
+                        generate_page_images=True,
+                        generate_picture_images=True,
+                    )
+                )
+            }
+        ),
+    ):
+        assert converter.convert(HTML).status == "success"
+    with pytest.raises(ValueError):
+        DocumentConverter(images_scale=9.0)
+    # docling's dataclass default (1.0) with no image generation requested
+    # leaves the engine's crops alone rather than tripping validation.
+    DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=PdfPipelineOptions())
+        }
+    )
+
+
 def test_sparse_sheet_kwargs_forward_to_engine():
     """#274: the wrapper forwards skip_empty_cells / compact_tables to the
     native converter (they were native-only in v1.14.0). skip_empty_cells is
