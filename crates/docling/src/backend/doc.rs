@@ -52,11 +52,12 @@ pub struct DocBackend;
 
 impl DeclarativeBackend for DocBackend {
     fn convert(&self, source: &SourceDocument) -> Result<DoclingDocument, ConversionError> {
-        let cfb = CompoundFile::open(&source.bytes)
-            .ok_or_else(|| ConversionError::Parse("doc: not a compound file".into()))?;
+        let cfb = CompoundFile::open(&source.bytes).ok_or_else(|| {
+            ConversionError::Parse(CompoundFile::open_error("doc", &source.bytes))
+        })?;
         let word = cfb
             .stream("WordDocument")
-            .ok_or_else(|| ConversionError::Parse("doc: no WordDocument stream".into()))?;
+            .ok_or_else(|| ConversionError::Parse(cfb.stream_error("doc", "WordDocument")))?;
         let w_ident = u16_at(&word, 0).ok_or_else(|| {
             ConversionError::Parse(format!(
                 "doc: WordDocument stream too short for a FIB ({} bytes)",

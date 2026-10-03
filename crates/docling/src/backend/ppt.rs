@@ -61,11 +61,12 @@ pub struct PptBackend;
 
 impl DeclarativeBackend for PptBackend {
     fn convert(&self, source: &SourceDocument) -> Result<DoclingDocument, ConversionError> {
-        let cfb = CompoundFile::open(&source.bytes)
-            .ok_or_else(|| ConversionError::Parse("ppt: not a compound file".into()))?;
-        let stream = cfb
-            .stream("PowerPoint Document")
-            .ok_or_else(|| ConversionError::Parse("ppt: no PowerPoint Document stream".into()))?;
+        let cfb = CompoundFile::open(&source.bytes).ok_or_else(|| {
+            ConversionError::Parse(CompoundFile::open_error("ppt", &source.bytes))
+        })?;
+        let stream = cfb.stream("PowerPoint Document").ok_or_else(|| {
+            ConversionError::Parse(cfb.stream_error("ppt", "PowerPoint Document"))
+        })?;
         if cfb.stream("EncryptedSummary").is_some() {
             return Err(ConversionError::Parse("ppt: document is encrypted".into()));
         }
