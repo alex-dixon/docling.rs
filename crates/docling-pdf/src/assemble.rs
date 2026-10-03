@@ -6,7 +6,7 @@
 //! (two-column aware), and each becomes a typed node by its layout label.
 
 use docling_core::{CaptionParent, Node, PictureClass, PictureImage, Table};
-#[cfg(feature = "ml")]
+#[cfg(any(feature = "ml", feature = "ocr-prep"))]
 use image::RgbImage;
 
 use crate::layout::Region;
