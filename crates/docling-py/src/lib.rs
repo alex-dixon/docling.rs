@@ -346,9 +346,7 @@ impl PyDocumentConverter {
         let engine = ocr_engine_choice.unwrap_or_else(docling::OcrEngine::from_env);
         let ocr_lang_choice = match &ocr_lang {
             Some(lang) => {
-                engine
-                    .validate_lang(lang)
-                    .map_err(PyValueError::new_err)?;
+                engine.validate_lang(lang).map_err(PyValueError::new_err)?;
                 match engine {
                     docling::OcrEngine::PpOcr => docling::OcrLang::parse(lang),
                     docling::OcrEngine::Tesseract => None,
@@ -906,12 +904,67 @@ impl<'a, 'py> FromPyObject<'a, 'py> for PathLike {
     }
 }
 
+/// Referenced image files: `(path under artifacts_dir, bytes)`.
+type PyArtifacts<'py> = Vec<(String, Bound<'py, PyBytes>)>;
+
+/// Pandoc's JSON AST (#515) for a document in docling's JSON wire format
+/// (what `DoclingDocument.export_to_dict()` serializes to) — the Rust
+/// serializer behind `docling-rs --to pandoc`, so Python output matches the
+/// CLI's. `image_mode` is `"placeholder"` | `"embedded"` | `"referenced"`;
+/// `referenced` returns the image files as `(path under artifacts_dir,
+/// bytes)` pairs for the caller to write. `api_version`, when given, must be
+/// one the serializer writes (1.23) — anything else raises `ValueError`.
+#[pyfunction]
+#[pyo3(signature = (
+    document_json,
+    image_mode = "placeholder".to_string(),
+    artifacts_dir = "artifacts".to_string(),
+    api_version = None,
+))]
+fn pandoc_from_json<'py>(
+    py: Python<'py>,
+    document_json: String,
+    image_mode: String,
+    artifacts_dir: String,
+    api_version: Option<String>,
+) -> PyResult<(String, PyArtifacts<'py>)> {
+    let image_mode = match image_mode.as_str() {
+        "placeholder" => docling::ImageMode::Placeholder,
+        "embedded" => docling::ImageMode::Embedded,
+        "referenced" => docling::ImageMode::Referenced,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown image_mode {other:?} (expected placeholder, embedded or referenced)"
+            )))
+        }
+    };
+    let options = docling::pandoc::PandocExportOptions {
+        image_mode,
+        artifacts_dir,
+        api_version,
+        ..Default::default()
+    };
+    let (json, images) = py
+        .detach(|| {
+            let value: serde_json::Value =
+                serde_json::from_str(&document_json).map_err(|e| e.to_string())?;
+            docling::pandoc::from_docling_json(&value, &options).map_err(|e| e.to_string())
+        })
+        .map_err(PyValueError::new_err)?;
+    let images = images
+        .into_iter()
+        .map(|(path, bytes)| (path, PyBytes::new(py, &bytes)))
+        .collect();
+    Ok((json, images))
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDocumentConverter>()?;
     m.add_class::<PyNativeResult>()?;
     m.add_class::<PyChunkStream>()?;
     m.add_function(pyo3::wrap_pyfunction!(chunk_document, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(pandoc_from_json, m)?)?;
     m.add("ConversionError", m.py().get_type::<ConversionError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

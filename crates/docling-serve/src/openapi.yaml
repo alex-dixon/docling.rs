@@ -8,7 +8,7 @@ info:
     HTTP conversion API over [docling.rs](https://github.com/docling-project/docling.rs):
     documents (PDF, DOCX, XLSX, PPTX, HTML, EPUB, images, audio, video, …) to
     Markdown, docling `DoclingDocument` JSON, DocLang (`.dclx`) archives,
-    LaTeX, or chunk records.
+    LaTeX, HTML, Pandoc AST JSON, or chunk records.
 
     Options may be sent as query parameters, multipart text fields, or JSON
     keys; a body value wins over the same option in the query string.
@@ -66,6 +66,7 @@ paths:
         - { $ref: "#/components/parameters/skip_empty_cells" }
         - { $ref: "#/components/parameters/compact_tables" }
         - { $ref: "#/components/parameters/md_page_break_placeholder" }
+        - { $ref: "#/components/parameters/pandoc_api_version" }
         - { $ref: "#/components/parameters/list_attachments" }
         - { $ref: "#/components/parameters/ebcdic_layout" }
         - { $ref: "#/components/parameters/pages" }
@@ -115,6 +116,7 @@ paths:
                 skip_empty_cells: { type: boolean }
                 compact_tables: { type: boolean }
                 md_page_break_placeholder: { type: string, examples: ["<!-- page break -->"] }
+                pandoc_api_version: { type: string, examples: ["1.23"] }
                 pages: { type: string, examples: ["2-5"] }
                 ocr_lang: { $ref: "#/components/schemas/OcrLang" }
                 ocr_mode: { $ref: "#/components/schemas/OcrMode" }
@@ -188,6 +190,7 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/DoclingDocument"
                   - $ref: "#/components/schemas/Chunks"
+                  - $ref: "#/components/schemas/PandocAst"
             application/vnd.openxmlformats-officedocument.doclang:
               schema: { type: string, format: binary }
             text/x-tex:
@@ -401,11 +404,15 @@ components:
   schemas:
     To:
       type: string
-      enum: [md, json, dclx, chunks, latex, images]
+      enum: [md, json, html, dclx, chunks, latex, pandoc, images]
       default: md
       description: |
         `md` — Markdown, streamed as it converts.
         `json` — docling `DoclingDocument` JSON.
+        `html` — a complete HTML page (docling-core's HTML serializer, #492).
+        `pandoc` — Pandoc's AST as JSON (#515), `application/json`, for
+        `pandoc -f json -t docx|odt|rst|typst|…`; pictures per `images`; in a
+        batch, inline under `pandoc` as an object.
         `dclx` — DocLang OPC archive, returned as a download.
         `latex` — a complete LaTeX document (docling 2.124's `--to latex`,
         #317), `text/x-tex`; in a batch, inline under `latex`.
@@ -558,6 +565,14 @@ components:
           description: >
             Render Markdown tables in the compact `| a | b |` form instead of
             the width-padded GitHub style (docling.rs extension, all formats).
+        pandoc_api_version:
+          type: string
+          examples: ["1.23"]
+          description: >
+            `to=pandoc` (#515): the Pandoc API version the client's `pandoc`
+            reads. Only 1.23 (pandoc-types 1.23.1.1, Pandoc 3.x) is written;
+            any other version is a 400 rather than a document Pandoc would
+            reject.
         md_page_break_placeholder:
           type: string
           examples: ["<!-- page break -->"]
@@ -732,6 +747,19 @@ components:
         `ChunkerType`, #256). Unset returns both: `hierarchical` always,
         `hybrid` when a tokenizer is available. An explicit `hybrid` without a
         usable tokenizer is a 400.
+    PandocAst:
+      type: object
+      description: >
+        Pandoc's AST (`to=pandoc`, #515) — the JSON `pandoc -f json` reads
+        (`Text.Pandoc.Definition`, pandoc-types 1.23.1.1).
+      required: [pandoc-api-version, meta, blocks]
+      properties:
+        pandoc-api-version:
+          type: array
+          items: { type: integer }
+          examples: [[1, 23, 1, 1]]
+        meta: { type: object }
+        blocks: { type: array, items: { type: object } }
     Chunks:
       type: object
       description: Chunker output for `to=chunks`.
@@ -812,6 +840,8 @@ components:
       { name: compact_tables, in: query, schema: { type: boolean } }
     md_page_break_placeholder:
       { name: md_page_break_placeholder, in: query, schema: { type: string } }
+    pandoc_api_version:
+      { name: pandoc_api_version, in: query, schema: { type: string } }
     list_attachments:
       { name: list_attachments, in: query, schema: { type: boolean } }
     ebcdic_layout:

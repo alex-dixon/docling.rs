@@ -50,6 +50,7 @@ pub use stream::MarkdownStream;
 // `result.document.export_to_markdown()` works without an extra import.
 pub use docling_core::base64;
 pub use docling_core::chunker;
+pub use docling_core::pandoc;
 pub use docling_core::{
     ConfidenceReport, ContentLayer, ContentLayers, DocItemLabel, DoclingDocument,
     HtmlExportOptions, ImageMode, MarkdownStreamer, Node, PictureImage, QualityGrade, Table,

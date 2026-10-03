@@ -83,8 +83,10 @@ fn convert_impl(
             .document
             .export_to_html_with_images(image_mode, "artifacts")
             .0),
+        // #515: Pandoc's JSON AST (`pandoc -f json`); pictures as above.
+        "pandoc" => pandoc_json(&result.document, image_mode),
         other => Err(format!(
-            "unknown output format {other:?} (expected \"md\", \"json\", \"doclang\", \"latex\" or \"html\")"
+            "unknown output format {other:?} (expected \"md\", \"json\", \"doclang\", \"latex\", \"html\" or \"pandoc\")"
         )),
     }
 }
@@ -103,11 +105,27 @@ fn image_mode(images: Option<&str>) -> Result<ImageMode, String> {
     }
 }
 
+/// Pandoc's JSON AST (#515) with `image_mode`'s pictures — the one output
+/// every conversion path here (declarative, OCR, layout) shares.
+pub(crate) fn pandoc_json(
+    doc: &docling_core::DoclingDocument,
+    image_mode: ImageMode,
+) -> Result<String, String> {
+    let opts = docling_core::pandoc::PandocExportOptions {
+        image_mode,
+        ..Default::default()
+    };
+    doc.export_to_pandoc_json_with(&opts)
+        .map(|(json, _)| json)
+        .map_err(|e| e.to_string())
+}
+
 /// Convert a document (as bytes + filename, the extension drives format
 /// detection) to `to`: `"md"` (Markdown, default), `"json"` (docling-core's
 /// `DoclingDocument` wire format, schema 1.10.0), `"doclang"` (docling's
-/// DocLang XML serialization) or `"latex"` (docling 2.124's LaTeX document,
-/// #317).
+/// DocLang XML serialization), `"latex"` (docling 2.124's LaTeX document,
+/// #317), `"html"` or `"pandoc"` (Pandoc's JSON AST for `pandoc -f json`,
+/// #515).
 ///
 /// `images` controls how pictures render in Markdown — `"placeholder"`
 /// (default) or `"embedded"` (base64 data URIs), the same option
@@ -176,6 +194,9 @@ mod tests {
         assert!(out.contains("# Title"));
         let json = convert_impl(md, "note.md", Some("json"), None, None, None).unwrap();
         assert!(json.contains("\"schema_name\""));
+        let pandoc = convert_impl(md, "note.md", Some("pandoc"), None, None, None).unwrap();
+        assert!(pandoc.starts_with("{\"pandoc-api-version\":[1,23,1,1]"));
+        assert!(pandoc.contains("\"t\":\"Header\""));
     }
 
     #[test]

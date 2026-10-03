@@ -384,7 +384,7 @@ impl ScannedConverter {
     }
 }
 
-/// Render an assembled document in one of the three output grammars, with the
+/// Render an assembled document in one of the output grammars, with the
 /// same `images` choice the declarative path offers — picture regions are
 /// cropped out of the rendered page, so `embedded` has real bytes to inline.
 pub(crate) fn render(
@@ -400,8 +400,12 @@ pub(crate) fn render(
         "json" => Ok(doc.export_to_json()),
         "doclang" => Ok(doc.export_to_doclang()),
         "latex" => Ok(doc.export_to_latex()),
+        "pandoc" => {
+            let mode = crate::image_mode(images).map_err(|e| JsError::new(&e))?;
+            crate::pandoc_json(doc, mode).map_err(|e| JsError::new(&e))
+        }
         other => Err(JsError::new(&format!(
-            "unknown output format {other:?} (expected \"md\", \"json\", \"doclang\" or \"latex\")"
+            "unknown output format {other:?} (expected \"md\", \"json\", \"doclang\", \"latex\" or \"pandoc\")"
         ))),
     }
 }

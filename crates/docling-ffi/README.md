@@ -25,7 +25,7 @@ docling_result_free(r);
 ```
 
 - The result is never `NULL`; exactly one of output/error is set.
-- Output is NUL-terminated, so `to` = `md` / `json` / `latex` reads as a plain
+- Output is NUL-terminated, so `to` = `md` / `json` / `latex` / `html` / `pandoc` reads as a plain
   C string; `to` = `dclx` is a binary zip — always pair
   `docling_result_output()` with `docling_result_output_len()` there.
 - `filename` selects the input format by extension (same table as the CLI).
@@ -39,7 +39,7 @@ mirror [docling-serve](../docling-serve)'s request options:
 
 | Key | Values | Meaning |
 |---|---|---|
-| `to` | `md` (default) \| `json` \| `dclx` \| `latex` | Output format (`latex` = docling 2.124's LaTeX document, #317) |
+| `to` | `md` (default) \| `json` \| `dclx` \| `latex` \| `html` \| `pandoc` | Output format (`latex` = docling 2.124's LaTeX document, #317; `pandoc` = Pandoc's JSON AST for `pandoc -f json`, #515) |
 | `strict` | bool | Docling-faithful Markdown instead of the readable default |
 | `images` | `placeholder` (default) \| `embedded` | Pictures in Markdown: comment placeholder or base64 data URIs |
 | `no_ocr`, `skip_ocr`, `force_full_page_ocr`, `no_table_former`, `no_text_panels`, `heading_hierarchy` | bool | PDF/image pipeline switches (`skip_ocr` #244: layout + TableFormer, never OCR; `heading_hierarchy` #302: infer section-header levels) |

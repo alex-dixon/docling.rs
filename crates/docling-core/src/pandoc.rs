@@ -1,0 +1,1437 @@
+//! Pandoc AST output (`--to pandoc`, #515): the document as the JSON
+//! serialization of Pandoc's `Pandoc` type (`pandoc -f json`), which hands
+//! docling.rs's parsing to every Pandoc writer — DOCX, ODT, EPUB, RST, Org,
+//! Typst, AsciiDoc, … — through `docling-rs in.pdf --to pandoc | pandoc -f
+//! json -t docx -o out.docx`.
+//!
+//! Like [`crate::html`] and [`crate::latex`] this walks the *JSON* document
+//! model ([`export_to_json_value`](crate::DoclingDocument::export_to_json_value))
+//! rather than the flat [`Node`](crate::Node) stream: the JSON export already
+//! carries docling's item structure for every backend — the backend-built
+//! item tree where one exists (HTML, DOCX: heading nesting, inline groups of
+//! formatted runs, rich table cells), docling's generic grouping rules
+//! otherwise — so the AST inherits those decisions instead of re-deriving
+//! them. The walk is the HTML serializer's (`_iterate_items` with groups,
+//! pictures not traversed, captions rendered by the item that owns them,
+//! content layers filtered with their children still walked); only the
+//! node it emits differs.
+//!
+//! Mapping (Pandoc constructor ← docling item):
+//!
+//! | docling | Pandoc |
+//! |---|---|
+//! | `title` | `Header 1` |
+//! | `section_header` (level *n*) | `Header (n+1)`, capped at 6 |
+//! | `text`, `paragraph` | `Para` (`Plain` inside lists and table cells) |
+//! | `inline` group | the runs' inlines joined by `Space` |
+//! | formatting / hyperlink | `Strong`, `Emph`, `Underline`, `Strikeout`, `Subscript`, `Superscript`, then `Link` around it all |
+//! | `list` group | `OrderedList` (first item enumerated; start from an `N.` marker) / `BulletList`, nested lists inside their item |
+//! | `code` | `CodeBlock` with the language as its class (`Code` inline) |
+//! | `formula` | `Para [Math DisplayMath]` (`Math InlineMath` inline) |
+//! | `checkbox_selected` / `_unselected` | the text after `☒` / `☐` — Pandoc's own task-list convention |
+//! | `table` | `Table`: leading all-header rows as `TableHead`, `rowspan` / `colspan`, rich cells as their blocks, captions as the caption |
+//! | `picture` | `Figure` holding the `Image` per [`ImageMode`], captions as the caption, a tabular chart's data as a `Table` |
+//! | footnotes of a table / picture | `Note` at the end of its caption (the float is the call site) |
+//! | key-value / form graph | `Div .key-value-region` / `.form-container` holding a `DefinitionList` (or the nested `BulletList` of a hierarchical graph) |
+//! | form `field_region` | `Div .field-region` holding a `DefinitionList`: `marker` + `field_key` as the term, each `field_value` a definition |
+//! | any other text label (`caption` without an owner, `footnote` without one, `reference`, `handwritten_text`, `page_header`, …) | `Div .docling-<label> [Para]` |
+//!
+//! No Pandoc equivalent, so not written: provenance (pages, bounding boxes),
+//! confidence and classification meta, comments' authorship, form field
+//! geometry; furniture (headers/footers) and notes are off unless their
+//! [`ContentLayers`] are asked for, exactly as in the HTML export. Images
+//! are targets, not bytes, in Pandoc: [`ImageMode::Embedded`] writes `data:`
+//! URIs (Pandoc's writers accept them), [`ImageMode::Referenced`] files under
+//! the artifacts directory, and the default [`ImageMode::Placeholder`] a
+//! `Figure` carrying only its caption — or, for a caption-less picture,
+//! docling's `<!-- image -->` as a `RawBlock html` (an empty `Figure` would
+//! render as an empty frame; non-HTML writers drop the raw block).
+//!
+//! Version: the output is stamped [`PANDOC_API_VERSION`] — the latest
+//! `pandoc-types` (Pandoc 3.x). Pandoc accepts a document whose
+//! `pandoc-api-version` agrees on the first two components; a caller asking
+//! for another API ([`PandocExportOptions::api_version`]) gets
+//! [`PandocError::UnsupportedApiVersion`] rather than a document Pandoc would
+//! reject. Every node is built through the [`ast`] constructors, the one
+//! place a future API change touches.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use serde_json::Value;
+
+use crate::document::{ContentLayers, DoclingDocument};
+use crate::markdown::ImageMode;
+
+/// The `pandoc-api-version` written — `pandoc-types` 1.23.1.1 (Pandoc 3.x).
+pub const PANDOC_API_VERSION: [u32; 4] = [1, 23, 1, 1];
+
+/// A Pandoc export: the JSON AST, and — for [`ImageMode::Referenced`] — the
+/// image files it links to, as `(path under artifacts_dir, bytes)`.
+pub type PandocOutput = (String, Vec<(String, Vec<u8>)>);
+
+/// Options for [`to_pandoc`].
+#[derive(Debug, Clone)]
+pub struct PandocExportOptions {
+    /// How pictures carry their image (see the module docs).
+    pub image_mode: ImageMode,
+    /// The directory referenced images are written under
+    /// (`<artifacts_dir>/image_NNNNNN.<ext>`, the Markdown export's names).
+    pub artifacts_dir: String,
+    /// The content layers written; body only by default.
+    pub layers: ContentLayers,
+    /// The Pandoc API version the caller needs (`"1.23"`, `"1.23.1.1"`, …);
+    /// `None` = [`PANDOC_API_VERSION`]. Only that API is supported.
+    pub api_version: Option<String>,
+}
+
+impl Default for PandocExportOptions {
+    fn default() -> Self {
+        Self {
+            image_mode: ImageMode::Placeholder,
+            artifacts_dir: "artifacts".to_string(),
+            layers: ContentLayers::BODY,
+            api_version: None,
+        }
+    }
+}
+
+/// Why a Pandoc export was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PandocError {
+    /// The requested `pandoc-api-version` is not the one supported.
+    UnsupportedApiVersion { requested: String },
+}
+
+impl std::fmt::Display for PandocError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PandocError::UnsupportedApiVersion { requested } => write!(
+                f,
+                "unsupported Pandoc API version '{requested}': only {} (pandoc-types {}, Pandoc 3.x) is supported",
+                version_string(&PANDOC_API_VERSION[..2]),
+                version_string(&PANDOC_API_VERSION),
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PandocError {}
+
+fn version_string(parts: &[u32]) -> String {
+    parts
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Check a requested API version: Pandoc reads a document whose version
+/// shares its first two components (major API, minor API), so `1.23`,
+/// `1.23.1` and `1.23.1.1` are all this export's; anything else is refused.
+pub fn check_api_version(requested: &str) -> Result<(), PandocError> {
+    let err = || PandocError::UnsupportedApiVersion {
+        requested: requested.to_string(),
+    };
+    let parts: Vec<u32> = requested
+        .trim()
+        .split('.')
+        .map(|p| p.parse::<u32>().map_err(|_| err()))
+        .collect::<Result<_, _>>()?;
+    if parts.len() < 2 || parts[..2] != PANDOC_API_VERSION[..2] {
+        return Err(err());
+    }
+    if parts.len() > PANDOC_API_VERSION.len()
+        || parts
+            .iter()
+            .zip(PANDOC_API_VERSION.iter())
+            .skip(2)
+            .any(|(a, b)| a > b)
+    {
+        // A newer patch than this export knows.
+        return Err(err());
+    }
+    Ok(())
+}
+
+/// The document as Pandoc JSON (compact, one line, like `pandoc -t json`),
+/// and for [`ImageMode::Referenced`] the `(path, bytes)` image files to
+/// write.
+pub fn to_pandoc(
+    doc: &DoclingDocument,
+    options: &PandocExportOptions,
+) -> Result<PandocOutput, PandocError> {
+    from_docling_json(&doc.export_to_json_value(), options)
+}
+
+/// [`to_pandoc`] for a document already in docling's JSON wire format —
+/// e.g. one produced by Python docling, or `DoclingDocument.export_to_dict()`
+/// in the Python bindings.
+pub fn from_docling_json(
+    json: &Value,
+    options: &PandocExportOptions,
+) -> Result<PandocOutput, PandocError> {
+    if let Some(v) = &options.api_version {
+        check_api_version(v)?;
+    }
+    // The walk recurses per nesting level; an XBRL instance nests thousands
+    // deep, so it runs on a big-stack thread like the HTML serializer.
+    let render = || {
+        let mut ser = Serializer::new(json, options);
+        let blocks = ser.body();
+        let doc = ast::document(blocks);
+        (
+            serde_json::to_string(&doc).expect("Pandoc JSON is always serializable"),
+            ser.artifacts,
+        )
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Ok(std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .name("docling-pandoc".into())
+                .stack_size(256 << 20)
+                .spawn_scoped(scope, render)
+                .expect("spawn the pandoc serializer thread")
+                .join()
+                .expect("pandoc serializer thread panicked")
+        }))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(render())
+    }
+}
+
+/// The Pandoc AST constructors (`Text.Pandoc.Definition`, JSON per
+/// `Text.Pandoc.JSON`): every node this module writes is built here.
+pub mod ast {
+    use serde_json::{json, Value};
+
+    use super::PANDOC_API_VERSION;
+
+    pub fn document(blocks: Vec<Value>) -> Value {
+        json!({ "pandoc-api-version": PANDOC_API_VERSION, "meta": {}, "blocks": blocks })
+    }
+
+    /// `Attr`: identifier, classes, key-value pairs.
+    pub fn attr(classes: &[&str]) -> Value {
+        json!(["", classes, []])
+    }
+
+    fn node(t: &str, c: Value) -> Value {
+        json!({ "t": t, "c": c })
+    }
+
+    // --- blocks -------------------------------------------------------------
+
+    pub fn para(inlines: Vec<Value>) -> Value {
+        node("Para", json!(inlines))
+    }
+    pub fn plain(inlines: Vec<Value>) -> Value {
+        node("Plain", json!(inlines))
+    }
+    pub fn header(level: usize, inlines: Vec<Value>) -> Value {
+        node("Header", json!([level, attr(&[]), inlines]))
+    }
+    pub fn code_block(language: Option<&str>, text: &str) -> Value {
+        let classes: Vec<&str> = language.into_iter().collect();
+        node("CodeBlock", json!([attr(&classes), text]))
+    }
+    pub fn bullet_list(items: Vec<Vec<Value>>) -> Value {
+        node("BulletList", json!(items))
+    }
+    pub fn ordered_list(start: u64, items: Vec<Vec<Value>>) -> Value {
+        node(
+            "OrderedList",
+            json!([[start, { "t": "Decimal" }, { "t": "Period" }], items]),
+        )
+    }
+    pub fn definition_list(entries: Vec<(Vec<Value>, Vec<Vec<Value>>)>) -> Value {
+        node(
+            "DefinitionList",
+            Value::Array(
+                entries
+                    .into_iter()
+                    .map(|(term, defs)| json!([term, defs]))
+                    .collect(),
+            ),
+        )
+    }
+    /// `RawBlock Format Text` — kept by writers of that format, dropped by
+    /// the others.
+    pub fn raw_block(format: &str, text: &str) -> Value {
+        node("RawBlock", json!([format, text]))
+    }
+    pub fn div(classes: &[&str], blocks: Vec<Value>) -> Value {
+        node("Div", json!([attr(classes), blocks]))
+    }
+    /// `Caption`: no short caption, the long one as blocks.
+    pub fn caption(blocks: Vec<Value>) -> Value {
+        json!([null, blocks])
+    }
+    pub fn figure(classes: &[&str], caption: Value, blocks: Vec<Value>) -> Value {
+        node("Figure", json!([attr(classes), caption, blocks]))
+    }
+    /// A table cell: `Cell Attr Alignment RowSpan ColSpan [Block]`.
+    pub fn cell(row_span: usize, col_span: usize, blocks: Vec<Value>) -> Value {
+        json!([attr(&[]), { "t": "AlignDefault" }, row_span, col_span, blocks])
+    }
+    pub fn row(cells: Vec<Value>) -> Value {
+        json!([attr(&[]), cells])
+    }
+    /// `Table Attr Caption [ColSpec] TableHead [TableBody] TableFoot`.
+    pub fn table(caption: Value, num_cols: usize, head: Vec<Value>, body: Vec<Value>) -> Value {
+        let colspecs: Vec<Value> = (0..num_cols)
+            .map(|_| json!([{ "t": "AlignDefault" }, { "t": "ColWidthDefault" }]))
+            .collect();
+        node(
+            "Table",
+            json!([
+                attr(&[]),
+                caption,
+                colspecs,
+                [attr(&[]), head],
+                [[attr(&[]), 0, [], body]],
+                [attr(&[]), []]
+            ]),
+        )
+    }
+
+    // --- inlines ------------------------------------------------------------
+
+    pub fn str_(s: &str) -> Value {
+        node("Str", json!(s))
+    }
+    pub fn space() -> Value {
+        json!({ "t": "Space" })
+    }
+    pub fn line_break() -> Value {
+        json!({ "t": "LineBreak" })
+    }
+    /// `Strong`, `Emph`, `Underline`, `Strikeout`, `Subscript`, `Superscript`.
+    pub fn wrap(t: &str, inlines: Vec<Value>) -> Value {
+        node(t, json!(inlines))
+    }
+    pub fn code(text: &str) -> Value {
+        node("Code", json!([attr(&[]), text]))
+    }
+    pub fn math(display: bool, tex: &str) -> Value {
+        let kind = if display { "DisplayMath" } else { "InlineMath" };
+        node("Math", json!([{ "t": kind }, tex]))
+    }
+    pub fn link(inlines: Vec<Value>, url: &str) -> Value {
+        node("Link", json!([attr(&[]), inlines, [url, ""]]))
+    }
+    pub fn image(alt: Vec<Value>, src: &str) -> Value {
+        node("Image", json!([attr(&[]), alt, [src, ""]]))
+    }
+    pub fn note(blocks: Vec<Value>) -> Value {
+        node("Note", json!(blocks))
+    }
+}
+
+/// Text as `Str` words and `Space`s, `\n` as `LineBreak`; surrounding
+/// whitespace trimmed (a no-break space stays inside its word, as Pandoc's
+/// readers keep it).
+fn text_inlines(text: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for (i, line) in text.trim().split('\n').enumerate() {
+        if i > 0 {
+            out.push(ast::line_break());
+        }
+        let mut first = true;
+        for word in line
+            .split(|c: char| c.is_whitespace() && c != '\u{a0}')
+            .filter(|w| !w.is_empty())
+        {
+            if !first {
+                out.push(ast::space());
+            }
+            out.push(ast::str_(word));
+            first = false;
+        }
+    }
+    out
+}
+
+/// Inline lists joined by single `Space`s (an inline group's runs) — none
+/// before a run that opens with closing punctuation (`.`, `,`, `)`, …) or
+/// after one that ends with opening punctuation: docling keeps each
+/// formatting run as its own item and its serializers join them with a
+/// space, which would put `link .` into every Pandoc output.
+fn join_inlines(parts: Vec<Vec<Value>>) -> Vec<Value> {
+    fn edge_char(inlines: &[Value], first: bool) -> Option<char> {
+        let node = if first {
+            inlines.first()
+        } else {
+            inlines.last()
+        }?;
+        match node.get("t").and_then(Value::as_str)? {
+            "Str" => {
+                let s = node.get("c")?.as_str()?;
+                if first {
+                    s.chars().next()
+                } else {
+                    s.chars().last()
+                }
+            }
+            // Formatting / links: look inside.
+            "Strong" | "Emph" | "Underline" | "Strikeout" | "Subscript" | "Superscript" => {
+                edge_char(node.get("c")?.as_array()?, first)
+            }
+            "Link" => edge_char(node.get("c")?.get(1)?.as_array()?, first),
+            _ => None,
+        }
+    }
+    let mut out: Vec<Value> = Vec::new();
+    for part in parts.into_iter().filter(|p| !p.is_empty()) {
+        if !out.is_empty() {
+            let closes = edge_char(&part, true)
+                .is_some_and(|c| ".,;:!?)]}%\u{bb}\u{201d}\u{2019}".contains(c));
+            let opens = edge_char(&out, false).is_some_and(|c| "([{\u{ab}\u{201c}".contains(c));
+            if !closes && !opens {
+                out.push(ast::space());
+            }
+        }
+        out.extend(part);
+    }
+    out
+}
+
+/// An `N.` / `N)` list marker's number (an ordered list's `start`).
+fn marker_start(marker: &str) -> Option<u64> {
+    marker
+        .trim()
+        .trim_end_matches(['.', ')'])
+        .parse::<u64>()
+        .ok()
+}
+
+struct GridCell<'a> {
+    cell: &'a Value,
+    start_row: usize,
+    start_col: usize,
+    row_span: usize,
+    col_span: usize,
+}
+
+struct Serializer<'a> {
+    json: &'a Value,
+    image_mode: ImageMode,
+    artifacts_dir: String,
+    layers: ContentLayers,
+    artifacts: Vec<(String, Vec<u8>)>,
+    pic_index: usize,
+    visited: HashSet<String>,
+    /// Items some table / picture / graph holds as a caption or footnote:
+    /// rendered by their owner, skipped where the walk meets them.
+    owned_captions: HashSet<String>,
+    owned_footnotes: HashSet<String>,
+}
+
+impl<'a> Serializer<'a> {
+    fn new(json: &'a Value, options: &PandocExportOptions) -> Self {
+        let mut owned_captions = HashSet::new();
+        let mut owned_footnotes = HashSet::new();
+        for bucket in [
+            "pictures",
+            "tables",
+            "key_value_items",
+            "form_items",
+            "texts",
+        ] {
+            for item in Self::array(json.get(bucket)) {
+                for (key, set) in [
+                    ("captions", &mut owned_captions),
+                    ("footnotes", &mut owned_footnotes),
+                ] {
+                    for r in Self::array(item.get(key)) {
+                        if let Some(cref) = r.get("$ref").and_then(Value::as_str) {
+                            set.insert(cref.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Self {
+            json,
+            image_mode: options.image_mode,
+            artifacts_dir: options.artifacts_dir.clone(),
+            layers: options.layers,
+            artifacts: Vec::new(),
+            pic_index: 0,
+            visited: HashSet::new(),
+            owned_captions,
+            owned_footnotes,
+        }
+    }
+
+    fn array(v: Option<&'a Value>) -> impl Iterator<Item = &'a Value> {
+        v.and_then(Value::as_array).into_iter().flatten()
+    }
+
+    fn resolve(&self, cref: &str) -> Option<&'a Value> {
+        let rest = cref.strip_prefix("#/")?;
+        if rest == "body" {
+            return self.json.get("body");
+        }
+        let (bucket, idx) = rest.split_once('/')?;
+        self.json.get(bucket)?.get(idx.parse::<usize>().ok()?)
+    }
+
+    fn refs(v: Option<&'a Value>) -> Vec<&'a str> {
+        Self::array(v)
+            .filter_map(|r| r.get("$ref").and_then(Value::as_str))
+            .collect()
+    }
+
+    fn children(item: &'a Value) -> Vec<&'a str> {
+        Self::refs(item.get("children"))
+    }
+
+    fn self_ref(item: &Value) -> &str {
+        item.get("self_ref").and_then(Value::as_str).unwrap_or("")
+    }
+
+    fn label(item: &Value) -> &str {
+        item.get("label").and_then(Value::as_str).unwrap_or("")
+    }
+
+    fn text(item: &Value) -> &str {
+        item.get("text").and_then(Value::as_str).unwrap_or("")
+    }
+
+    fn is_group(item: &Value) -> bool {
+        Self::self_ref(item).starts_with("#/groups/")
+    }
+
+    fn excluded(&self, item: &Value) -> bool {
+        let layer = item
+            .get("content_layer")
+            .and_then(Value::as_str)
+            .unwrap_or("body");
+        !self.layers.contains_name(layer)
+    }
+
+    /// docling's `_iterate_items(with_groups=True, traverse_pictures=False)`
+    /// below `root`, depth-first pre-order; items off the chosen layers are
+    /// not yielded but their subtrees are walked; under a picture only its
+    /// captions are visited.
+    fn descendants(&self, root: &'a Value, out: &mut Vec<&'a Value>) {
+        let picture = Self::self_ref(root).starts_with("#/pictures/");
+        let captions = if picture {
+            Self::refs(root.get("captions"))
+        } else {
+            Vec::new()
+        };
+        for cref in Self::children(root) {
+            if picture && !captions.contains(&cref) {
+                continue;
+            }
+            let Some(child) = self.resolve(cref) else {
+                continue;
+            };
+            if !self.excluded(child) {
+                out.push(child);
+            }
+            self.descendants(child, out);
+        }
+    }
+
+    /// Every not-yet-visited descendant of `item`, serialized in order —
+    /// a container marks what it renders as visited, so the flat walk
+    /// skips it.
+    fn blocks_of(&mut self, item: &'a Value) -> Vec<Value> {
+        let mut nodes = Vec::new();
+        self.descendants(item, &mut nodes);
+        let mut out = Vec::new();
+        for node in nodes {
+            if self.visited.insert(Self::self_ref(node).to_string()) {
+                out.extend(self.serialize(node));
+            }
+        }
+        out
+    }
+
+    fn body(&mut self) -> Vec<Value> {
+        let Some(body) = self.json.get("body") else {
+            return Vec::new();
+        };
+        self.visited.insert("#/body".to_string());
+        self.blocks_of(body)
+    }
+
+    /// One item's blocks.
+    fn serialize(&mut self, item: &'a Value) -> Vec<Value> {
+        let sref = Self::self_ref(item);
+        if Self::is_group(item) {
+            return match Self::label(item) {
+                "list" => self.list_group(item),
+                "inline" => {
+                    let (inlines, mut rest) = self.inline_group(item);
+                    let mut out = Vec::new();
+                    if !inlines.is_empty() {
+                        out.push(ast::para(inlines));
+                    }
+                    out.append(&mut rest);
+                    out
+                }
+                _ => self.blocks_of(item),
+            };
+        }
+        if sref.starts_with("#/texts/") {
+            if self.owned_captions.contains(sref) || self.owned_footnotes.contains(sref) {
+                return Vec::new();
+            }
+            if self.excluded(item) {
+                return Vec::new();
+            }
+            return self.text_item(item);
+        }
+        if sref.starts_with("#/tables/") {
+            return self.table(item);
+        }
+        if sref.starts_with("#/pictures/") {
+            return self.picture(item);
+        }
+        if sref.starts_with("#/key_value_items/") {
+            return self.graph_item(item, "key-value-region");
+        }
+        if sref.starts_with("#/form_items/") {
+            return self.graph_item(item, "form-container");
+        }
+        if sref.starts_with("#/field_regions/") {
+            return self.field_region(item);
+        }
+        if sref.starts_with("#/field_items/") {
+            let entries = vec![self.field_item(item)];
+            return Self::field_blocks(entries);
+        }
+        Vec::new()
+    }
+
+    /// A form's field region (#515): its fields as one `DefinitionList` —
+    /// key → value(s) — in a `Div .field-region`; a field without a key
+    /// contributes its blocks in place.
+    fn field_region(&mut self, region: &'a Value) -> Vec<Value> {
+        let mut entries = Vec::new();
+        for cref in Self::children(region) {
+            let Some(child) = self.resolve(cref) else {
+                continue;
+            };
+            if !self.visited.insert(cref.to_string()) {
+                continue;
+            }
+            if cref.starts_with("#/field_items/") {
+                entries.push(self.field_item(child));
+            } else {
+                let mut blocks = if self.excluded(child) {
+                    Vec::new()
+                } else {
+                    self.serialize(child)
+                };
+                blocks.extend(self.blocks_of(child));
+                entries.push((Vec::new(), blocks));
+            }
+        }
+        let blocks = Self::field_blocks(entries);
+        if blocks.is_empty() {
+            Vec::new()
+        } else {
+            vec![ast::div(&["field-region"], blocks)]
+        }
+    }
+
+    /// One field: its `marker` and `field_key` texts as the term, each
+    /// `field_value` (and anything else under it) as a definition.
+    fn field_item(&mut self, field: &'a Value) -> (Vec<Value>, Vec<Value>) {
+        let mut nodes = Vec::new();
+        self.descendants(field, &mut nodes);
+        let (mut term, mut defs) = (Vec::new(), Vec::new());
+        for node in nodes {
+            if !self.visited.insert(Self::self_ref(node).to_string()) {
+                continue;
+            }
+            match Self::label(node) {
+                "marker" | "field_key" => {
+                    let inlines = self.formatted(node);
+                    if !inlines.is_empty() {
+                        term = join_inlines(vec![term, inlines]);
+                    }
+                }
+                "field_value" => {
+                    let inlines = self.formatted(node);
+                    if !inlines.is_empty() {
+                        defs.push(ast::plain(inlines));
+                    }
+                }
+                _ => defs.extend(self.serialize(node)),
+            }
+        }
+        (term, defs)
+    }
+
+    /// Fields as blocks: runs of keyed fields become `DefinitionList`s, a
+    /// key-less field's blocks stand on their own.
+    fn field_blocks(entries: Vec<(Vec<Value>, Vec<Value>)>) -> Vec<Value> {
+        let mut out = Vec::new();
+        let mut run: Vec<(Vec<Value>, Vec<Vec<Value>>)> = Vec::new();
+        for (term, defs) in entries {
+            if term.is_empty() {
+                if !run.is_empty() {
+                    out.push(ast::definition_list(std::mem::take(&mut run)));
+                }
+                out.extend(defs);
+            } else {
+                let defs = defs.into_iter().map(|d| vec![d]).collect();
+                run.push((term, defs));
+            }
+        }
+        if !run.is_empty() {
+            out.push(ast::definition_list(run));
+        }
+        out
+    }
+
+    /// A text item's own inlines: its formatted text, or — for an empty
+    /// item wrapping one inline group (a list item or heading whose content
+    /// is a run of formatted spans) — that group's, with any blocks the
+    /// group held besides.
+    fn own_inlines(&mut self, item: &'a Value) -> (Vec<Value>, Vec<Value>, bool) {
+        let children = Self::children(item);
+        if Self::text(item).is_empty() && children.len() == 1 {
+            if let Some(group) = self
+                .resolve(children[0])
+                .filter(|c| Self::is_group(c) && Self::label(c) == "inline")
+            {
+                self.visited.insert(Self::self_ref(group).to_string());
+                let (inlines, rest) = self.inline_group(group);
+                return (inlines, rest, true);
+            }
+        }
+        (self.formatted(item), Vec::new(), false)
+    }
+
+    /// The item's text with its formatting and hyperlink applied.
+    fn formatted(&self, item: &Value) -> Vec<Value> {
+        let base = match Self::label(item) {
+            "code" => vec![ast::code(Self::text(item))],
+            "formula" if !Self::text(item).is_empty() => {
+                vec![ast::math(false, Self::text(item).trim())]
+            }
+            _ => text_inlines(Self::text(item)),
+        };
+        Self::decorate(base, item)
+    }
+
+    fn decorate(mut inlines: Vec<Value>, item: &Value) -> Vec<Value> {
+        if inlines.is_empty() {
+            return inlines;
+        }
+        if let Some(f) = item.get("formatting") {
+            let on = |k: &str| f.get(k).and_then(Value::as_bool).unwrap_or(false);
+            if on("bold") {
+                inlines = vec![ast::wrap("Strong", inlines)];
+            }
+            if on("italic") {
+                inlines = vec![ast::wrap("Emph", inlines)];
+            }
+            if on("underline") {
+                inlines = vec![ast::wrap("Underline", inlines)];
+            }
+            if on("strikethrough") {
+                inlines = vec![ast::wrap("Strikeout", inlines)];
+            }
+            match f.get("script").and_then(Value::as_str) {
+                Some("sub") => inlines = vec![ast::wrap("Subscript", inlines)],
+                Some("super") => inlines = vec![ast::wrap("Superscript", inlines)],
+                _ => {}
+            }
+        }
+        if let Some(url) = item.get("hyperlink").and_then(Value::as_str) {
+            inlines = vec![ast::link(inlines, url)];
+        }
+        inlines
+    }
+
+    /// An inline group's runs as inlines joined by `Space`; anything in it
+    /// that has no inline form (a nested list, a table) comes back as
+    /// blocks for after the paragraph.
+    fn inline_group(&mut self, group: &'a Value) -> (Vec<Value>, Vec<Value>) {
+        let mut nodes = Vec::new();
+        self.descendants(group, &mut nodes);
+        let mut runs: Vec<Vec<Value>> = Vec::new();
+        let mut rest: Vec<Value> = Vec::new();
+        for node in nodes {
+            let r = Self::self_ref(node).to_string();
+            if self.visited.contains(&r) {
+                continue;
+            }
+            self.visited.insert(r.clone());
+            if r.starts_with("#/texts/") {
+                if self.owned_captions.contains(&r) || self.owned_footnotes.contains(&r) {
+                    continue;
+                }
+                runs.push(self.formatted(node));
+                continue;
+            }
+            if Self::is_group(node) && Self::label(node) == "inline" {
+                let (inl, mut more) = self.inline_group(node);
+                runs.push(inl);
+                rest.append(&mut more);
+                continue;
+            }
+            rest.extend(self.serialize(node));
+        }
+        (join_inlines(runs), rest)
+    }
+
+    fn text_item(&mut self, item: &'a Value) -> Vec<Value> {
+        let label = Self::label(item);
+        let mut out = Vec::new();
+        match label {
+            "list_item" => {
+                // A list item met outside a list group: a one-item list.
+                let blocks = self.list_item_blocks(item);
+                if !blocks.is_empty() {
+                    out.push(ast::bullet_list(vec![blocks]));
+                }
+                return out;
+            }
+            "code" => {
+                let lang = item
+                    .get("code_language")
+                    .and_then(Value::as_str)
+                    .filter(|l| !l.is_empty() && *l != "unknown")
+                    .map(str::to_ascii_lowercase);
+                out.push(ast::code_block(lang.as_deref(), Self::text(item)));
+            }
+            "formula" => {
+                let tex = Self::text(item).trim();
+                if !tex.is_empty() {
+                    out.push(ast::para(vec![ast::math(true, tex)]));
+                }
+            }
+            _ => {
+                let (mut inlines, rest, _) = self.own_inlines(item);
+                match label {
+                    "title" | "section_header" => {
+                        let level = if label == "title" {
+                            1
+                        } else {
+                            (item.get("level").and_then(Value::as_u64).unwrap_or(1) as usize + 1)
+                                .min(6)
+                        };
+                        if !inlines.is_empty() {
+                            out.push(ast::header(level, inlines));
+                        }
+                    }
+                    "text" | "paragraph" => {
+                        if !inlines.is_empty() {
+                            out.push(ast::para(inlines));
+                        }
+                    }
+                    "checkbox_selected" | "checkbox_unselected" => {
+                        let mark = if label == "checkbox_selected" {
+                            "☒"
+                        } else {
+                            "☐"
+                        };
+                        let mut with_mark = vec![ast::str_(mark)];
+                        if !inlines.is_empty() {
+                            with_mark.push(ast::space());
+                            with_mark.append(&mut inlines);
+                        }
+                        out.push(ast::para(with_mark));
+                    }
+                    other => {
+                        if !inlines.is_empty() {
+                            let class = format!("docling-{other}");
+                            out.push(ast::div(&[&class], vec![ast::para(inlines)]));
+                        }
+                    }
+                }
+                out.extend(rest);
+            }
+        }
+        // Content nested under the item (an HTML / DOCX heading's section).
+        out.extend(self.blocks_of(item));
+        out
+    }
+
+    /// A list item's blocks: its own text as `Plain`, then whatever is
+    /// nested under it (sub-lists, paragraphs).
+    fn list_item_blocks(&mut self, item: &'a Value) -> Vec<Value> {
+        let (inlines, rest, _) = self.own_inlines(item);
+        let mut blocks = Vec::new();
+        if !inlines.is_empty() {
+            blocks.push(ast::plain(inlines));
+        }
+        blocks.extend(rest);
+        blocks.extend(self.blocks_of(item));
+        blocks
+    }
+
+    fn list_group(&mut self, group: &'a Value) -> Vec<Value> {
+        let first = Self::children(group)
+            .first()
+            .and_then(|r| self.resolve(r))
+            .filter(|c| Self::label(c) == "list_item");
+        let enumerated = first.is_some_and(|c| {
+            c.get("enumerated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        let start = first
+            .and_then(|c| c.get("marker").and_then(Value::as_str))
+            .and_then(marker_start)
+            .unwrap_or(1);
+
+        let mut nodes = Vec::new();
+        self.descendants(group, &mut nodes);
+        let mut items: Vec<Vec<Value>> = Vec::new();
+        for node in nodes {
+            let r = Self::self_ref(node).to_string();
+            if !self.visited.insert(r.clone()) {
+                continue;
+            }
+            if Self::label(node) == "list_item"
+                && r.starts_with("#/texts/")
+                && !self.owned_captions.contains(&r)
+            {
+                let blocks = self.list_item_blocks(node);
+                items.push(blocks);
+                continue;
+            }
+            // Something that is not a list item directly in the list (a
+            // paragraph between items): it belongs to the item before it.
+            let blocks = self.serialize(node);
+            if blocks.is_empty() {
+                continue;
+            }
+            match items.last_mut() {
+                Some(last) => last.extend(blocks),
+                None => items.push(blocks),
+            }
+        }
+        if items.is_empty() {
+            return Vec::new();
+        }
+        if enumerated {
+            vec![ast::ordered_list(start, items)]
+        } else {
+            vec![ast::bullet_list(items)]
+        }
+    }
+
+    /// The owner's caption texts as one `Caption`, with its footnotes as
+    /// `Note`s at the end — the float is their call site.
+    fn caption(&self, item: &'a Value) -> Value {
+        let mut parts: Vec<Vec<Value>> = Vec::new();
+        for cref in Self::refs(item.get("captions")) {
+            if let Some(cap) = self.resolve(cref) {
+                if cref.starts_with("#/texts/") && !self.excluded(cap) {
+                    parts.push(text_inlines(Self::text(cap)));
+                }
+            }
+        }
+        let mut inlines = join_inlines(parts);
+        for cref in Self::refs(item.get("footnotes")) {
+            if let Some(note) = self.resolve(cref) {
+                if cref.starts_with("#/texts/") && !self.excluded(note) {
+                    let text = text_inlines(Self::text(note));
+                    if !text.is_empty() {
+                        inlines.push(ast::note(vec![ast::para(text)]));
+                    }
+                }
+            }
+        }
+        if inlines.is_empty() {
+            ast::caption(Vec::new())
+        } else {
+            ast::caption(vec![ast::plain(inlines)])
+        }
+    }
+
+    /// docling's `TableData.grid`: each position → the cell covering it.
+    fn grid(data: &'a Value) -> (usize, Vec<Vec<Option<GridCell<'a>>>>) {
+        let num_rows = data.get("num_rows").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let num_cols = data.get("num_cols").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let mut grid: Vec<Vec<Option<GridCell<'a>>>> = (0..num_rows)
+            .map(|_| (0..num_cols).map(|_| None).collect())
+            .collect();
+        for cell in Self::array(data.get("table_cells")) {
+            let get = |k: &str| cell.get(k).and_then(Value::as_u64).unwrap_or(0) as usize;
+            let (r0, c0) = (get("start_row_offset_idx"), get("start_col_offset_idx"));
+            let (r1, c1) = (get("end_row_offset_idx"), get("end_col_offset_idx"));
+            if r0 >= num_rows || c0 >= num_cols {
+                continue;
+            }
+            let (r1, c1) = (r1.clamp(r0 + 1, num_rows), c1.clamp(c0 + 1, num_cols));
+            for row in grid.iter_mut().take(r1).skip(r0) {
+                for slot in row.iter_mut().take(c1).skip(c0) {
+                    *slot = Some(GridCell {
+                        cell,
+                        start_row: r0,
+                        start_col: c0,
+                        row_span: r1 - r0,
+                        col_span: c1 - c0,
+                    });
+                }
+            }
+        }
+        (num_cols, grid)
+    }
+
+    fn table_from_data(&mut self, data: &'a Value, caption: Value) -> Option<Value> {
+        let (num_cols, grid) = Self::grid(data);
+        if grid.is_empty() || num_cols == 0 {
+            return None;
+        }
+        let flag = |c: &Value, k: &str| c.get(k).and_then(Value::as_bool).unwrap_or(false);
+        let mut rows: Vec<(bool, Value)> = Vec::new();
+        for (i, row) in grid.iter().enumerate() {
+            let mut cells = Vec::new();
+            let mut all_header = true;
+            let mut anchored = 0;
+            for (j, slot) in row.iter().enumerate() {
+                let Some(g) = slot else {
+                    // A position no cell covers (a table's empty corner) is
+                    // neutral to the header test.
+                    cells.push(ast::cell(1, 1, Vec::new()));
+                    continue;
+                };
+                if g.start_row != i || g.start_col != j {
+                    continue;
+                }
+                anchored += 1;
+                all_header &= flag(g.cell, "column_header");
+                let blocks = match g
+                    .cell
+                    .get("ref")
+                    .and_then(|r| r.get("$ref"))
+                    .and_then(Value::as_str)
+                {
+                    Some(cref) => match self.resolve(cref) {
+                        Some(target) => {
+                            self.visited.insert(cref.to_string());
+                            self.serialize(target)
+                        }
+                        None => Vec::new(),
+                    },
+                    None => {
+                        let inl =
+                            text_inlines(g.cell.get("text").and_then(Value::as_str).unwrap_or(""));
+                        if inl.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![ast::plain(inl)]
+                        }
+                    }
+                };
+                cells.push(ast::cell(g.row_span, g.col_span, blocks));
+            }
+            rows.push((all_header && anchored > 0, ast::row(cells)));
+        }
+        // Leading all-header rows form the head; the rest is the body.
+        let head_len = rows.iter().take_while(|(h, _)| *h).count();
+        let head_len = if head_len == rows.len() { 0 } else { head_len };
+        let mut head = Vec::new();
+        let mut body = Vec::new();
+        for (i, (_, row)) in rows.into_iter().enumerate() {
+            if i < head_len {
+                head.push(row);
+            } else {
+                body.push(row);
+            }
+        }
+        Some(ast::table(caption, num_cols, head, body))
+    }
+
+    fn table(&mut self, item: &'a Value) -> Vec<Value> {
+        let caption = self.caption(item);
+        if self.excluded(item) {
+            return Vec::new();
+        }
+        match item.get("data") {
+            Some(data) => self.table_from_data(data, caption).into_iter().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn picture(&mut self, item: &'a Value) -> Vec<Value> {
+        if self.excluded(item) {
+            return Vec::new();
+        }
+        let caption = self.caption(item);
+        let mut blocks = Vec::new();
+        let uri = item
+            .get("image")
+            .and_then(|i| i.get("uri"))
+            .and_then(Value::as_str);
+        let src = match (self.image_mode, uri) {
+            (ImageMode::Embedded, Some(uri)) if uri.starts_with("data:") => Some(uri.to_string()),
+            (ImageMode::Referenced, Some(uri)) => self
+                .reference_image(uri)
+                .or_else(|| (!uri.starts_with("data:")).then(|| uri.to_string())),
+            _ => None,
+        };
+        if let Some(src) = src {
+            blocks.push(ast::plain(vec![ast::image(Vec::new(), &src)]));
+        }
+        // A native chart's data grid (`meta.tabular_chart.chart_data`).
+        if let Some(chart) = item
+            .get("meta")
+            .and_then(|m| m.get("tabular_chart"))
+            .and_then(|t| t.get("chart_data"))
+        {
+            if let Some(t) = self.table_from_data(chart, ast::caption(Vec::new())) {
+                blocks.push(t);
+            }
+        }
+        let has_caption = caption
+            .get(1)
+            .and_then(Value::as_array)
+            .is_some_and(|b| !b.is_empty());
+        if blocks.is_empty() && !has_caption {
+            // Nothing to show: docling's Markdown placeholder, as raw HTML —
+            // an invisible comment in HTML / Markdown output, dropped by the
+            // other writers (an empty `Figure` renders as an empty
+            // `<figure>` everywhere).
+            return vec![ast::raw_block("html", "<!-- image -->")];
+        }
+        vec![ast::figure(&[], caption, blocks)]
+    }
+
+    /// Referenced mode: a `data:` URI becomes an artifact file named like
+    /// the Markdown export's; the path is the image target.
+    fn reference_image(&mut self, uri: &str) -> Option<String> {
+        let rest = uri.strip_prefix("data:")?;
+        let (mime, payload) = rest.split_once(";base64,")?;
+        let bytes = crate::base64::decode(payload)?;
+        let path = format!(
+            "{}/image_{:06}.{}",
+            self.artifacts_dir,
+            self.pic_index,
+            crate::markdown::ext_for(mime)
+        );
+        self.pic_index += 1;
+        self.artifacts.push((path.clone(), bytes));
+        Some(path)
+    }
+
+    /// A key-value / form graph: a `DefinitionList` of keys and their
+    /// values, or — when `to_child` links make it a hierarchy — the nested
+    /// `BulletList` of it (the HTML export's two shapes), in a classed `Div`
+    /// with the item's caption after it.
+    fn graph_item(&mut self, item: &'a Value, class: &str) -> Vec<Value> {
+        let mut out = Vec::new();
+        if !self.excluded(item) {
+            if let Some(graph) = item.get("graph") {
+                if let Some(block) = Self::graph(graph) {
+                    out.push(ast::div(&[class], vec![block]));
+                }
+            }
+        }
+        // The caption (and footnote notes) as a paragraph after the region.
+        let caption = self.caption(item);
+        for block in caption
+            .get(1)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(inlines) = block.get("c").and_then(Value::as_array) {
+                out.push(ast::para(inlines.clone()));
+            }
+        }
+        out
+    }
+
+    fn graph(graph: &'a Value) -> Option<Value> {
+        let cells: HashMap<u64, &Value> = Self::array(graph.get("cells"))
+            .filter_map(|c| Some((c.get("cell_id")?.as_u64()?, c)))
+            .collect();
+        let order: Vec<u64> = Self::array(graph.get("cells"))
+            .filter_map(|c| c.get("cell_id")?.as_u64())
+            .collect();
+        let mut child_links: HashMap<u64, Vec<u64>> = HashMap::new();
+        let mut value_links: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut value_order: Vec<u64> = Vec::new();
+        let mut parents: HashSet<u64> = HashSet::new();
+        for link in Self::array(graph.get("links")) {
+            let (Some(s), Some(t)) = (
+                link.get("source_cell_id").and_then(Value::as_u64),
+                link.get("target_cell_id").and_then(Value::as_u64),
+            ) else {
+                continue;
+            };
+            if !cells.contains_key(&s) || !cells.contains_key(&t) {
+                continue;
+            }
+            match link.get("label").and_then(Value::as_str) {
+                Some("to_child") => {
+                    child_links.entry(s).or_default().push(t);
+                    parents.insert(t);
+                }
+                Some("to_value") => {
+                    if !value_links.contains_key(&s) {
+                        value_order.push(s);
+                    }
+                    value_links.entry(s).or_default().push(t);
+                }
+                _ => {}
+            }
+        }
+        let cell_text =
+            |id: u64| text_inlines(cells[&id].get("text").and_then(Value::as_str).unwrap_or(""));
+        if child_links.is_empty() {
+            if value_order.is_empty() {
+                return None;
+            }
+            let entries = value_order
+                .iter()
+                .map(|&k| {
+                    let defs = value_links[&k]
+                        .iter()
+                        .map(|&v| vec![ast::plain(cell_text(v))])
+                        .collect();
+                    (cell_text(k), defs)
+                })
+                .collect();
+            return Some(ast::definition_list(entries));
+        }
+        // Hierarchical: a nested bullet list, cycles cut on the descent path.
+        fn node(
+            id: u64,
+            cell_text: &dyn Fn(u64) -> Vec<Value>,
+            child_links: &HashMap<u64, Vec<u64>>,
+            value_links: &BTreeMap<u64, Vec<u64>>,
+            path: &mut HashSet<u64>,
+        ) -> Option<Vec<Value>> {
+            if !path.insert(id) {
+                return None;
+            }
+            let mut inlines = cell_text(id);
+            if let Some(values) = value_links.get(&id) {
+                let vals = join_inlines(values.iter().map(|&v| cell_text(v)).collect());
+                inlines = vec![ast::wrap("Strong", inlines)];
+                inlines.push(ast::str_(":"));
+                if !vals.is_empty() {
+                    inlines.push(ast::space());
+                    inlines.extend(vals);
+                }
+            }
+            let mut blocks = vec![ast::plain(inlines)];
+            let kids: Vec<Vec<Value>> = child_links
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .filter_map(|&c| node(c, cell_text, child_links, value_links, path))
+                .collect();
+            if !kids.is_empty() {
+                blocks.push(ast::bullet_list(kids));
+            }
+            path.remove(&id);
+            Some(blocks)
+        }
+        let mut path = HashSet::new();
+        let items: Vec<Vec<Value>> = order
+            .iter()
+            .filter(|id| !parents.contains(id))
+            .filter_map(|&id| node(id, &cell_text, &child_links, &value_links, &mut path))
+            .collect();
+        (!items.is_empty()).then(|| ast::bullet_list(items))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A docling JSON document from `body` children and the item buckets.
+    fn doc(body: &[&str], texts: Value, groups: Value, tables: Value) -> Value {
+        json!({
+            "schema_name": "DoclingDocument",
+            "name": "t",
+            "body": {"self_ref": "#/body", "children": body.iter().map(|r| json!({"$ref": r})).collect::<Vec<_>>()},
+            "texts": texts, "groups": groups, "tables": tables, "pictures": []
+        })
+    }
+
+    fn text(i: usize, label: &str, text: &str, extra: Value) -> Value {
+        let mut v = json!({"self_ref": format!("#/texts/{i}"), "children": [], "label": label, "text": text, "content_layer": "body"});
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        v
+    }
+
+    fn blocks(json: &Value) -> Vec<Value> {
+        let (s, _) = from_docling_json(json, &PandocExportOptions::default()).unwrap();
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["pandoc-api-version"], json!(PANDOC_API_VERSION));
+        v["blocks"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn text_splits_into_words_spaces_and_line_breaks() {
+        assert_eq!(
+            text_inlines("  two  words\nnext\u{a0}line "),
+            vec![
+                ast::str_("two"),
+                ast::space(),
+                ast::str_("words"),
+                ast::line_break(),
+                ast::str_("next\u{a0}line"),
+            ]
+        );
+        assert!(text_inlines("   ").is_empty());
+    }
+
+    #[test]
+    fn headings_paragraphs_and_lists() {
+        let j = doc(
+            &["#/texts/0", "#/texts/1", "#/texts/2", "#/groups/0"],
+            json!([
+                text(0, "title", "Ducks", json!({})),
+                text(1, "section_header", "Diet", json!({"level": 1})),
+                text(
+                    2,
+                    "text",
+                    "Ducks eat plants.",
+                    json!({"formatting": {"bold": true}, "hyperlink": "https://x.org"})
+                ),
+                text(
+                    3,
+                    "list_item",
+                    "seeds",
+                    json!({"enumerated": true, "marker": "3."})
+                ),
+                text(
+                    4,
+                    "list_item",
+                    "insects",
+                    json!({"enumerated": true, "marker": "4."})
+                ),
+            ]),
+            json!([{"self_ref": "#/groups/0", "children": [{"$ref": "#/texts/3"}, {"$ref": "#/texts/4"}], "label": "list", "name": "list"}]),
+            json!([]),
+        );
+        let b = blocks(&j);
+        assert_eq!(b[0], ast::header(1, vec![ast::str_("Ducks")]));
+        assert_eq!(b[1], ast::header(2, vec![ast::str_("Diet")]));
+        // formatting inside, the link around it all
+        assert_eq!(b[2]["t"], "Para");
+        assert_eq!(b[2]["c"][0]["t"], "Link");
+        assert_eq!(b[2]["c"][0]["c"][1][0]["t"], "Strong");
+        assert_eq!(b[3]["t"], "OrderedList");
+        assert_eq!(b[3]["c"][0][0], 3, "start from the first marker");
+        assert_eq!(
+            b[3]["c"][1],
+            json!([
+                [ast::plain(vec![ast::str_("seeds")])],
+                [ast::plain(vec![ast::str_("insects")])]
+            ])
+        );
+    }
+
+    #[test]
+    fn code_formulas_checkboxes_and_unmapped_labels() {
+        let j = doc(
+            &["#/texts/0", "#/texts/1", "#/texts/2", "#/texts/3"],
+            json!([
+                text(0, "code", "print(1)", json!({"code_language": "Python"})),
+                text(1, "formula", "E = mc^2", json!({})),
+                text(2, "checkbox_selected", "done", json!({})),
+                text(3, "reference", "[1] Duck, D. (2020).", json!({})),
+            ]),
+            json!([]),
+            json!([]),
+        );
+        let b = blocks(&j);
+        assert_eq!(b[0], ast::code_block(Some("python"), "print(1)"));
+        assert_eq!(b[1], ast::para(vec![ast::math(true, "E = mc^2")]));
+        assert_eq!(b[2]["c"][0], ast::str_("☒"));
+        assert_eq!(b[3]["t"], "Div");
+        assert_eq!(b[3]["c"][0][1], json!(["docling-reference"]));
+    }
+
+    #[test]
+    fn tables_keep_spans_header_rows_and_captions() {
+        let cell = |r0: usize, c0: usize, rs: usize, cs: usize, t: &str, header: bool| {
+            json!({"text": t, "row_span": rs, "col_span": cs,
+                   "start_row_offset_idx": r0, "end_row_offset_idx": r0 + rs,
+                   "start_col_offset_idx": c0, "end_col_offset_idx": c0 + cs,
+                   "column_header": header})
+        };
+        let j = doc(
+            &["#/tables/0"],
+            json!([text(0, "caption", "Table 1: Ducks", json!({}))]),
+            json!([]),
+            json!([{"self_ref": "#/tables/0", "children": [{"$ref": "#/texts/0"}], "label": "table",
+                    "captions": [{"$ref": "#/texts/0"}],
+                    "data": {"num_rows": 2, "num_cols": 2, "table_cells": [
+                        cell(0, 0, 1, 2, "Species", true),
+                        cell(1, 0, 1, 1, "Mallard", false),
+                        cell(1, 1, 1, 1, "Anas", false)]}}]),
+        );
+        let b = blocks(&j);
+        assert_eq!(b.len(), 1, "the caption is rendered by its table only");
+        let t = &b[0];
+        assert_eq!(t["t"], "Table");
+        assert_eq!(
+            t["c"][1][1][0],
+            ast::plain(vec![
+                ast::str_("Table"),
+                ast::space(),
+                ast::str_("1:"),
+                ast::space(),
+                ast::str_("Ducks")
+            ])
+        );
+        assert_eq!(t["c"][2].as_array().unwrap().len(), 2);
+        let head = t["c"][3][1].as_array().unwrap();
+        assert_eq!(head.len(), 1);
+        assert_eq!(head[0][1][0][3], 2, "colspan");
+        assert_eq!(t["c"][4][0][3].as_array().unwrap().len(), 1, "one body row");
+    }
+
+    #[test]
+    fn api_version_is_checked() {
+        for ok in ["1.23", "1.23.1", "1.23.1.1"] {
+            assert!(check_api_version(ok).is_ok(), "{ok}");
+        }
+        for bad in ["1.22", "2.0", "1", "1.23.2", "1.23.1.2", "x.y", ""] {
+            let e = check_api_version(bad).unwrap_err();
+            assert!(e.to_string().contains("only 1.23"), "{bad}: {e}");
+        }
+        let err = to_pandoc(
+            &DoclingDocument::new("t"),
+            &PandocExportOptions {
+                api_version: Some("1.22".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            PandocError::UnsupportedApiVersion {
+                requested: "1.22".into()
+            }
+        );
+    }
+
+    #[test]
+    fn empty_document_is_a_valid_pandoc_document() {
+        let (s, artifacts) =
+            to_pandoc(&DoclingDocument::new("e"), &PandocExportOptions::default()).unwrap();
+        assert!(artifacts.is_empty());
+        assert_eq!(
+            s,
+            r#"{"pandoc-api-version":[1,23,1,1],"meta":{},"blocks":[]}"#
+        );
+        assert_eq!(s, DoclingDocument::new("e").export_to_pandoc_json());
+    }
+}

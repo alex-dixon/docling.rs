@@ -25,7 +25,8 @@
 //! Options ride along as multipart text parts, JSON fields, or query
 //! parameters (body wins over query):
 //!
-//! - `to` — `md` (default) | `json` | `html` (#492) | `dclx` | `chunks` | `latex` (#317) | `images` (#243:
+//! - `to` — `md` (default) | `json` | `html` (#492) | `dclx` | `chunks` | `latex` (#317) |
+//!   `pandoc` (#515: Pandoc's AST as JSON, for `pandoc -f json`) | `images` (#243:
 //!   rasterize a PDF's pages to PNG — no conversion, no models;
 //!   the JSON response is `{"pages": [{"page", "width", "height",
 //!   "png_base64"}]}`, combines with `pages` for a window, capped at
@@ -69,6 +70,9 @@
 //!   (#271; docling.rs extension, off by default)
 //! - `compact_tables` — unpadded `| a | b |` Markdown tables, all formats
 //!   (#271; docling.rs extension, off by default)
+//! - `pandoc_api_version` — the Pandoc API the client's `pandoc` reads (`to=pandoc`,
+//!   #515): only `1.23` is written, so another version is a 400, not a document
+//!   Pandoc would reject
 //! - `md_page_break_placeholder` — text inserted between pages in Markdown
 //!   output (docling-serve's option of the same name, docling-core's
 //!   `MarkdownParams.page_break_placeholder`; e.g. `<!-- page break -->`).
@@ -466,6 +470,9 @@ struct ConvertOptions {
     /// `md_page_break_placeholder` (docling-core's
     /// `MarkdownParams.page_break_placeholder`). Unset = no page breaks.
     md_page_break_placeholder: Option<String>,
+    /// `to=pandoc` (#515): the Pandoc API version the client needs; anything
+    /// but the one written (1.23) is rejected.
+    pandoc_api_version: Option<String>,
     /// EBCDIC copybook layout (#252): inline `EbcdicLayout` JSON (uploads
     /// have no filesystem, so the JSON itself rides in the request).
     ebcdic_layout: Option<String>,
@@ -569,6 +576,7 @@ impl ConvertOptions {
             md_page_break_placeholder: self
                 .md_page_break_placeholder
                 .or(base.md_page_break_placeholder),
+            pandoc_api_version: self.pandoc_api_version.or(base.pandoc_api_version),
             ebcdic_layout: self.ebcdic_layout.or(base.ebcdic_layout),
             asr_model: self.asr_model.or(base.asr_model),
             asr_lang: self.asr_lang.or(base.asr_lang),
@@ -836,11 +844,15 @@ fn validate_output(options: &ConvertOptions) -> Result<(String, ImageMode), ApiE
     let to = options.to.clone().unwrap_or_else(|| "md".into());
     if !matches!(
         to.as_str(),
-        "md" | "markdown" | "json" | "html" | "dclx" | "chunks" | "images" | "latex"
+        "md" | "markdown" | "json" | "html" | "dclx" | "chunks" | "images" | "latex" | "pandoc"
     ) {
         return Err(ApiError::Bad(format!(
-            "unknown to='{to}' (expected: md, json, html, dclx, chunks, images, latex)"
+            "unknown to='{to}' (expected: md, json, html, dclx, chunks, images, latex, pandoc)"
         )));
+    }
+    if let Some(v) = &options.pandoc_api_version {
+        docling::pandoc::check_api_version(v)
+            .map_err(|e| ApiError::Bad(format!("pandoc_api_version: {e}")))?;
     }
     let image_mode = match options.images.as_deref().unwrap_or("placeholder") {
         "placeholder" => ImageMode::Placeholder,
@@ -1349,6 +1361,7 @@ impl OutputNames {
             "chunks" => "chunks.json",
             "dclx" => "dclx",
             "latex" => "tex",
+            "pandoc" => "pandoc.json",
             _ => unreachable!("validated above"),
         };
         Self {
@@ -1754,6 +1767,15 @@ fn render_stored(
             confidence,
             body: document.export_to_latex().into_bytes(),
         },
+        // #515: Pandoc's AST, for `pandoc -f json`; pictures follow
+        // `images` like HTML.
+        "pandoc" => StoredResponse {
+            errors: Vec::new(),
+            content_type: "application/json",
+            disposition: None,
+            confidence,
+            body: pandoc_string(document, image_mode).into_bytes(),
+        },
         // #492: docling-core's HTML serializer; pictures follow `images`
         // exactly as the Markdown body does.
         "html" => StoredResponse {
@@ -1831,6 +1853,11 @@ fn batch_item(
         }
         "latex" => item["latex"] = json!(document.export_to_latex()),
         "html" => item["html"] = json!(html_string(document, image_mode)),
+        // #515: the AST inline as an object, like the docling JSON document.
+        "pandoc" => {
+            item["pandoc"] = serde_json::from_str(&pandoc_string(document, image_mode))
+                .expect("the Pandoc export is valid JSON")
+        }
         _ => unreachable!("validated above"),
     }
     if to != "json" {
@@ -1875,6 +1902,19 @@ fn html_string(document: &DoclingDocument, image_mode: ImageMode) -> String {
                 .0
         }
     }
+}
+
+/// The Pandoc AST for `to=pandoc` (#515), pictures per `images` (embedded
+/// `data:` URIs, or captioned figures without image data by default). The
+/// API version was checked by `validate_output`.
+fn pandoc_string(document: &DoclingDocument, image_mode: ImageMode) -> String {
+    document
+        .export_to_pandoc_json_with(&docling::pandoc::PandocExportOptions {
+            image_mode,
+            ..Default::default()
+        })
+        .expect("the Pandoc API version was validated")
+        .0
 }
 
 /// The document-level confidence summary as a header value (compact JSON, no
@@ -1944,6 +1984,7 @@ async fn read_multipart(
             "md_page_break_placeholder" => {
                 body_opts.md_page_break_placeholder = Some(text_field(field).await?)
             }
+            "pandoc_api_version" => body_opts.pandoc_api_version = Some(text_field(field).await?),
             "pipeline" => body_opts.pipeline = Some(text_field(field).await?),
             "vlm_endpoint" => body_opts.vlm_endpoint = Some(text_field(field).await?),
             "vlm_model" => body_opts.vlm_model = Some(text_field(field).await?),

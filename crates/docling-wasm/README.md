@@ -52,8 +52,8 @@ limits).
 convert(
   bytes: Uint8Array,
   filename: string,
-  to?: "md" | "json" | "doclang" | "latex" | "html", // default "md"
-  images?: "placeholder" | "embedded",     // default "placeholder", Markdown only
+  to?: "md" | "json" | "doclang" | "latex" | "html" | "pandoc", // default "md"
+  images?: "placeholder" | "embedded",     // default "placeholder"; Markdown, HTML, Pandoc
   max_pages?: number,                      // convert only the first N PDF pages
   page_break_placeholder?: string,         // text between pages in Markdown, e.g. "<!-- page break -->"
 ): string
@@ -166,7 +166,7 @@ converters and text-layer PDFs work straight away and OCR starts once you give
 the page models (device picker or Hugging Face — see below).
 
 [`www/index.html`](./www/index.html) is the whole thing on one page: drop a
-file, pick the output (Markdown / JSON / DocLang / LaTeX), pick how images render, and
+file, pick the output (Markdown / JSON / DocLang / LaTeX / Pandoc AST), pick how images render, and
 optionally turn on OCR for scanned pages. A **Force OCR** toggle (docling's
 `force_full_page_ocr`) sends a PDF straight to the OCR pipeline, ignoring
 whatever text layer it claims to have — for layers that exist but lie. A

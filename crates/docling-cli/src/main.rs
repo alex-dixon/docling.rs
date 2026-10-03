@@ -208,14 +208,15 @@ const USAGE: &str = "usage: docling-rs [OPTIONS] <input-file>\n       docling-rs
 /// `--help`: the synopsis plus every flag, grouped. Kept in sync with the
 /// module doc comment above, which carries the long-form rationale.
 const HELP: &str = "\
-Convert documents to Markdown, JSON, DocLang, LaTeX or chunks.
+Convert documents to Markdown, JSON, DocLang, LaTeX, Pandoc AST or chunks.
 
 OUTPUT
-  --to md|json|html|dclx|chunks|images|latex   output format (default: md); repeat it (or
+  --to md|json|html|dclx|chunks|images|latex|pandoc   output format (default: md); repeat it (or
                           comma-separate) to write several — needs --output
   --strict                cleaner, more conformant Markdown (Markdown only)
   --page-break-placeholder TEXT   insert TEXT between pages (Markdown only, e.g. <!-- page break -->)
   --images MODE           picture handling: placeholder (default) | embedded | referenced
+  --pandoc-api-version V  fail unless the Pandoc AST is this API (`--to pandoc`; only 1.23)
   --compact-tables        render Markdown tables without width padding
   --no-stream             build the whole document before printing
 
@@ -482,7 +483,7 @@ fn main() -> ExitCode {
                 Some(v) => to.extend(v.split(',').map(|f| f.trim().to_string())),
                 None => {
                     eprintln!(
-                        "error: --to needs a format (md, json, html, dclx, chunks, images, latex)"
+                        "error: --to needs a format (md, json, html, dclx, chunks, images, latex, pandoc)"
                     );
                     return ExitCode::from(2);
                 }
@@ -525,6 +526,17 @@ fn main() -> ExitCode {
                 }
             },
             "--images" => images = args.next().unwrap_or_default(),
+            // #515: the Pandoc API the caller's `pandoc` reads. Only one is
+            // written, so this is a check, not a choice: an unsupported
+            // version fails here instead of feeding Pandoc a document it
+            // would reject.
+            "--pandoc-api-version" => {
+                let v = args.next().unwrap_or_default();
+                if let Err(e) = docling::pandoc::check_api_version(&v) {
+                    eprintln!("error: --pandoc-api-version: {e}");
+                    return ExitCode::from(2);
+                }
+            }
             // `--to images` render scale, pixels per PDF point (#243).
             "--scale" => match args.next().and_then(|v| v.parse::<f32>().ok()) {
                 Some(v) if (0.1..=4.0).contains(&v) => scale = v,
@@ -709,10 +721,10 @@ fn main() -> ExitCode {
         let f = if f == "markdown" { "md" } else { f.as_str() };
         if !matches!(
             f,
-            "md" | "json" | "html" | "dclx" | "chunks" | "images" | "latex"
+            "md" | "json" | "html" | "dclx" | "chunks" | "images" | "latex" | "pandoc"
         ) {
             eprintln!(
-                "error: unknown --to '{f}' (expected: md, json, html, dclx, chunks, images, latex)"
+                "error: unknown --to '{f}' (expected: md, json, html, dclx, chunks, images, latex, pandoc)"
             );
             return ExitCode::from(2);
         }
@@ -1464,6 +1476,9 @@ fn batch_out_path(file: &Path, base: &Path, output: &Path, to: &str) -> std::pat
         "dclx" => "dclx",
         "chunks" => "chunks.json",
         "latex" => "tex",
+        // #515: Pandoc's own extension is `.json`; the double extension keeps
+        // it apart from docling's JSON when both are requested.
+        "pandoc" => "pandoc.json",
         "images" => "png", // a stem carrier: pages land as `<stem>_page_NNNN.png`
         _ => "md",
     };
@@ -1710,6 +1725,27 @@ fn batch_convert_one(
             "latex" => std::fs::write(&out, document.export_to_latex())
                 .map_err(|e| format!("writing {}: {e}", out.display()))?,
             "dclx" => docling::dclx::save_as_dclx(&document, &out).map_err(|e| e.to_string())?,
+            // #515: the Pandoc AST; pictures follow `--images` like HTML.
+            "pandoc" => {
+                let stem = out
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().trim_end_matches(".pandoc").to_string())
+                    .unwrap_or_else(|| "document".into());
+                let (json, artifacts) =
+                    pandoc_json(&document, cfg.image_mode, &format!("{stem}_artifacts"));
+                let parent = out.parent().unwrap_or(Path::new(""));
+                for (rel, bytes) in &artifacts {
+                    let target = parent.join(rel);
+                    if let Some(dir) = target.parent() {
+                        std::fs::create_dir_all(dir)
+                            .map_err(|e| format!("creating {}: {e}", dir.display()))?;
+                    }
+                    std::fs::write(&target, bytes)
+                        .map_err(|e| format!("writing {}: {e}", target.display()))?;
+                }
+                std::fs::write(&out, json)
+                    .map_err(|e| format!("writing {}: {e}", out.display()))?;
+            }
             // #492: docling-core's HTML serializer; pictures follow `--images`
             // exactly as the Markdown branch below — `referenced` writes the
             // same `<stem>_artifacts/` files and the page links to them.
@@ -1935,6 +1971,22 @@ fn run_batch(
     }
 }
 
+/// The Pandoc AST per `--images` (#515). The API version was checked when
+/// `--pandoc-api-version` was parsed, so the default options apply.
+fn pandoc_json(
+    document: &docling::DoclingDocument,
+    image_mode: ImageMode,
+    artifacts_dir: &str,
+) -> (String, Vec<(String, Vec<u8>)>) {
+    document
+        .export_to_pandoc_json_with(&docling::pandoc::PandocExportOptions {
+            image_mode,
+            artifacts_dir: artifacts_dir.to_string(),
+            ..Default::default()
+        })
+        .expect("the default Pandoc API version is always supported")
+}
+
 fn output_document(
     document: docling::DoclingDocument,
     to: &str,
@@ -1968,6 +2020,30 @@ fn output_document(
             eprintln!("referenced images written to ./artifacts/");
         }
         println!("{html}");
+        return ExitCode::SUCCESS;
+    }
+
+    // #515: the Pandoc AST as JSON on stdout, for `| pandoc -f json -t …`;
+    // `--images referenced` writes the pictures under ./artifacts/.
+    if to == "pandoc" {
+        let (json, artifacts) = pandoc_json(&document, image_mode, "artifacts");
+        for (rel, bytes) in &artifacts {
+            let target = Path::new(rel);
+            if let Some(dir) = target.parent() {
+                if let Err(e) = std::fs::create_dir_all(dir) {
+                    eprintln!("error: creating {}: {e}", dir.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+            if let Err(e) = std::fs::write(target, bytes) {
+                eprintln!("error: writing {}: {e}", target.display());
+                return ExitCode::FAILURE;
+            }
+        }
+        if !artifacts.is_empty() {
+            eprintln!("referenced images written to ./artifacts/");
+        }
+        println!("{json}");
         return ExitCode::SUCCESS;
     }
 
