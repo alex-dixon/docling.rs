@@ -1905,9 +1905,10 @@ pub(super) fn row_grid_offsets(tr: XmlNode) -> (usize, usize) {
 /// A table cell's Markdown. A "plain" cell (one paragraph, unformatted runs, no
 /// nested block/image) becomes its plain text; a "rich" cell renders its full
 /// block content (paragraphs, lists, formatting), which the table serializer
-/// then flattens (`\n` → space). Mirrors docling's `_is_rich_table_cell`.
+/// then flattens (`\n` → space). Mirrors docling's `_is_rich_table_cell`,
+/// plus [`renders_as_blocks`]' text boxes.
 fn cell_markdown(tc: XmlNode, ctx: &Ctx) -> String {
-    if is_rich_cell(tc) {
+    if renders_as_blocks(tc) {
         rich_cell_markdown(tc, ctx)
     } else {
         // No trim: the cell value is kept verbatim (docling uses `cell.text`);
@@ -1920,7 +1921,23 @@ fn cell_markdown(tc: XmlNode, ctx: &Ctx) -> String {
     }
 }
 
-/// Whether a cell must be parsed as rich content rather than plain text.
+/// Whether the flat outputs (Markdown, LaTeX, DocLang) render a cell from its
+/// block content: docling's rich cells, and a cell holding a text box (#532).
+/// A text box is not one of `_is_rich_table_cell`'s triggers, so docling
+/// takes such a cell as plain — python-docx's `cell.text`, which skips the
+/// box — and the box's paragraphs land *before the table* as a `textbox`
+/// section: the cell prints empty and the text appears out of place (with a
+/// second text box also inside the cell). Here the box's text stays in the
+/// cell it is drawn in. The JSON (and the HTML rendered from it) keeps
+/// docling's item tree — the text hoisted before the table — since that tree
+/// mirrors upstream's structure call for call (`docx_tree.rs`), which is why
+/// this is not folded into [`is_rich_cell`].
+fn renders_as_blocks(tc: XmlNode) -> bool {
+    is_rich_cell(tc) || tc.descendants().any(|n| n.has_tag_name("txbxContent"))
+}
+
+/// Whether a cell must be parsed as rich content rather than plain text
+/// (docling's `_is_rich_table_cell`).
 fn is_rich_cell(tc: XmlNode) -> bool {
     let paras: Vec<XmlNode> = child_elements(tc).filter(|c| c.has_tag_name("p")).collect();
     if paras.len() > 1 {
@@ -2058,7 +2075,7 @@ fn regroup_cell_nodes(
 /// document body. Empty for a plain cell, whose flat text the serializer uses.
 /// Markdown/JSON never consult this (they render the flat cell text).
 fn cell_blocks_of(tc: XmlNode, ctx: &Ctx) -> Vec<Node> {
-    if !is_rich_cell(tc) {
+    if !renders_as_blocks(tc) {
         return Vec::new();
     }
     let mut sub = DoclingDocument::new("");
