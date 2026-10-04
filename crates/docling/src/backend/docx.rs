@@ -1615,7 +1615,7 @@ fn collect_one(
             }
         }
         // Transparent inline wrappers.
-        "smartTag" | "ins" | "fldSimple" | "sdt" | "sdtContent" => {
+        "smartTag" | "ins" | "moveTo" | "fldSimple" | "sdt" | "sdtContent" => {
             collect_run_tuples(child, fmt, link, ctx, out)
         }
         _ => {}
@@ -2183,7 +2183,7 @@ fn push_inline_text(node: XmlNode, out: &mut String) {
                 out.push_str(t.text().unwrap_or(""));
             }
         }
-        "smartTag" | "customXml" | "ins" | "fldSimple" => {
+        "smartTag" | "customXml" | "ins" | "moveTo" | "fldSimple" => {
             for c in child_elements(node) {
                 push_inline_text(c, out);
             }
