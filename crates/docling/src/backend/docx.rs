@@ -602,7 +602,14 @@ fn handle_paragraph_inner(
         // duplicate as well as repeated identical labels in the same drawing.
         let mut seen: Vec<(String, usize)> = Vec::new();
         for tc in p.descendants().filter(|n| n.has_tag_name("txbxContent")) {
-            for (idx, tp) in tc.children().filter(|n| n.has_tag_name("p")).enumerate() {
+            // Every paragraph of the box — docling's `.//w:p` — so a table
+            // inside a text box reads as its cells' paragraphs (#532); one in
+            // a box nested deeper belongs to that box's own pass.
+            let paragraphs = tc.descendants().filter(|n| {
+                n.has_tag_name("p")
+                    && n.ancestors().find(|a| a.has_tag_name("txbxContent")) == Some(tc)
+            });
+            for (idx, tp) in paragraphs.enumerate() {
                 let trimmed = paragraph_markdown(tp, ctx).trim().to_string();
                 let key = if trimmed.is_empty() {
                     (String::new(), idx)
@@ -1980,31 +1987,59 @@ fn rich_cell_markdown(tc: XmlNode, ctx: &Ctx) -> String {
     let mut spans: Vec<(roxmltree::NodeId, std::ops::Range<usize>)> = Vec::new();
     for child in child_elements(tc) {
         let start = sub.nodes.len();
-        match child.tag_name().name() {
-            "p" => handle_paragraph_inner(child, ctx, &mut state, &mut sub, true, false),
-            "tbl" => {
-                if let Some(table) = parse_table_with(child, ctx, true) {
-                    let text = table
-                        .rows
-                        .iter()
-                        .flatten()
-                        .filter(|c| !c.is_empty())
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if !text.is_empty() {
-                        sub.push(Node::Paragraph { text });
-                    }
-                }
-            }
-            _ => {}
-        }
+        cell_block(child, ctx, &mut state, &mut sub, true);
         spans.push((child.id(), start..sub.nodes.len()));
     }
     regroup_rich_cell(tc, ctx, &mut sub.nodes, &spans);
     // In-cell rendering: a heading inside the cell is plain text
     // (docling-core#540).
     sub.export_to_table_cell_markdown().trim().to_string()
+}
+
+/// One block of a rich cell: a paragraph, a nested table — flattened to its
+/// space-joined cell text for Markdown (`flatten`, docling's
+/// nested-in-table serialization), kept whole for DocLang — or a block
+/// content control, whose `w:sdtContent` is walked like the cell itself, as
+/// docling's `_walk_linear` does (#532: a cell holding only an `sdt` printed
+/// empty).
+fn cell_block(
+    child: XmlNode,
+    ctx: &Ctx,
+    state: &mut ListState,
+    sub: &mut DoclingDocument,
+    flatten: bool,
+) {
+    match child.tag_name().name() {
+        "p" => handle_paragraph_inner(child, ctx, state, sub, true, false),
+        "tbl" => {
+            let Some(table) = parse_table_with(child, ctx, flatten) else {
+                return;
+            };
+            if !flatten {
+                sub.push(Node::Table(table));
+                return;
+            }
+            let text = table
+                .rows
+                .iter()
+                .flatten()
+                .filter(|c| !c.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !text.is_empty() {
+                sub.push(Node::Paragraph { text });
+            }
+        }
+        "sdt" => {
+            if let Some(content) = child.children().find(|n| n.has_tag_name("sdtContent")) {
+                for c in child_elements(content) {
+                    cell_block(c, ctx, state, sub, flatten);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// A blank spacer between items of one list makes docling regroup a rich
@@ -2083,15 +2118,7 @@ fn cell_blocks_of(tc: XmlNode, ctx: &Ctx) -> Vec<Node> {
     let mut spans: Vec<(roxmltree::NodeId, std::ops::Range<usize>)> = Vec::new();
     for child in child_elements(tc) {
         let start = sub.nodes.len();
-        match child.tag_name().name() {
-            "p" => handle_paragraph_inner(child, ctx, &mut state, &mut sub, true, false),
-            "tbl" => {
-                if let Some(table) = parse_table_with(child, ctx, false) {
-                    sub.push(Node::Table(table));
-                }
-            }
-            _ => {}
-        }
+        cell_block(child, ctx, &mut state, &mut sub, false);
         spans.push((child.id(), start..sub.nodes.len()));
     }
     regroup_rich_cell(tc, ctx, &mut sub.nodes, &spans);
