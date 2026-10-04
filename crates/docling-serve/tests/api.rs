@@ -222,6 +222,44 @@ async fn warmup_settles_ready_or_failed() {
     }
 }
 
+/// #547: `compact_tables` reaches PDF (and image) input too — those convert
+/// on the warm pipeline, which used to skip the document settings the
+/// declarative converter applies, so a compact request came back padded.
+#[tokio::test]
+async fn compact_tables_applies_to_pdf_input() {
+    if !ml_models_ready() {
+        eprintln!("skipping: the ML models are not present");
+        return;
+    }
+    let pdf = std::fs::read(repo_root().join("tests/data/pdf/sources/2305.03393v1-pg9.pdf"))
+        .expect("fixture");
+    let mut out = Vec::new();
+    for compact in ["true", "false"] {
+        let (ct, body) = multipart(
+            "table.pdf",
+            &pdf,
+            &[("to", "md"), ("compact_tables", compact)],
+        );
+        let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        out.push(body_string(response).await);
+    }
+    let separator = |md: &str| {
+        md.lines()
+            .find(|l| l.starts_with('|') && l.trim_matches(|c| "|-: ".contains(c)).is_empty())
+            .map(str::to_string)
+    };
+    let (compact, padded) = (separator(&out[0]), separator(&out[1]));
+    assert!(
+        compact.as_deref().is_some_and(|l| l.starts_with("| - |")),
+        "compact table expected: {compact:?}"
+    );
+    assert!(
+        padded.as_deref().is_some_and(|l| l.starts_with("|--")),
+        "padded table expected by default: {padded:?}"
+    );
+}
+
 #[tokio::test]
 async fn converts_markdown_upload_to_markdown() {
     let (ct, body) = multipart("note.md", b"# Title\n\nHello *world*.\n", &[]);
