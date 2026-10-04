@@ -51,7 +51,7 @@ entirely on your device, phone included. Scanned pages can be OCR'd there too
 (layout + PP-OCR + TableFormer via ONNX Runtime Web) once you point it at the
 models. See [`crates/docling-wasm`](./crates/docling-wasm/README.md).
 
-Developed with **Claude Code** and _[TENET](https://github.com/artiz/tenet/tree/master)_ (minimalistic spec driven design framework).
+Developed with **Claude Code** and _[TENET](https://github.com/artiz/tenet/tree/master)_ (minimalistic AI-driven development framework).
 
 ## Status
 
