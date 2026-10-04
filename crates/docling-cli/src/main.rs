@@ -60,6 +60,8 @@
 //!                      cheap. Non-PDF inputs ignore this.
 //!   --images MODE      picture handling for Markdown (mirrors docling's
 //!                      image_mode): placeholder (default) | embedded | referenced.
+//!                      `--to pandoc` defaults to embedded (#537): its AST is
+//!                      meant for `pandoc -t docx`, which needs the pixels.
 //!                      `referenced` writes image files under ./artifacts/ —
 //!                      streamed to disk page by page, so image-heavy PDFs stay
 //!                      memory-bounded. JSON always embeds extracted images as
@@ -215,7 +217,8 @@ OUTPUT
                           comma-separate) to write several — needs --output
   --strict                cleaner, more conformant Markdown (Markdown only)
   --page-break-placeholder TEXT   insert TEXT between pages (Markdown only, e.g. <!-- page break -->)
-  --images MODE           picture handling: placeholder (default) | embedded | referenced
+  --images MODE           picture handling: placeholder (default; embedded for --to pandoc)
+                          | embedded | referenced
   --pandoc-api-version V  fail unless the Pandoc AST is this API (`--to pandoc`; only 1.23)
   --compact-tables        render Markdown tables without width padding
   --no-stream             build the whole document before printing
@@ -344,7 +347,8 @@ fn main() -> ExitCode {
     // occurrence — or comma-separated entry — is collected here and resolved
     // to a de-duplicated format list below; empty means Markdown.
     let mut to: Vec<String> = Vec::new();
-    let mut images = "placeholder".to_string();
+    // `None` = not given: placeholder, except embedded for `--to pandoc` (#537).
+    let mut images: Option<String> = None;
     let mut fetch_images = false;
     let mut list_attachments = false;
     let mut skip_empty_cells = false;
@@ -531,7 +535,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
-            "--images" => images = args.next().unwrap_or_default(),
+            "--images" => images = Some(args.next().unwrap_or_default()),
             // #515: the Pandoc API the caller's `pandoc` reads. Only one is
             // written, so this is a check, not a choice: an unsupported
             // version fails here instead of feeding Pandoc a document it
@@ -765,7 +769,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let image_mode = match images.as_str() {
+    let image_mode = match images.as_deref().unwrap_or("placeholder") {
         "placeholder" => ImageMode::Placeholder,
         "embedded" => ImageMode::Embedded,
         "referenced" => ImageMode::Referenced,
@@ -775,6 +779,14 @@ fn main() -> ExitCode {
             );
             return ExitCode::from(2);
         }
+    };
+    // #537: the Pandoc AST feeds `pandoc -f json -t docx`, whose writers drop
+    // a picture without a target — so unless `--images` says otherwise its
+    // pictures are embedded `data:` URIs (the AST alone rebuilds them).
+    let pandoc_image_mode = if images.is_some() {
+        image_mode
+    } else {
+        ImageMode::Embedded
     };
 
     // Batch mode (#205, #489): `--input <glob>` and/or several positional
@@ -851,6 +863,7 @@ fn main() -> ExitCode {
         let cfg = BatchCfg {
             to,
             image_mode,
+            pandoc_image_mode,
             strict,
             fetch_images,
             list_attachments,
@@ -891,6 +904,11 @@ fn main() -> ExitCode {
     // Past the batch branch exactly one format remains (several returned
     // above): the single-document stdout mode below reads it as before.
     let to = to.into_iter().next().unwrap_or_else(|| "md".to_string());
+    let image_mode = if to == "pandoc" {
+        pandoc_image_mode
+    } else {
+        image_mode
+    };
     let Some(path) = paths.into_iter().next() else {
         eprintln!("error: no input file");
         eprintln!("{USAGE}");
@@ -1206,6 +1224,9 @@ struct BatchCfg {
     /// document converts once and is written in every one of them.
     to: Vec<String>,
     image_mode: ImageMode,
+    /// `image_mode` for `--to pandoc`: embedded unless `--images` was given
+    /// (#537).
+    pandoc_image_mode: ImageMode,
     strict: bool,
     fetch_images: bool,
     list_attachments: bool,
@@ -1762,14 +1783,18 @@ fn batch_convert_one(
             "latex" => std::fs::write(&out, document.export_to_latex())
                 .map_err(|e| format!("writing {}: {e}", out.display()))?,
             "dclx" => docling::dclx::save_as_dclx(&document, &out).map_err(|e| e.to_string())?,
-            // #515: the Pandoc AST; pictures follow `--images` like HTML.
+            // #515: the Pandoc AST; pictures follow `--images` like HTML,
+            // embedded when it is not given (#537).
             "pandoc" => {
                 let stem = out
                     .file_stem()
                     .map(|s| s.to_string_lossy().trim_end_matches(".pandoc").to_string())
                     .unwrap_or_else(|| "document".into());
-                let (json, artifacts) =
-                    pandoc_json(&document, cfg.image_mode, &format!("{stem}_artifacts"));
+                let (json, artifacts) = pandoc_json(
+                    &document,
+                    cfg.pandoc_image_mode,
+                    &format!("{stem}_artifacts"),
+                );
                 let parent = out.parent().unwrap_or(Path::new(""));
                 for (rel, bytes) in &artifacts {
                     let target = parent.join(rel);

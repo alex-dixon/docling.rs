@@ -607,6 +607,15 @@ fn collect_runs_linked(
 /// are skipped. Each becomes a furniture-layer `footnote` item, the layer
 /// headers/footers use: available to callers, out of the reading order.
 pub(super) fn note_texts(body: XmlNode) -> Vec<String> {
+    note_bodies(body)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect()
+}
+
+/// [`note_texts`] with each note's `<text:note>` element — the call site a
+/// citing paragraph's Pandoc `Note` goes to (#538).
+pub(super) fn note_bodies(body: XmlNode) -> Vec<(roxmltree::NodeId, String)> {
     body.descendants()
         .filter(|n| n.has_tag_name("note"))
         .filter_map(|note| {
@@ -618,9 +627,51 @@ pub(super) fn note_texts(body: XmlNode) -> Vec<String> {
                 .collect::<String>()
                 .trim()
                 .to_string();
-            (!text.is_empty()).then_some(text)
+            (!text.is_empty()).then_some((note.id(), text))
         })
         .collect()
+}
+
+/// The `<text:note>` calls of a paragraph-like element (`p`, `h`, or a list
+/// item's direct `p` / `h` children) as `(offset, note)`, the offset in chars
+/// of the text [`collect_runs`] reads from it — the same traversal, with a
+/// note's own text left out as there (#538).
+pub(super) fn note_calls(el: XmlNode) -> (String, Vec<(usize, roxmltree::NodeId)>) {
+    fn walk(el: XmlNode, text: &mut String, out: &mut Vec<(usize, roxmltree::NodeId)>) {
+        for child in el.children() {
+            if child.is_text() {
+                text.push_str(child.text().unwrap_or_default());
+                continue;
+            }
+            if !child.is_element() {
+                continue;
+            }
+            match child.tag_name().name() {
+                "line-break" => text.push('\n'),
+                "tab" | "tab-stop" => text.push('\t'),
+                "s" => {
+                    let n: usize = attr(child, "c").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    text.push_str(&" ".repeat(n));
+                }
+                "object" | "binary-data" => {}
+                "note" => out.push((text.chars().count(), child.id())),
+                _ => walk(child, text, out),
+            }
+        }
+    }
+    let mut text = String::new();
+    let mut out = Vec::new();
+    if el.has_tag_name("list-item") || el.has_tag_name("list-header") {
+        for c in el
+            .children()
+            .filter(|c| c.has_tag_name("p") || c.has_tag_name("h"))
+        {
+            walk(c, &mut text, &mut out);
+        }
+    } else {
+        walk(el, &mut text, &mut out);
+    }
+    (text, out)
 }
 
 /// Footnote/endnote bodies as furniture paragraphs after the body walk.

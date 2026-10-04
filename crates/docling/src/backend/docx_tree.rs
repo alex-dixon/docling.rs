@@ -27,7 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use docling_core::tree::{Formatting, ItemTree, ListMeta, TreeKind};
+use docling_core::tree::{Formatting, ItemTree, ListMeta, TreeKind, TreeNote};
 use docling_core::{ContentLayer, PictureImage, Script, Table, TableCell};
 use roxmltree::{Document, Node as XmlNode, NodeId};
 
@@ -50,6 +50,17 @@ struct Part {
     text: String,
     fmt: Option<Formatting>,
     link: Option<String>,
+}
+
+/// A `w:footnoteReference` / `w:endnoteReference` placed in a text item
+/// ([`Walker::note_calls`]).
+struct NoteCall {
+    /// The text item the call sits in.
+    item: usize,
+    /// Its position, in chars into that item's text.
+    offset: usize,
+    kind: &'static str,
+    id: String,
 }
 
 /// A paragraph's identity: roxmltree node ids are per parsed document, and
@@ -112,6 +123,10 @@ struct Walker {
     /// The body element (paragraph, table, …) each item was created for —
     /// the innermost one, for [`rich_cell_layout`].
     item_src: HashMap<usize, Key>,
+    /// Footnote / endnote references met in the body, anchored to the text
+    /// item that holds them (#538) — resolved to the note bodies once those
+    /// are read.
+    note_calls: Vec<NoteCall>,
     /// `paragraph_comment_map`, in insertion order.
     para_comments: Vec<(Key, Vec<String>)>,
 }
@@ -200,12 +215,25 @@ pub(super) fn build_tree(
     w.add_comments(comments);
     // `_add_footnotes_and_endnotes` (docling#4374): after the comments, each
     // note's body a furniture-layer `footnote` text on the body.
-    for text in footnote_texts(pkg) {
-        w.add(
+    let mut bodies: HashMap<(&'static str, String), (usize, String)> = HashMap::new();
+    for note in footnote_texts(pkg) {
+        let id = w.add(
             None,
             Some(ContentLayer::Furniture),
-            text_kind("footnote", &text, None, None),
+            text_kind("footnote", &note.text, None, None),
         );
+        bodies.insert((note.kind, note.id), (id, note.text));
+    }
+    // #538: hang each note on the text item that calls it, for the Pandoc
+    // AST's `Note` (docling's JSON keeps the bodies unlinked).
+    for call in std::mem::take(&mut w.note_calls) {
+        if let Some((body, text)) = bodies.get(&(call.kind, call.id)) {
+            w.tree.items[call.item].notes.push(TreeNote {
+                offset: call.offset,
+                text: text.clone(),
+            });
+            w.tree.items[*body].note_body = true;
+        }
     }
     w.tree
 }
@@ -229,6 +257,64 @@ fn is_dml(n: XmlNode) -> bool {
 /// python-docx's `CT_R.text`.
 fn run_text(r: XmlNode) -> String {
     child_elements(r).map(run_child_text).collect()
+}
+
+/// The `w:footnoteReference` / `w:endnoteReference` calls of a paragraph as
+/// `(offset, kind, w:id)`, the offset in chars of the paragraph text that
+/// [`Walker::iter_paragraph_content`] reads — the same traversal: runs and
+/// hyperlinks directly under the paragraph (through `smartTag` / `customXml`
+/// / `ins` / `fldSimple`), a content control's text counted whole (#538).
+fn note_references(p: XmlNode) -> Vec<(usize, &'static str, String)> {
+    fn walk(node: XmlNode, acc: &mut usize, out: &mut Vec<(usize, &'static str, String)>) {
+        for c in child_elements(node) {
+            if is_math(c) {
+                continue;
+            }
+            match c.tag_name().name() {
+                "smartTag" | "customXml" | "ins" | "fldSimple" => walk(c, acc, out),
+                "r" => run(c, acc, out),
+                "hyperlink" => {
+                    for r in c.children().filter(|n| n.has_tag_name("r") && !is_math(*n)) {
+                        run(r, acc, out);
+                    }
+                }
+                "sdt" => {
+                    *acc += c
+                        .descendants()
+                        .filter(|n| n.has_tag_name("t") && !is_math(*n))
+                        .filter(|n| n.ancestors().any(|a| a.has_tag_name("sdtContent")))
+                        .filter_map(|n| n.text())
+                        .map(|t| t.chars().count())
+                        .sum::<usize>();
+                }
+                _ => {}
+            }
+        }
+    }
+    fn run(r: XmlNode, acc: &mut usize, out: &mut Vec<(usize, &'static str, String)>) {
+        for c in child_elements(r) {
+            let kind = match c.tag_name().name() {
+                "footnoteReference" => "footnote",
+                "endnoteReference" => "endnote",
+                _ => {
+                    *acc += run_child_text(c).chars().count();
+                    continue;
+                }
+            };
+            if let Some(id) = attr(c, "id") {
+                out.push((*acc, kind, id.to_string()));
+            }
+        }
+    }
+    if !p
+        .descendants()
+        .any(|n| n.has_tag_name("footnoteReference") || n.has_tag_name("endnoteReference"))
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    walk(p, &mut 0, &mut out);
+    out
 }
 
 /// python-docx's `Paragraph.text`: the runs and hyperlinks directly under the
@@ -369,6 +455,7 @@ impl Walker {
             para_comments: Vec::new(),
             stale: HashMap::new(),
             item_src: HashMap::new(),
+            note_calls: Vec::new(),
         }
     }
 
@@ -1548,6 +1635,48 @@ impl Walker {
 
     /// `_handle_text_elements`.
     fn handle_text_elements(&mut self, p: XmlNode, ctx: &Ctx, skip_empty_text: bool) -> Vec<usize> {
+        let calls = note_references(p);
+        let first_new = self.tree.items.len();
+        let refs = self.handle_text_elements_inner(p, ctx, skip_empty_text);
+        if !calls.is_empty() {
+            let full_text: String = self
+                .iter_paragraph_content(p, ctx)
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect();
+            self.anchor_note_calls(&full_text, first_new, calls);
+        }
+        refs
+    }
+
+    /// #538: place each note reference of a paragraph in the text item it
+    /// falls in ([`ItemTree::place_note_calls`]).
+    fn anchor_note_calls(
+        &mut self,
+        full_text: &str,
+        first_new: usize,
+        calls: Vec<(usize, &'static str, String)>,
+    ) {
+        let offsets: Vec<usize> = calls.iter().map(|c| c.0).collect();
+        let placed = self.tree.place_note_calls(first_new, full_text, &offsets);
+        for ((_, kind, id), place) in calls.into_iter().zip(placed) {
+            if let Some((item, offset)) = place {
+                self.note_calls.push(NoteCall {
+                    item,
+                    offset,
+                    kind,
+                    id,
+                });
+            }
+        }
+    }
+
+    fn handle_text_elements_inner(
+        &mut self,
+        p: XmlNode,
+        ctx: &Ctx,
+        skip_empty_text: bool,
+    ) -> Vec<usize> {
         let mut refs: Vec<usize> = Vec::new();
         let content = self.iter_paragraph_content(p, ctx);
         let elements = self.paragraph_elements(&content);

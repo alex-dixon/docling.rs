@@ -65,8 +65,9 @@ fn convert_impl(
     // (slides, sheets, DjVu pages, PDF text-layer pages). Unset = no breaks.
     converter = converter.page_break_placeholder(page_break_placeholder.map(str::to_owned));
     let result = converter.convert(source).map_err(|e| e.to_string())?;
-    let image_mode = image_mode(images)?;
-    match to.unwrap_or("md") {
+    let to = to.unwrap_or("md");
+    let image_mode = image_mode(images, to)?;
+    match to {
         // `Referenced` is deliberately unreachable here: it hands the caller
         // loose image files to write next to the Markdown, which a page with no
         // filesystem cannot do — the browser equivalent is `embedded`.
@@ -95,8 +96,16 @@ fn convert_impl(
 /// option: `placeholder` (docling's default `<!-- image -->`) or `embedded`
 /// (`![Image](data:…;base64,…)`, self-contained — the only way to carry pixels
 /// out of a page that cannot write files).
-fn image_mode(images: Option<&str>) -> Result<ImageMode, String> {
-    match images.unwrap_or("placeholder") {
+///
+/// Unset is `placeholder`, except `embedded` for the Pandoc AST (#537): it
+/// feeds `pandoc -t docx`, whose writers drop a picture without a target.
+fn image_mode(images: Option<&str>, to: &str) -> Result<ImageMode, String> {
+    let default = if to == "pandoc" {
+        "embedded"
+    } else {
+        "placeholder"
+    };
+    match images.unwrap_or(default) {
         "placeholder" => Ok(ImageMode::Placeholder),
         "embedded" => Ok(ImageMode::Embedded),
         other => Err(format!(

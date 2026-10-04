@@ -394,14 +394,14 @@ pub(crate) fn render(
 ) -> Result<String, JsError> {
     match to.unwrap_or("md") {
         "md" | "markdown" => {
-            let mode = crate::image_mode(images).map_err(|e| JsError::new(&e))?;
+            let mode = crate::image_mode(images, "md").map_err(|e| JsError::new(&e))?;
             Ok(doc.export_to_markdown_with_images(mode, "artifacts").0)
         }
         "json" => Ok(doc.export_to_json()),
         "doclang" => Ok(doc.export_to_doclang()),
         "latex" => Ok(doc.export_to_latex()),
         "pandoc" => {
-            let mode = crate::image_mode(images).map_err(|e| JsError::new(&e))?;
+            let mode = crate::image_mode(images, "pandoc").map_err(|e| JsError::new(&e))?;
             crate::pandoc_json(doc, mode).map_err(|e| JsError::new(&e))
         }
         other => Err(JsError::new(&format!(

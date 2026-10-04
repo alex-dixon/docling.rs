@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use docling_core::tree::{Formatting, ItemTree, ListMeta, TreeKind, TreeProv};
+use docling_core::tree::{Formatting, ItemTree, ListMeta, TreeKind, TreeNote, TreeProv};
 use docling_core::{ContentLayer, PictureImage, Script, Table, TableCell};
 use roxmltree::Node as XmlNode;
 
@@ -56,6 +56,9 @@ struct Walker<'s> {
     tree: ItemTree,
     styles: &'s Styles,
     tables: usize,
+    /// `<text:note>` calls placed in text items: `(item, offset, note)` —
+    /// hung on the items once the note bodies exist (#538).
+    note_calls: Vec<(usize, usize, roxmltree::NodeId)>,
 }
 
 /// `<office:text>` body children.
@@ -64,13 +67,14 @@ pub(super) fn build_text(body: XmlNode, styles: &Styles) -> Built {
     w.add_children(body.children().filter(XmlNode::is_element), None, None);
     // `_add_footnotes` (docling#4375): each note body a furniture `footnote`
     // text on the body, after the whole walk.
-    for text in super::odf::note_texts(body) {
-        w.tree.add(
+    let mut bodies = std::collections::HashMap::new();
+    for (note, text) in super::odf::note_bodies(body) {
+        let id = w.tree.add(
             None,
             Some(ContentLayer::Furniture),
             TreeKind::Text {
                 label: "footnote".into(),
-                text,
+                text: text.clone(),
                 orig: None,
                 formatting: None,
                 hyperlink: None,
@@ -78,6 +82,17 @@ pub(super) fn build_text(body: XmlNode, styles: &Styles) -> Built {
                 list: None,
             },
         );
+        bodies.insert(note, (id, text));
+    }
+    // #538: each note on the text item that calls it, for the Pandoc AST.
+    for (item, offset, note) in std::mem::take(&mut w.note_calls) {
+        if let Some((body_id, text)) = bodies.get(&note) {
+            w.tree.items[item].notes.push(TreeNote {
+                offset,
+                text: text.clone(),
+            });
+            w.tree.items[*body_id].note_body = true;
+        }
     }
     Built {
         tree: w.tree,
@@ -508,6 +523,7 @@ impl<'s> Walker<'s> {
             tree: ItemTree::default(),
             styles,
             tables: 0,
+            note_calls: Vec::new(),
         }
     }
 
@@ -785,11 +801,35 @@ impl<'s> Walker<'s> {
         }
     }
 
+    /// The `<text:note>` calls in `el` (a paragraph, heading or list item
+    /// whose items were created from `first_new` on), placed in those items
+    /// ([`ItemTree::place_note_calls`], #538).
+    fn anchor_notes(&mut self, el: XmlNode, first_new: usize) {
+        if !el.descendants().any(|n| n.has_tag_name("note")) {
+            return;
+        }
+        let (text, calls) = super::odf::note_calls(el);
+        let offsets: Vec<usize> = calls.iter().map(|c| c.0).collect();
+        let placed = self.tree.place_note_calls(first_new, &text, &offsets);
+        for ((_, note), place) in calls.into_iter().zip(placed) {
+            if let Some((item, offset)) = place {
+                self.note_calls.push((item, offset, note));
+            }
+        }
+    }
+
     /// `_add_odf_child`.
     fn add_child(&mut self, el: XmlNode, parent: Option<usize>, layer: Option<ContentLayer>) {
+        let first_new = self.tree.items.len();
         match el.tag_name().name() {
-            "h" => self.add_heading(el, parent, layer),
-            "p" => self.add_paragraph(el, parent, layer),
+            "h" => {
+                self.add_heading(el, parent, layer);
+                self.anchor_notes(el, first_new);
+            }
+            "p" => {
+                self.add_paragraph(el, parent, layer);
+                self.anchor_notes(el, first_new);
+            }
             n if is_list_tag(n) => {
                 self.add_list(el, parent, layer, false, 1, None);
             }
@@ -919,6 +959,7 @@ impl<'s> Walker<'s> {
             } else {
                 String::new()
             };
+            let first_new = self.tree.items.len();
             let runs = self.item_runs(item);
             let meta = ListMeta {
                 enumerated: current_enum,
@@ -971,6 +1012,7 @@ impl<'s> Walker<'s> {
                 }
                 id
             };
+            self.anchor_notes(item, first_new);
             previous = Some(item_id);
             for n in nested {
                 self.add_list(n, Some(item_id), layer, style_enum, level + 1, None);

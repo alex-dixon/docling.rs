@@ -605,7 +605,18 @@
                            , Str "thumbnail"
                            ]
                        ])
-                    []
+                    [ Plain
+                        [ Image
+                            ( "" , [ "docling-placeholder" ] , [] )
+                            [ Str "White-headed"
+                            , Space
+                            , Str "duck"
+                            , Space
+                            , Str "thumbnail"
+                            ]
+                            ( "" , "" )
+                        ]
+                    ]
                 ]
             ]
         , Row

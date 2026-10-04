@@ -112,11 +112,13 @@ impl DeclarativeBackend for DocxBackend {
         // a `w:footnoteReference` in the body carries no text of its own, so
         // without reading `word/footnotes.xml` / `word/endnotes.xml` the
         // notes were silently dropped.
-        for text in footnote_texts(&mut pkg) {
+        for note in footnote_texts(&mut pkg) {
             doc.nodes.push(Node::Furniture {
                 layer: docling_core::ContentLayer::Furniture,
                 inner: Box::new(Node::Paragraph {
-                    text: super::markdown::escape_html(&super::markdown::escape_underscores(&text)),
+                    text: super::markdown::escape_html(&super::markdown::escape_underscores(
+                        &note.text,
+                    )),
                 }),
             });
         }
@@ -219,6 +221,15 @@ pub(super) fn header_footer_parts(body: XmlNode, ctx: &Ctx) -> Vec<(&'static str
     out
 }
 
+/// One footnote / endnote body ([`footnote_texts`]).
+pub(super) struct DocxNote {
+    /// `footnote` or `endnote` — which reference element calls it.
+    pub(super) kind: &'static str,
+    /// The note's `w:id`.
+    pub(super) id: String,
+    pub(super) text: String,
+}
+
 /// The body text of every footnote and endnote, in part order (footnotes,
 /// then endnotes) and document order — docling's `_add_footnotes_and_endnotes`
 /// (docling#4374): the parts are reached through the document's FOOTNOTES /
@@ -226,7 +237,9 @@ pub(super) fn header_footer_parts(body: XmlNode, ctx: &Ctx) -> Vec<(&'static str
 /// `continuationNotice` placeholders Word writes into every document are
 /// skipped, and a note's non-blank paragraphs (python-docx's `Paragraph.text`)
 /// are joined with one space. Each becomes a furniture-layer `footnote` item.
-pub(super) fn footnote_texts(pkg: &mut Package) -> Vec<String> {
+/// The note's kind (`footnote` / `endnote`) and `w:id` come along: a body
+/// `w:footnoteReference` / `w:endnoteReference` names it by those (#538).
+pub(super) fn footnote_texts(pkg: &mut Package) -> Vec<DocxNote> {
     const SKIP_TYPES: [&str; 3] = ["separator", "continuationSeparator", "continuationNotice"];
     let mut out = Vec::new();
     for (rel_suffix, tag) in [("/footnotes", "footnote"), ("/endnotes", "endnote")] {
@@ -260,7 +273,11 @@ pub(super) fn footnote_texts(pkg: &mut Package) -> Vec<String> {
                 .filter(|t| !t.is_empty())
                 .collect();
             if !texts.is_empty() {
-                out.push(texts.join(" "));
+                out.push(DocxNote {
+                    kind: tag,
+                    id: attr(note, "id").unwrap_or_default().to_string(),
+                    text: texts.join(" "),
+                });
             }
         }
     }

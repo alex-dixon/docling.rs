@@ -175,6 +175,85 @@ pub struct TreeItem {
     /// stays so every other index keeps its meaning, but the item is not
     /// numbered or written.
     pub deleted: bool,
+    /// Footnotes / endnotes referenced from inside this text item (#538): the
+    /// note call's position (chars into the item's text) and the note's text.
+    /// docling keeps notes as unlinked furniture `footnote` items, so the
+    /// JSON never shows this; the Pandoc AST writes each as a `Note` there.
+    pub notes: Vec<TreeNote>,
+    /// This furniture `footnote` item is the body of a note some text item
+    /// calls (it travels in that item's [`Self::notes`]); the Pandoc AST then
+    /// leaves it out as a standalone block.
+    pub note_body: bool,
+}
+
+/// A note call inside a text item ([`TreeItem::notes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeNote {
+    /// The call's position, in chars into the item's `text`.
+    pub offset: usize,
+    /// The note's plain text.
+    pub text: String,
+}
+
+impl ItemTree {
+    /// Where each note call of one paragraph lands (#538): `full_text` is the
+    /// paragraph's text, `offsets` the calls' positions in it (chars), and
+    /// the paragraph's items are those created from `first_new` on. Each text
+    /// item is a trimmed slice of the paragraph (a formatting run, a link, or
+    /// the whole heading / list item), matched in order; a call inside an
+    /// item lands there, one between items ends the earlier (or starts the
+    /// first). When no item matches, the call ends the paragraph's last text
+    /// item; with no text item at all it is `None`.
+    pub fn place_note_calls(
+        &self,
+        first_new: usize,
+        full_text: &str,
+        offsets: &[usize],
+    ) -> Vec<Option<(usize, usize)>> {
+        let texts: Vec<(usize, &str)> = (first_new..self.items.len())
+            .filter(|&i| !self.items[i].deleted)
+            .filter_map(|i| match &self.items[i].kind {
+                TreeKind::Text { text, .. } | TreeKind::Code { text, .. } => {
+                    Some((i, text.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        // Each found item's (id, start, end) in chars of `full_text`.
+        let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+        let mut cursor = 0usize; // bytes
+        for &(item, text) in &texts {
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(pos) = full_text[cursor..].find(text) {
+                let start_b = cursor + pos;
+                let start = full_text[..start_b].chars().count();
+                spans.push((item, start, start + text.chars().count()));
+                cursor = start_b + text.len();
+            }
+        }
+        offsets
+            .iter()
+            .map(|&offset| {
+                spans
+                    .iter()
+                    .find(|&&(_, start, end)| offset >= start && offset <= end)
+                    .map(|&(item, start, _)| (item, offset - start))
+                    .or_else(
+                        || match spans.iter().rev().find(|&&(_, _, end)| end <= offset) {
+                            Some(&(item, start, end)) => Some((item, end - start)),
+                            None => spans.first().map(|&(item, _, _)| (item, 0)),
+                        },
+                    )
+                    .or_else(|| {
+                        texts
+                            .last()
+                            .map(|&(item, text)| (item, text.chars().count()))
+                    })
+            })
+            .collect()
+    }
 }
 
 /// docling's item tree in creation order (see the [module docs](self)).
@@ -206,6 +285,8 @@ impl ItemTree {
             comments: Vec::new(),
             source: None,
             deleted: false,
+            notes: Vec::new(),
+            note_body: false,
         });
         match parent {
             Some(p) => self.items[p].children.push(id),
