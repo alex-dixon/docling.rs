@@ -614,17 +614,38 @@ fn render_table(t: &Table) -> String {
         Some(cells) => {
             let mut by_pos: std::collections::HashMap<(usize, usize), &str> =
                 std::collections::HashMap::new();
+            // A rich cell is serialized through its group, whose items are
+            // then visited: upstream writes its content at the first grid
+            // position only and leaves the rest of a merge empty (#527); a
+            // plain merged cell repeats its text.
+            let mut rich_cover: std::collections::HashSet<(usize, usize)> =
+                std::collections::HashSet::new();
             for c in cells {
+                let rich = t
+                    .cell_blocks
+                    .as_ref()
+                    .and_then(|b| b.get(c.start_row))
+                    .and_then(|row| row.get(c.start_col))
+                    .is_some_and(|b| !b.is_empty());
                 for r in c.start_row..(c.start_row + c.row_span).min(num_rows) {
                     for k in c.start_col..(c.start_col + c.col_span).min(num_cols) {
                         by_pos.insert((r, k), c.text.as_str());
+                        if rich && (r, k) != (c.start_row, c.start_col) {
+                            rich_cover.insert((r, k));
+                        }
                     }
                 }
             }
             for r in 0..num_rows {
                 grid.push(
                     (0..num_cols)
-                        .map(|c| cell(r, c, by_pos.get(&(r, c)).copied().unwrap_or("")))
+                        .map(|c| {
+                            if rich_cover.contains(&(r, c)) {
+                                String::new()
+                            } else {
+                                cell(r, c, by_pos.get(&(r, c)).copied().unwrap_or(""))
+                            }
+                        })
                         .collect(),
                 );
             }

@@ -744,7 +744,10 @@ fn humanize_label(label: &str) -> String {
 
 fn picture_marker(image: Option<&crate::PictureImage>, ctx: &mut Ctx) -> String {
     match (ctx.images, image) {
-        (ImageMode::Embedded, Some(img)) => format!("![Image]({})", img.data_uri()),
+        // docling embeds the `ImageRef`'s PNG (a JPEG re-encoded).
+        (ImageMode::Embedded, Some(img)) => {
+            format!("![Image]({})", crate::pixel_digest::docling_data_uri(img).1)
+        }
         (ImageMode::Referenced, Some(img)) => {
             let path = format!(
                 "{}/image_{:06}.{}",

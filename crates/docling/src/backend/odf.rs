@@ -111,7 +111,7 @@ pub(super) struct Styles {
     /// The package's decodable bitmap parts by name (`Pictures/x.png` →
     /// pixels), read for the JSON item tree: docling's `_add_odf_images`
     /// adds a picture only when PIL can open the part, and writes its
-    /// `image` payload. The flat nodes keep their unloaded placeholders.
+    /// `image` payload; the flat nodes carry the same pixels.
     pub(super) images: HashMap<String, PictureImage>,
     /// The package's part names (`Pictures/1000.png`, …); `None` for flat ODF,
     /// where every image is inline `<office:binary-data>`. Decides whether a
@@ -723,7 +723,8 @@ fn serialize_run(text: &str, fmt: Fmt, href: Option<&str>) -> String {
 /// `PictureItem` for it (docling#4015, 2.120.3):
 ///
 /// * an embedded part (`Pictures/…`, or inline `<office:binary-data>` in flat
-///   ODF) is a picture — the bytes stay unloaded here, as before;
+///   ODF) is a picture — carrying the part's pixels when the package holds a
+///   decodable bitmap (`Styles::images`), the inline payload stays unloaded;
 /// * an external `http(s)` reference is fetched (bounded, SSRF-guarded) only
 ///   under `fetch_images`, and is a picture only when the fetch yields one;
 /// * anything else external — an absolute or relative filesystem path, an
@@ -749,7 +750,9 @@ fn odf_picture(styles: &Styles, img: XmlNode) -> Option<Node> {
     // marker, #215) both name a part.
     let name = href.trim_start_matches("./").trim_start_matches('#');
     match &styles.parts {
-        Some(parts) if parts.contains(name) => return picture(None),
+        // The decoded part when PIL-equivalent decoding reads it (the JSON
+        // tree's payload too), so DocLang names and packages the asset.
+        Some(parts) if parts.contains(name) => return picture(styles.images.get(name).cloned()),
         // Flat ODF has no parts: a non-empty href is external by definition.
         _ => {}
     }

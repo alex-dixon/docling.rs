@@ -1184,6 +1184,16 @@ impl DoclingDocument {
         crate::doclang::export_to_doclang(&self.nodes)
     }
 
+    /// [`Self::export_to_doclang`] plus the picture assets its
+    /// `<src uri="assets/image_….png"/>` references name, as `(path, bytes)`
+    /// in document order — the parts docling's `save_as_doclang_archive`
+    /// stores next to `document.xml`. PNG and JPEG pictures come back as PNG
+    /// (a JPEG re-encoded from its libjpeg-decoded pixels); other encodings
+    /// keep their own bytes for the archive writer to convert.
+    pub fn export_to_doclang_with_assets(&self) -> (String, Vec<(String, Vec<u8>)>) {
+        crate::doclang::export_to_doclang_with_assets(&self.nodes)
+    }
+
     /// Serialize to Markdown with an explicit picture [`ImageMode`] (mirrors
     /// docling's `image_mode`). Returns the Markdown and, for
     /// [`ImageMode::Referenced`], the `(relative-path, bytes)` of each image the

@@ -546,15 +546,21 @@ headings, paragraphs, rich inline runs (`<bold>` / `<italic>` / `<underline>` /
 `<strikethrough>` / `<subscript>` / `<superscript>`), lists with enumeration
 `<marker>`s, tables with per-cell `<location>` provenance, code blocks with a
 language `<label>`, formulas, pictures and furniture. The pretty-printed
-indentation follows Python's `minidom.toprettyxml` byte-for-byte.
+indentation follows Python's `minidom.toprettyxml` byte-for-byte. A picture's
+`<src uri="assets/image_NNNNNN_<sha256>.png"/>` is named like docling's: the
+index counts every body picture, the digest is over the decoded pixels (PIL
+`tobytes()`) — exact for PNG and JPEG images (JPEG through a libjpeg-exact
+decoder); other encodings (GIF, BMP, …) hash the file bytes.
 
 ```rust
 println!("{}", result.document.export_to_doclang()); // <doclang> XML string
 ```
 
 Wrap that XML in an OPC archive — the `.dclx` container docling's
-`save_as_doclang()` writes (`[Content_Types].xml` + `_rels/.rels` +
-`document.xml`) — with `docling::dclx::save_as_dclx`:
+`save_as_doclang()` writes (`[Content_Types].xml` + `_rels/.rels` + one PNG
+part per referenced picture under `assets/` + `document.xml`) — with
+`docling::dclx::save_as_dclx` (`export_to_doclang_with_assets()` hands you the
+markup and those parts yourself):
 
 ```rust
 use std::path::Path;

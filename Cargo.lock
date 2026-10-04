@@ -1574,6 +1574,7 @@ dependencies = [
 name = "docling-core"
 version = "1.91.0"
 dependencies = [
+ "png 0.18.1",
  "pulldown-cmark",
  "serde_json",
  "sha2 0.10.9",
