@@ -14,7 +14,7 @@
 //!   --result-ttl SECS how long a finished async job's result stays fetchable
 //!                     (default: 600)
 //!   --warmup          load the PDF/image models at startup; /ready returns
-//!                     503 until they are loaded
+//!                     503 until they are loaded (and stays 503 if they fail)
 //!   --allow-url-fetch accept {"url": …} inputs (outbound fetch — SSRF surface;
 //!                     off by default). A private/loopback/link-local IP guard
 //!                     applies even when enabled.

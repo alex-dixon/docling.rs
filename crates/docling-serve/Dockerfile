@@ -190,7 +190,8 @@ COPY --from=build /src/target/release/docling-serve /usr/local/bin/docling-serve
 EXPOSE 5001
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=3 \
     CMD curl -f http://localhost:5001/ready || exit 1
-# Liveness: GET /health; readiness: GET /ready (503 until --warmup finishes).
+# Liveness: GET /health; readiness: GET /ready (503 until --warmup has loaded the
+# models, and for good if they fail to load — the healthcheck then reports it).
 CMD ["docling-serve", "--addr", "0.0.0.0:5001", "--warmup"]
 
 # ==============================================================================

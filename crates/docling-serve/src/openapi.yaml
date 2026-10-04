@@ -354,7 +354,11 @@ paths:
     get:
       summary: Readiness probe
       operationId: ready
-      description: 503 until `--warmup` finishes loading the ML models; 200 immediately when the server runs without it.
+      description: >-
+        With `--warmup`: 503 while the PDF/image models load, 200 once they are
+        loaded (`models: warm`), and 503 `warmup_failed` with the error when
+        they cannot load. Without it: 200 immediately (`models: lazy` — the
+        first PDF/image request loads them).
       responses:
         "200":
           description: Ready to serve conversions.
@@ -364,14 +368,16 @@ paths:
                 type: object
                 properties:
                   status: { type: string, const: ready }
+                  models: { type: string, enum: [warm, lazy] }
         "503":
-          description: Still loading models.
+          description: Models still loading, or failed to load.
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  status: { type: string, const: loading }
+                  status: { type: string, enum: [warming_up, warmup_failed] }
+                  error: { type: string, description: "Why the warmup failed (`warmup_failed` only)." }
 
   /metrics:
     get:

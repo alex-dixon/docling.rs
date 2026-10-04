@@ -12,7 +12,7 @@
 //! | GET    | `/v1/result/{id}` | async job result (the sync response, stored)   |
 //! | GET    | `/v1/config`  | server capabilities (`{"allow_url_fetch": bool}`)  |
 //! | GET    | `/health`     | liveness probe                                     |
-//! | GET    | `/ready`      | readiness probe (200 once models are warm)         |
+//! | GET    | `/ready`      | readiness probe (`--warmup`: 200 once models load) |
 //! | GET    | `/metrics`    | Prometheus metrics (#297, see [`o11y`])            |
 //! | GET    | `/openapi.yaml` | OpenAPI 3.1 description of the API               |
 //! | GET    | `/logo.svg`   | the playground's logo                              |
@@ -159,7 +159,6 @@
 
 use std::io::Read;
 use std::net::ToSocketAddrs;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -188,8 +187,10 @@ pub struct ServeConfig {
     pub concurrency: usize,
     /// Maximum accepted request body (multipart upload) in bytes.
     pub max_body_bytes: usize,
-    /// Load the PDF/image models at startup so `/ready` flips only when the
-    /// first conversion would be fast. Off: models load lazily on first use.
+    /// Load the PDF/image models at startup — the serial worker, TableFormer
+    /// and the multi-page worker pool — so `/ready` flips only when the first
+    /// conversion would be fast, and stays unready if they fail to load. Off:
+    /// models load lazily on first use and `/ready` is 200 at once.
     pub warmup: bool,
     /// Allow `{"url": …}` inputs (outbound fetch — SSRF surface). Off by
     /// default: even with the built-in private/loopback/link-local IP guard,
@@ -239,11 +240,24 @@ struct AppState {
     permits: Arc<Semaphore>,
     /// Async conversion jobs (#182), keyed by task id.
     jobs: Mutex<std::collections::HashMap<String, Job>>,
-    ready: AtomicBool,
+    readiness: Mutex<Readiness>,
     /// The resolved memory ceiling (#263): the configured value, else the
     /// container's cgroup limit, else none. `0` disables.
     memory_ceiling_mb: Option<u64>,
     cfg: ServeConfig,
+}
+
+/// What `/ready` reports (#548). Without `--warmup` the models load lazily
+/// on the first PDF/image request, so the server is ready at once and says
+/// so (`models: lazy`); with it, readiness waits for the models — and stays
+/// unready, with the reason, when they fail to load, instead of turning
+/// ready over an empty pipeline.
+#[derive(Clone, Debug, PartialEq)]
+enum Readiness {
+    Lazy,
+    Warming,
+    Warm,
+    Failed(String),
 }
 
 impl AppState {
@@ -284,7 +298,11 @@ pub fn router(cfg: ServeConfig) -> Router {
         pipeline: Mutex::new(None),
         permits: Arc::new(Semaphore::new(cfg.concurrency.max(1))),
         jobs: Mutex::new(std::collections::HashMap::new()),
-        ready: AtomicBool::new(!cfg.warmup),
+        readiness: Mutex::new(if cfg.warmup {
+            Readiness::Warming
+        } else {
+            Readiness::Lazy
+        }),
         memory_ceiling_mb,
         cfg: cfg.clone(),
     });
@@ -292,11 +310,40 @@ pub fn router(cfg: ServeConfig) -> Router {
         let st = state.clone();
         // Blocking model load off the runtime; readiness flips when done.
         tokio::task::spawn_blocking(move || {
-            match Pipeline::new() {
-                Ok(p) => *st.pipeline.lock().unwrap() = Some((PipelineFlags::default(), p)),
-                Err(e) => eprintln!("warmup: pipeline load failed: {e}"),
+            let started = std::time::Instant::now();
+            // Hold the slot while loading: a request that arrives before
+            // `/ready` (a client not behind the probe) waits for these models
+            // instead of loading a second copy of its own.
+            let mut slot = st
+                .pipeline
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // `Pipeline::new` only configures — the models load lazily — so
+            // warm up explicitly, the serial worker *and* the page-worker
+            // pool a multi-page PDF fans out to (#548). A panic in a model
+            // load must not leave `/ready` warming forever.
+            let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut p = Pipeline::new().map_err(|e| e.to_string())?;
+                p.warm_up_all().map_err(|e| e.to_string())?;
+                Ok::<_, String>(p)
+            }));
+            let next = match loaded {
+                Ok(Ok(p)) => {
+                    *slot = Some((PipelineFlags::default(), p));
+                    eprintln!(
+                        "docling-serve: warmup done in {:.1}s",
+                        started.elapsed().as_secs_f64()
+                    );
+                    Readiness::Warm
+                }
+                Ok(Err(e)) => Readiness::Failed(e),
+                Err(_) => Readiness::Failed("model load panicked".into()),
+            };
+            drop(slot);
+            if let Readiness::Failed(e) = &next {
+                eprintln!("docling-serve: warmup failed, /ready stays 503: {e}");
             }
-            st.ready.store(true, Ordering::Release);
+            *st.readiness.lock().unwrap_or_else(|p| p.into_inner()) = next;
         });
     }
     Router::new()
@@ -423,14 +470,24 @@ async fn config(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
-    if state.ready.load(Ordering::Acquire) {
-        Json(json!({"status": "ready"})).into_response()
-    } else {
-        (
+    let readiness = state
+        .readiness
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    match readiness {
+        Readiness::Lazy => Json(json!({"status": "ready", "models": "lazy"})).into_response(),
+        Readiness::Warm => Json(json!({"status": "ready", "models": "warm"})).into_response(),
+        Readiness::Warming => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status": "warming_up"})),
         )
-            .into_response()
+            .into_response(),
+        Readiness::Failed(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "warmup_failed", "error": error})),
+        )
+            .into_response(),
     }
 }
 
@@ -3151,7 +3208,6 @@ mod ssrf_tests {
 #[cfg(test)]
 mod vlm_tests {
     use super::{resolve_vlm_options, ApiError, AppState, ConvertOptions, ServeConfig};
-    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use tokio::sync::Semaphore;
 
@@ -3160,7 +3216,7 @@ mod vlm_tests {
             pipeline: Mutex::new(None),
             permits: Arc::new(Semaphore::new(1)),
             jobs: Mutex::new(Default::default()),
-            ready: AtomicBool::new(true),
+            readiness: Mutex::new(super::Readiness::Lazy),
             memory_ceiling_mb: None,
             cfg: ServeConfig {
                 allow_url_fetch,

@@ -2217,8 +2217,8 @@ docker compose up -d                        # standalone service (127.0.0.1:5001
 | `DOCLING_RS_NO_GRAPH_CACHE` | `0` | `1` disables the optimized-graph cache (models load and optimize from scratch every process) |
 | `DOCLING_RS_OCR_SESSIONS` | worker thread budget (1–8) | Parallel single-thread OCR recognition lanes per worker; output is byte-identical at any count |
 | `--concurrency N` | `2` | Max simultaneous conversions in flight; excess requests queue |
-| `--warmup` | enabled in image | Pre-load models at startup; `/ready` returns 503 until warm |
-| `/health` vs `/ready` | — | `/health` = liveness (200 immediately); `/ready` = readiness (200 once warm) |
+| `--warmup` | enabled in image | Load the PDF/image models — layout, OCR, TableFormer and the multi-page worker pool — at startup; `/ready` returns 503 until they are loaded, and stays 503 (`warmup_failed` + the error) if loading fails |
+| `/health` vs `/ready` | — | `/health` = liveness (200 immediately); `/ready` = readiness: with `--warmup`, 200 once the models are loaded (`"models": "warm"`); without it, 200 immediately (`"models": "lazy"` — the first PDF/image request loads them) |
 
 For a self-contained CLI image with models exported from PyTorch, [`examples/Dockerfile`](./examples/Dockerfile)
 is a 3-stage build that bakes the binary, native libs, and models into a slim runtime stage:
