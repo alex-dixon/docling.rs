@@ -1204,7 +1204,7 @@ impl PageTextParser {
                     t: h - g.lt,
                     r: g.lr,
                     b: h - g.lb,
-                    height: g.lt - g.lb,
+                    height: g.height(),
                     weight_cls: crate::font_style::weight_class(st.weight),
                     italic: st.italic,
                     styled: st.known,
@@ -1774,11 +1774,33 @@ fn show_text(
         };
         let trm = scale.then(*tm).then(ctm);
         // Box in glyph space (1000-unit em): x 0..w, y descent..ascent.
-        let (x0, y0) = trm.apply(0.0, font.descent / 1000.0);
-        let (x1, _y1) = trm.apply(w0, font.descent / 1000.0);
-        let (_x2, y2) = trm.apply(0.0, font.ascent / 1000.0);
-        let (left, right) = (x0.min(x1), x0.max(x1));
-        let (bot, top) = (y0.min(y2), y0.max(y2));
+        let (desc, asc) = (font.descent / 1000.0, font.ascent / 1000.0);
+        let (x0, y0) = trm.apply(0.0, desc);
+        let (x1, y1) = trm.apply(w0, desc);
+        let (x2, y2) = trm.apply(w0, asc);
+        let (x3, y3) = trm.apply(0.0, asc);
+        // Upright = the baseline runs left-to-right along +x. Only then is the
+        // loose box the rectangle spanned by the baseline's x and the em's y
+        // (a synthetic oblique's skew is ignored, as it always was). A rotated
+        // matrix — the `0 s -s 0 tx ty Tm` landscape pages are built with
+        // (#528) — collapsed that rectangle to zero width, and every such run
+        // vanished; those glyphs keep their real quad (docling-parse's char
+        // rect) and its extent instead.
+        let upright = trm.a > 0.0 && trm.b.abs() <= 1e-6 * trm.a;
+        let (left, bot, right, top, quad) = if upright {
+            (x0.min(x1), y0.min(y3), x0.max(x1), y0.max(y3), None)
+        } else {
+            let (xs, ys) = ([x0, x1, x2, x3], [y0, y1, y2, y3]);
+            let fold = |v: [f64; 4], f: fn(f64, f64) -> f64| v.into_iter().reduce(f).unwrap();
+            let q = [x0, y0, x1, y1, x2, y2, x3, y3].map(|v| v as f32);
+            (
+                fold(xs, f64::min),
+                fold(ys, f64::min),
+                fold(xs, f64::max),
+                fold(ys, f64::max),
+                Some(q),
+            )
+        };
         if let Some(s) = text {
             // A run may map one code to multiple chars (ligature/fraction); share box.
             for ch in s.chars() {
@@ -1794,6 +1816,7 @@ fn show_text(
                         lr: right as f32,
                         lt: top as f32,
                         font: font.hash,
+                        quad,
                     });
                 }
             }
@@ -2387,6 +2410,11 @@ mod base14_fonts {
     /// A one-page PDF whose single `Tj` uses `fontdict` (no embedded program).
     fn pdf_with_font(fontdict: &[u8], text: &[u8]) -> Vec<u8> {
         let content = [b"BT /F1 12 Tf 72 700 Td (".as_slice(), text, b") Tj ET\n"].concat();
+        pdf_with_content(fontdict, &content)
+    }
+
+    /// A one-page A4 PDF drawing `content` with `fontdict` as `/F1`.
+    fn pdf_with_content(fontdict: &[u8], content: &[u8]) -> Vec<u8> {
         let stream = format!("<</Length {}>>stream\n", content.len()).into_bytes();
         let objs: Vec<Vec<u8>> = vec![
             b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
@@ -2394,7 +2422,7 @@ mod base14_fonts {
             b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Contents 4 0 R\
                /Resources<</Font<</F1 5 0 R>>>>>>"
                 .to_vec(),
-            [stream.as_slice(), content.as_slice(), b"endstream"].concat(),
+            [stream.as_slice(), content, b"endstream"].concat(),
             fontdict.to_vec(),
         ];
         let mut out = b"%PDF-1.4\n".to_vec();
@@ -2424,6 +2452,77 @@ mod base14_fonts {
             .into_iter()
             .flat_map(|(_, _, c)| c)
             .collect()
+    }
+
+    /// Text drawn with a rotated text matrix reads as one line in its own
+    /// reading order, boxed by the run's axis-aligned extent (#528). The
+    /// landscape case is `0 s -s 0 tx ty Tm` on a `/Rotate 90` page; every
+    /// such run used to collapse to zero width and vanish (90°/270°/tilted)
+    /// or read backwards (180°). Expected boxes are docling-parse 7.22's line
+    /// cells for the same runs (y-up, PDF points).
+    #[test]
+    fn rotated_text_matrix_reads_in_order() {
+        const HELV: &[u8] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
+        const TEXT: &str = "Upright text on a rotated page.";
+        for (tm, [l, b, r, t]) in [
+            ("0 14 -14 0 200 100", [189.9, 100.0, 202.9, 289.1]), // 90°
+            ("-14 0 0 -14 350 300", [160.9, 289.9, 350.0, 302.9]), // 180°
+            ("0 -14 14 0 200 500", [197.1, 310.9, 210.1, 500.0]), // 270°
+            (
+                "9.8995 9.8995 -9.8995 9.8995 100 100",
+                [92.9, 98.0, 235.8, 240.8],
+            ), // 45°
+        ] {
+            let content = format!("BT /F1 1 Tf {tm} Tm ({TEXT}) Tj ET\n");
+            let pdf = pdf_with_content(HELV, content.as_bytes());
+            let cs = cells(&pdf);
+            assert_eq!(cs.len(), 1, "{tm}: {cs:?}");
+            let c = &cs[0];
+            assert_eq!(c.text, TEXT, "{tm}");
+            // `cells` is top-left-origin on the 842 pt page. The descriptor-
+            // less base-14 face gets the parser's 1-em box where docling-parse
+            // reads Helvetica's AFM (718/−207) — the same ≤ 0.6 pt
+            // across-the-baseline offset upright text has — so allow 1 pt.
+            let got = [c.l, 842.0 - c.b, c.r, 842.0 - c.t];
+            for (g, w) in got.iter().zip([l, b, r, t]) {
+                assert!(
+                    (g - w).abs() < 1.0,
+                    "{tm}: box {got:?} vs docling-parse {:?}",
+                    [l, b, r, t]
+                );
+            }
+            let words: Vec<String> = super::pdf_words(&pdf)
+                .into_iter()
+                .flat_map(|(_, _, c)| c)
+                .map(|c| c.text)
+                .collect();
+            assert_eq!(words, TEXT.split(' ').collect::<Vec<_>>(), "{tm}");
+        }
+    }
+
+    /// Upright text keeps the plain loose rectangle — no quad, and the
+    /// sanitizer path is the one every pinned PDF baseline was made with.
+    #[test]
+    fn upright_glyphs_carry_no_quad() {
+        let only_page = |pdf: &[u8]| {
+            let doc = super::load_document(pdf).expect("loads");
+            let pid = *doc.get_pages().values().next().expect("one page");
+            super::page_glyphs(&doc, pid)
+        };
+        let pdf = pdf_with_font(b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>", b"Plain");
+        let glyphs = only_page(&pdf);
+        assert!(!glyphs.is_empty());
+        assert!(glyphs.iter().all(|g| g.quad.is_none() && g.lr > g.ll));
+        // A 90° glyph's style height is its font size, not its advance.
+        let pdf = pdf_with_content(
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+            b"BT /F1 1 Tf 0 14 -14 0 200 100 Tm (W) Tj ET\n",
+        );
+        let glyphs = only_page(&pdf);
+        let g = &glyphs[0];
+        assert!(g.quad.is_some());
+        // 14 pt × the face's 1-em box (no descriptor: ascent − descent = 1).
+        assert!((g.height() - 14.0).abs() < 0.05, "{}", g.height());
     }
 
     /// Every standard-14 alias/style decodes with real (positive-width) boxes.

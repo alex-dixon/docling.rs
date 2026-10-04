@@ -344,14 +344,36 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
         // corner-distance adjacency. Without them the inter-word gap drives
         // `merge_with`'s space insertion. Spaces with a real width are kept (they
         // carry justified double-space information).
-        if g.ch == ' ' && (g.lr - g.ll).abs() < 0.5 {
+        // The char cell's quad: the loose rectangle for upright text, the
+        // glyph's own rotated quad otherwise (#528) — the contraction below
+        // works on corners and edge lengths, so it reads a 90°/180°/270° line
+        // in its own reading order, exactly like docling-parse.
+        let q = g.quad.map(|q| q.map(f64::from)).unwrap_or_else(|| {
+            let (l, b, r, t) = (g.ll as f64, g.lb as f64, g.lr as f64, g.lt as f64);
+            [l, b, r, b, r, t, l, t]
+        });
+        // The advance is the baseline edge — a rotated glyph's x extent is
+        // its em height, which would keep a zero-advance space.
+        if g.ch == ' ' && (q[2] - q[0]).hypot(q[3] - q[1]) < 0.5 {
             continue;
         }
         // Recompose a ligature: pdfium decomposes one font glyph (Latin fi/ffi,
         // Arabic lam-alef) into several chars at the *same* loose box. Append them
         // into one cell so the contraction never inserts a space inside it.
+        // "Same box" compares the advance span along the baseline — x for
+        // horizontal text, y for a 90°-turned glyph, whose x span is the same
+        // for every glyph of its line.
         if let Some(last) = cells.last_mut() {
-            if (last.rx0 - g.ll as f64).abs() < 0.5 && (last.rx1 - g.lr as f64).abs() < 0.5 {
+            let along = |x: f64, y: f64| {
+                if (q[2] - q[0]).abs() >= (q[3] - q[1]).abs() {
+                    x
+                } else {
+                    y
+                }
+            };
+            if (along(last.rx0, last.ry0) - along(q[0], q[1])).abs() < 0.5
+                && (along(last.rx1, last.ry1) - along(q[2], q[3])).abs() < 0.5
+            {
                 // Overprint duplicate: the *same* character re-stamped, offset by a
                 // fraction of its width (a kashida/elongation segment re-drawn for
                 // weight). docling-parse drops it; appending over-counts
@@ -359,7 +381,7 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
                 // (> 0.1) so a ligature expansion — which decomposes one glyph into
                 // several chars at the *identical* box (`ﬀ`→`ff`, diff ≈ 0) — is still
                 // recomposed; real doubled letters sit a full advance apart (> 0.5).
-                let offset = (g.ll as f64 - last.rx0).abs();
+                let offset = (along(q[0], q[1]) - along(last.rx0, last.ry0)).abs();
                 if euclidean && offset > 0.1 && last.text.ends_with(g.ch) {
                     continue;
                 }
@@ -380,14 +402,14 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
         let fb = (0xFB00..=0xFB06).contains(&(g.ch as u32));
         cells.push(Cell {
             text,
-            rx0: g.ll as f64,
-            ry0: g.lb as f64,
-            rx1: g.lr as f64,
-            ry1: g.lb as f64,
-            rx2: g.lr as f64,
-            ry2: g.lt as f64,
-            rx3: g.ll as f64,
-            ry3: g.lt as f64,
+            rx0: q[0],
+            ry0: q[1],
+            rx1: q[2],
+            ry1: q[3],
+            rx2: q[4],
+            ry2: q[5],
+            rx3: q[6],
+            ry3: q[7],
             ltr,
             active: true,
             lig_carry: false,
@@ -566,6 +588,7 @@ mod tests {
             lr: r,
             lt: 110.0,
             font: 0,
+            quad: None,
         }
     }
 
