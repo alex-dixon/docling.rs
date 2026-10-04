@@ -159,7 +159,7 @@ docker compose -f docker-compose.cuda.yml up -d
 | `--queue-size N` | `16` | Maximum async jobs held in queue / unfetched before returning HTTP 429 |
 | `--result-ttl SECS` | `600` | Retention duration for finished async job results (seconds) |
 | `--max-memory-mb N` | auto | RSS ceiling for admission control (MB); 0 disables |
-| `--warmup` | off | Pre-load models at startup; `/ready` returns 503 until complete |
+| `--warmup` | off | Load the PDF/image models (layout, OCR, TableFormer, the multi-page worker pool) at startup; `/ready` returns 503 until they are loaded, and stays 503 with the error if loading fails |
 | `--allow-url-fetch` | off | Enable `{"url": "..."}` inputs and remote fetching (SSRF protected) |
 | `--strict` | off | Default output to clean strict Markdown dialect |
 
@@ -247,7 +247,7 @@ docker run -d \
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | `GET` | Liveness probe: returns `{"status":"ok"}` immediately |
-| `/ready` | `GET` | Readiness probe: returns `200` once models are pre-warmed, `503` during startup |
+| `/ready` | `GET` | Readiness probe. With `--warmup`: `503 {"status":"warming_up"}` while the models load, then `200 {"status":"ready","models":"warm"}` — or `503 {"status":"warmup_failed","error":…}` if they cannot load. Without it: `200 {"status":"ready","models":"lazy"}` at once (models load on the first PDF/image request) |
 | `/v1/config` | `GET` | Server capabilities, active memory, and URL fetch status |
 | `/metrics` | `GET` | Prometheus metrics (request counters, latency histograms, active conversions) |
 | `/v1/convert` | `POST` | Synchronous conversion (multipart upload or JSON URL) |

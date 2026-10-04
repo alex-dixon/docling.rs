@@ -180,6 +180,46 @@ async fn ready_without_warmup_is_immediate() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // Ready at once, and honest that the models load on first use (#548).
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert_eq!(v["models"], "lazy", "{v}");
+}
+
+/// #548: `--warmup` really loads the models before `/ready` turns 200, and a
+/// failed load keeps it 503 with the reason instead of reporting ready over
+/// an empty pipeline. With the models present the warmup must succeed; on a
+/// runner without them it must fail loudly — either way it must settle.
+#[tokio::test(flavor = "multi_thread")]
+async fn warmup_settles_ready_or_failed() {
+    let models = ml_models_ready();
+    let app = router(ServeConfig {
+        warmup: true,
+        ..ServeConfig::default()
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let (status, v) = loop {
+        let response = app
+            .clone()
+            .oneshot(Request::get("/ready").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+        if v["status"] != "warming_up" {
+            break (status, v);
+        }
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+        assert!(std::time::Instant::now() < deadline, "warmup never settled");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    if status == StatusCode::OK {
+        assert_eq!(v, serde_json::json!({"status": "ready", "models": "warm"}));
+    } else {
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+        assert_eq!(v["status"], "warmup_failed", "{v}");
+        assert!(v["error"].as_str().is_some_and(|e| !e.is_empty()), "{v}");
+        assert!(!models, "the models are present, yet warmup failed: {v}");
+    }
 }
 
 #[tokio::test]

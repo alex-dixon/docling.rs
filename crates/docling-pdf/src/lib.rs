@@ -625,6 +625,21 @@ enum TfSlot {
 }
 
 #[cfg(feature = "ml")]
+impl TfSlot {
+    /// Load TableFormer on the first call: `Ready`, or `Missing` when its
+    /// graphs are absent (the geometric fallback — degradation, not an
+    /// error). Later calls are no-ops either way.
+    fn load(&mut self) {
+        if matches!(self, TfSlot::Unloaded) {
+            *self = match tableformer::TableFormer::load_with(tf_intra()) {
+                Some(tf) => TfSlot::Ready(tf),
+                None => TfSlot::Missing,
+            };
+        }
+    }
+}
+
+#[cfg(feature = "ml")]
 type SharedTables = Arc<Mutex<TfSlot>>;
 
 #[cfg(feature = "ml")]
@@ -1330,12 +1345,7 @@ impl Worker {
         regions: &[layout::Region],
     ) -> Vec<Option<tf_core::TableGrid>> {
         let mut table_rows: Vec<Option<tf_core::TableGrid>> = vec![None; regions.len()];
-        if matches!(*guard, TfSlot::Unloaded) {
-            *guard = match tableformer::TableFormer::load_with(tf_intra()) {
-                Some(tf) => TfSlot::Ready(tf),
-                None => TfSlot::Missing,
-            };
-        }
+        guard.load();
         if let TfSlot::Ready(tf) = guard {
             // One 1024-px frame per page, shared by all of its tables, and one
             // call for all of them: with the dynamic-batch decoder their
@@ -2522,6 +2532,26 @@ impl Pipeline {
     /// `DocumentConverter.initialize_pipeline`.
     pub fn warm_up(&mut self) -> Result<(), PdfError> {
         self.primary()?;
+        // The shared TableFormer loads on the first table otherwise — a
+        // document with one would still pay for it (#548).
+        if let Some(tables) = self.tables_slot() {
+            tables.lock().unwrap_or_else(|p| p.into_inner()).load();
+        }
+        Ok(())
+    }
+
+    /// [`warm_up`](Self::warm_up) plus the parallel page-worker pool, so the
+    /// first *multi-page* conversion is no slower than later ones either: a
+    /// document of `DOCLING_RS_PDF_PARALLEL_MIN` pages (6) or more fans out across the pool,
+    /// whose workers each load their own layout/OCR sessions on first use
+    /// (#548 — docling-serve's `--warmup` left a 9-page PDF paying that load).
+    /// Costs the pool's memory up front (~0.4 GB a worker); with a pool of one
+    /// worker it is exactly `warm_up`.
+    pub fn warm_up_all(&mut self) -> Result<(), PdfError> {
+        self.warm_up()?;
+        if self.target_workers >= 2 {
+            self.ensure_pool()?;
+        }
         Ok(())
     }
 
