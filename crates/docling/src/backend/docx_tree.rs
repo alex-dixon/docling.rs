@@ -264,7 +264,8 @@ fn run_text(r: XmlNode) -> String {
 /// `(offset, kind, w:id)`, the offset in chars of the paragraph text that
 /// [`Walker::iter_paragraph_content`] reads — the same traversal: runs and
 /// hyperlinks directly under the paragraph (through `smartTag` / `customXml`
-/// / `ins` / `fldSimple`), a content control's text counted whole (#538).
+/// / `ins` / `moveTo` / `fldSimple`), a content control's text counted whole
+/// (#538).
 fn note_references(p: XmlNode) -> Vec<(usize, &'static str, String)> {
     fn walk(node: XmlNode, acc: &mut usize, out: &mut Vec<(usize, &'static str, String)>) {
         for c in child_elements(node) {
@@ -272,7 +273,7 @@ fn note_references(p: XmlNode) -> Vec<(usize, &'static str, String)> {
                 continue;
             }
             match c.tag_name().name() {
-                "smartTag" | "customXml" | "ins" | "fldSimple" => walk(c, acc, out),
+                "smartTag" | "customXml" | "ins" | "moveTo" | "fldSimple" => walk(c, acc, out),
                 "r" => run(c, acc, out),
                 "hyperlink" => {
                     for r in c.children().filter(|n| n.has_tag_name("r") && !is_math(*n)) {
@@ -322,6 +323,13 @@ fn note_references(p: XmlNode) -> Vec<(usize, &'static str, String)> {
 /// paragraph (`w:r | w:hyperlink`), nothing inside content controls or
 /// tracked insertions.
 fn py_paragraph_text(p: XmlNode) -> String {
+    paragraph_text(p, false)
+}
+
+/// The runs and hyperlinks of a paragraph; with `accepted`, also those inside
+/// tracked insertions and move destinations (`w:ins`, `w:moveTo`) — the
+/// paragraph as Word shows it with the changes accepted.
+fn paragraph_text(p: XmlNode, accepted: bool) -> String {
     let mut out = String::new();
     for c in child_elements(p) {
         if is_math(c) {
@@ -334,17 +342,23 @@ fn py_paragraph_text(p: XmlNode) -> String {
                     out.push_str(&run_text(r));
                 }
             }
+            "ins" | "moveTo" if accepted => out.push_str(&paragraph_text(c, true)),
             _ => {}
         }
     }
     out
 }
 
-/// python-docx's `_Cell.text`: the cell's direct paragraphs joined with `\n`.
+/// A cell's text: python-docx's `_Cell.text` (its direct paragraphs joined
+/// with `\n`), except that tracked insertions and move destinations count
+/// (#545). python-docx skips them, so docling writes an empty cell for one
+/// whose text was inserted or moved there with track changes on, and — a
+/// plain cell having no child items — the JSON lost that text outright;
+/// Markdown always printed it.
 fn py_cell_text(tc: XmlNode) -> String {
     tc.children()
         .filter(|n| n.has_tag_name("p"))
-        .map(py_paragraph_text)
+        .map(|p| paragraph_text(p, true))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -710,13 +724,15 @@ impl Walker {
 
     /// `_iter_paragraph_content`: one part per run, hyperlink or content
     /// control, recursing through `smartTag` / `customXml` / `ins` /
-    /// `fldSimple` wrappers only.
+    /// `fldSimple` wrappers only — and `moveTo`, a tracked move's destination,
+    /// which docling skips (its text vanished, #545; the source `moveFrom`
+    /// stays out, like a deletion).
     fn iter_paragraph_content(&self, p: XmlNode, ctx: &Ctx) -> Vec<Part> {
         fn children_recursive<'a, 'i>(node: XmlNode<'a, 'i>, out: &mut Vec<XmlNode<'a, 'i>>) {
             for c in child_elements(node) {
                 if matches!(
                     c.tag_name().name(),
-                    "smartTag" | "customXml" | "ins" | "fldSimple"
+                    "smartTag" | "customXml" | "ins" | "moveTo" | "fldSimple"
                 ) && !is_math(c)
                 {
                     children_recursive(c, out);
