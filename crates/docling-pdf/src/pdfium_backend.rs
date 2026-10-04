@@ -940,6 +940,25 @@ pub(crate) struct Glyph {
     /// it for docling-parse's `enforce_same_font` (keeps a bold label and regular
     /// value as separate line cells, e.g. `LABEL : value`).
     pub(crate) font: u64,
+    /// The loose box as the text matrix actually lays it — corners
+    /// bottom-left, bottom-right, top-right, top-left as `[x0, y0, … x3, y3]`
+    /// (docling-parse's `r_x0…r_y3`) — for a glyph whose baseline is **not**
+    /// upright: rotated 90°/180°/270° or tilted (#528). `ll/lb/lr/lt` are then
+    /// this quad's axis-aligned extent. `None` for upright text, whose quad is
+    /// the `ll/lb/lr/lt` rectangle itself — that path stays exactly as it was.
+    pub(crate) quad: Option<[f32; 8]>,
+}
+
+impl Glyph {
+    /// The font's height on the glyph's own axis (ascent − descent): the
+    /// loose box's height for upright text, the quad's left edge otherwise —
+    /// a 90°-turned glyph's vertical extent is its advance, not its size.
+    pub(crate) fn height(&self) -> f32 {
+        match self.quad {
+            Some(q) => (q[6] - q[0]).hypot(q[7] - q[1]),
+            None => self.lt - self.lb,
+        }
+    }
 }
 
 /// How [`lines_from_glyphs`] splits a line into words. Two more modes lived
