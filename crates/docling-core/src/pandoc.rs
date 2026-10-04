@@ -30,7 +30,7 @@
 //! | `formula` | `Para [Math DisplayMath]` (`Math InlineMath` inline) |
 //! | `checkbox_selected` / `_unselected` | the text after `☒` / `☐` — Pandoc's own task-list convention |
 //! | `table` | `Table`: leading all-header rows as `TableHead`, `rowspan` / `colspan`, rich cells as their blocks, captions as the caption |
-//! | `picture` | `Figure` holding the `Image` per [`ImageMode`], captions as the caption, a tabular chart's data as a `Table` |
+//! | `picture` | `Para [Image]` (Pandoc's readers' shape), or a `Figure` holding it when there is a caption (also the `Image`'s alt text) or a tabular chart's data `Table`; the target per [`ImageMode`] |
 //! | footnotes of a table / picture | `Note` at the end of its caption (the float is the call site) |
 //! | key-value / form graph | `Div .key-value-region` / `.form-container` holding a `DefinitionList` (or the nested `BulletList` of a hierarchical graph) |
 //! | form `field_region` | `Div .field-region` holding a `DefinitionList`: `marker` + `field_key` as the term, each `field_value` a definition |
@@ -40,12 +40,15 @@
 //! confidence and classification meta, comments' authorship, form field
 //! geometry; furniture (headers/footers) and notes are off unless their
 //! [`ContentLayers`] are asked for, exactly as in the HTML export. Images
-//! are targets, not bytes, in Pandoc: [`ImageMode::Embedded`] writes `data:`
-//! URIs (Pandoc's writers accept them), [`ImageMode::Referenced`] files under
-//! the artifacts directory, and the default [`ImageMode::Placeholder`] a
-//! `Figure` carrying only its caption — or, for a caption-less picture,
-//! docling's `<!-- image -->` as a `RawBlock html` (an empty `Figure` would
-//! render as an empty frame; non-HTML writers drop the raw block).
+//! are targets, not bytes, in Pandoc: the default [`ImageMode::Embedded`]
+//! writes `data:` URIs, so the AST is self-contained and `pandoc -f json -t
+//! docx` embeds every picture (#537); [`ImageMode::Referenced`] links files
+//! under the artifacts directory (relative paths, resolved from where
+//! `pandoc` runs). A picture without a target — [`ImageMode::Placeholder`],
+//! or one whose payload docling cannot decode (EMF/WMF) — is still an
+//! `Image`, classed `docling-placeholder` with an empty target: it survives
+//! into every writer (which reports the missing resource and prints the alt
+//! text) instead of vanishing as raw HTML.
 //!
 //! Version: the output is stamped [`PANDOC_API_VERSION`] — the latest
 //! `pandoc-types` (Pandoc 3.x). Pandoc accepts a document whose
@@ -72,7 +75,8 @@ pub type PandocOutput = (String, Vec<(String, Vec<u8>)>);
 /// Options for [`to_pandoc`].
 #[derive(Debug, Clone)]
 pub struct PandocExportOptions {
-    /// How pictures carry their image (see the module docs).
+    /// How pictures carry their image (see the module docs); `Embedded` by
+    /// default, so the AST alone rebuilds a document with its pictures.
     pub image_mode: ImageMode,
     /// The directory referenced images are written under
     /// (`<artifacts_dir>/image_NNNNNN.<ext>`, the Markdown export's names).
@@ -87,7 +91,7 @@ pub struct PandocExportOptions {
 impl Default for PandocExportOptions {
     fn default() -> Self {
         Self {
-            image_mode: ImageMode::Placeholder,
+            image_mode: ImageMode::Embedded,
             artifacts_dir: "artifacts".to_string(),
             layers: ContentLayers::BODY,
             api_version: None,
@@ -160,7 +164,8 @@ pub fn to_pandoc(
     doc: &DoclingDocument,
     options: &PandocExportOptions,
 ) -> Result<PandocOutput, PandocError> {
-    from_docling_json(&doc.export_to_json_value(), options)
+    // The JSON with the note calls docling's model has no field for (#538).
+    from_docling_json(&crate::json::to_json_with_notes(doc), options)
 }
 
 /// [`to_pandoc`] for a document already in docling's JSON wire format —
@@ -322,8 +327,8 @@ pub mod ast {
     pub fn link(inlines: Vec<Value>, url: &str) -> Value {
         node("Link", json!([attr(&[]), inlines, [url, ""]]))
     }
-    pub fn image(alt: Vec<Value>, src: &str) -> Value {
-        node("Image", json!([attr(&[]), alt, [src, ""]]))
+    pub fn image(classes: &[&str], alt: Vec<Value>, src: &str) -> Value {
+        node("Image", json!([attr(classes), alt, [src, ""]]))
     }
     pub fn note(blocks: Vec<Value>) -> Value {
         node("Note", json!(blocks))
@@ -350,6 +355,53 @@ fn text_inlines(text: &str) -> Vec<Value> {
             out.push(ast::str_(word));
             first = false;
         }
+    }
+    out
+}
+
+/// [`text_inlines`] with a `Note` spliced in at each call: `notes` is
+/// `[[offset, text], …]` (chars into `text`), the JSON's internal `_notes`.
+/// Whitespace around a call becomes a `Space`, as Pandoc's docx reader
+/// writes `word¹ next` → `Str "word", Note, Space, Str "next"`.
+fn text_with_notes(text: &str, notes: &[Value]) -> Vec<Value> {
+    let mut calls: Vec<(usize, &str)> = notes
+        .iter()
+        .filter_map(|n| Some((n.get(0)?.as_u64()? as usize, n.get(1)?.as_str()?)))
+        .collect();
+    calls.sort_by_key(|&(offset, _)| offset);
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<Value> = Vec::new();
+    let push_segment = |out: &mut Vec<Value>, seg: &str| {
+        let inlines = text_inlines(seg);
+        if inlines.is_empty() {
+            if !out.is_empty() && seg.chars().any(char::is_whitespace) {
+                out.push(ast::space());
+            }
+            return;
+        }
+        if !out.is_empty() && seg.starts_with(char::is_whitespace) {
+            out.push(ast::space());
+        }
+        out.extend(inlines);
+        if seg.ends_with(char::is_whitespace) {
+            out.push(ast::space());
+        }
+    };
+    let mut prev = 0usize;
+    for (offset, note) in calls {
+        let at = offset.clamp(prev, chars.len());
+        let seg: String = chars[prev..at].iter().collect();
+        push_segment(&mut out, &seg);
+        out.push(ast::note(vec![ast::para(text_inlines(note))]));
+        prev = at;
+    }
+    let rest: String = chars[prev..].iter().collect();
+    push_segment(&mut out, &rest);
+    while out
+        .last()
+        .is_some_and(|v| v.get("t").and_then(Value::as_str) == Some("Space"))
+    {
+        out.pop();
     }
     out
 }
@@ -558,7 +610,26 @@ impl<'a> Serializer<'a> {
             return Vec::new();
         };
         self.visited.insert("#/body".to_string());
-        self.blocks_of(body)
+        let mut blocks = self.blocks_of(body);
+        blocks.extend(self.unplaced_notes());
+        blocks
+    }
+
+    /// Furniture `footnote` items no text item calls — docling's DOCX / ODT
+    /// note bodies when the JSON carries no call sites (one exported by
+    /// Python docling), or a call that could not be anchored — written while
+    /// the furniture layer itself is off: each as a trailing `Note`, so a
+    /// document rebuilt from the AST still has its notes (#538).
+    fn unplaced_notes(&self) -> Vec<Value> {
+        Self::array(self.json.get("texts"))
+            .filter(|t| Self::label(t) == "footnote" && !Self::is_note_body(t))
+            .filter(|t| t.get("content_layer").and_then(Value::as_str) == Some("furniture"))
+            .filter(|t| self.excluded(t) && !self.owned_footnotes.contains(Self::self_ref(t)))
+            .filter_map(|t| {
+                let text = text_inlines(Self::text(t));
+                (!text.is_empty()).then(|| ast::para(vec![ast::note(vec![ast::para(text)])]))
+            })
+            .collect()
     }
 
     /// One item's blocks.
@@ -583,7 +654,8 @@ impl<'a> Serializer<'a> {
             if self.owned_captions.contains(sref) || self.owned_footnotes.contains(sref) {
                 return Vec::new();
             }
-            if self.excluded(item) {
+            // A note body some text item calls is written there, as a `Note`.
+            if self.excluded(item) || Self::is_note_body(item) {
                 return Vec::new();
             }
             return self.text_item(item);
@@ -712,16 +784,26 @@ impl<'a> Serializer<'a> {
         (self.formatted(item), Vec::new(), false)
     }
 
-    /// The item's text with its formatting and hyperlink applied.
+    /// The item's text with its formatting and hyperlink applied, and the
+    /// notes it calls as `Note`s at their call sites (#538).
     fn formatted(&self, item: &Value) -> Vec<Value> {
         let base = match Self::label(item) {
             "code" => vec![ast::code(Self::text(item))],
             "formula" if !Self::text(item).is_empty() => {
                 vec![ast::math(false, Self::text(item).trim())]
             }
-            _ => text_inlines(Self::text(item)),
+            _ => match item.get("_notes").and_then(Value::as_array) {
+                Some(notes) if !notes.is_empty() => text_with_notes(Self::text(item), notes),
+                _ => text_inlines(Self::text(item)),
+            },
         };
         Self::decorate(base, item)
+    }
+
+    /// A furniture `footnote` item that is the body of a note a text item
+    /// calls ([`crate::tree::TreeItem::note_body`]).
+    fn is_note_body(item: &Value) -> bool {
+        item.get("_note_body").and_then(Value::as_bool) == Some(true)
     }
 
     fn decorate(mut inlines: Vec<Value>, item: &Value) -> Vec<Value> {
@@ -769,7 +851,10 @@ impl<'a> Serializer<'a> {
             }
             self.visited.insert(r.clone());
             if r.starts_with("#/texts/") {
-                if self.owned_captions.contains(&r) || self.owned_footnotes.contains(&r) {
+                if self.owned_captions.contains(&r)
+                    || self.owned_footnotes.contains(&r)
+                    || Self::is_note_body(node)
+                {
                     continue;
                 }
                 runs.push(self.formatted(node));
@@ -953,6 +1038,19 @@ impl<'a> Serializer<'a> {
         }
     }
 
+    /// The owner's caption texts alone (no notes) — a picture's alt text,
+    /// as Pandoc's readers give a captioned image.
+    fn caption_text(&self, item: &'a Value) -> Vec<Value> {
+        let parts = Self::refs(item.get("captions"))
+            .into_iter()
+            .filter(|cref| cref.starts_with("#/texts/"))
+            .filter_map(|cref| self.resolve(cref))
+            .filter(|cap| !self.excluded(cap))
+            .map(|cap| text_inlines(Self::text(cap)))
+            .collect();
+        join_inlines(parts)
+    }
+
     /// docling's `TableData.grid`: each position → the cell covering it.
     fn grid(data: &'a Value) -> (usize, Vec<Vec<Option<GridCell<'a>>>>) {
         let num_rows = data.get("num_rows").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -1064,7 +1162,10 @@ impl<'a> Serializer<'a> {
             return Vec::new();
         }
         let caption = self.caption(item);
-        let mut blocks = Vec::new();
+        let has_caption = caption
+            .get(1)
+            .and_then(Value::as_array)
+            .is_some_and(|b| !b.is_empty());
         let uri = item
             .get("image")
             .and_then(|i| i.get("uri"))
@@ -1076,30 +1177,28 @@ impl<'a> Serializer<'a> {
                 .or_else(|| (!uri.starts_with("data:")).then(|| uri.to_string())),
             _ => None,
         };
-        if let Some(src) = src {
-            blocks.push(ast::plain(vec![ast::image(Vec::new(), &src)]));
-        }
+        // #537: every picture is an `Image`, so it survives into whatever
+        // Pandoc writes and can be counted — one without a target
+        // (placeholder mode, or a payload docling could not decode: EMF/WMF)
+        // carries the `docling-placeholder` class and an empty target, which
+        // a writer reports as a missing resource and renders as the alt text.
+        let alt = self.caption_text(item);
+        let image = match &src {
+            Some(src) => ast::image(&[], alt, src),
+            None => ast::image(&["docling-placeholder"], alt, ""),
+        };
         // A native chart's data grid (`meta.tabular_chart.chart_data`).
-        if let Some(chart) = item
+        let chart = item
             .get("meta")
             .and_then(|m| m.get("tabular_chart"))
             .and_then(|t| t.get("chart_data"))
-        {
-            if let Some(t) = self.table_from_data(chart, ast::caption(Vec::new())) {
-                blocks.push(t);
-            }
+            .and_then(|chart| self.table_from_data(chart, ast::caption(Vec::new())));
+        if chart.is_none() && !has_caption {
+            // Pandoc's own readers put a caption-less image in a paragraph.
+            return vec![ast::para(vec![image])];
         }
-        let has_caption = caption
-            .get(1)
-            .and_then(Value::as_array)
-            .is_some_and(|b| !b.is_empty());
-        if blocks.is_empty() && !has_caption {
-            // Nothing to show: docling's Markdown placeholder, as raw HTML —
-            // an invisible comment in HTML / Markdown output, dropped by the
-            // other writers (an empty `Figure` renders as an empty
-            // `<figure>` everywhere).
-            return vec![ast::raw_block("html", "<!-- image -->")];
-        }
+        let mut blocks = vec![ast::plain(vec![image])];
+        blocks.extend(chart);
         vec![ast::figure(&[], caption, blocks)]
     }
 
@@ -1273,6 +1372,135 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["pandoc-api-version"], json!(PANDOC_API_VERSION));
         v["blocks"].as_array().unwrap().clone()
+    }
+
+    /// #538: a text item's note calls become `Note`s at their offsets —
+    /// glued to the word before, a `Space` where the text had one — and the
+    /// note bodies they carry are not written again as blocks.
+    #[test]
+    fn note_calls_become_notes_at_their_call_sites() {
+        let j = doc(
+            &["#/texts/0", "#/texts/1"],
+            json!([
+                text(
+                    0,
+                    "text",
+                    "debut suite end",
+                    json!({"_notes": [[5, "first"], [15, "last"]]})
+                ),
+                text(
+                    1,
+                    "footnote",
+                    "first",
+                    json!({"content_layer": "furniture", "_note_body": true})
+                ),
+            ]),
+            json!([]),
+            json!([]),
+        );
+        let note = |t: &str| ast::note(vec![ast::para(vec![ast::str_(t)])]);
+        assert_eq!(
+            blocks(&j),
+            vec![ast::para(vec![
+                ast::str_("debut"),
+                note("first"),
+                ast::space(),
+                ast::str_("suite"),
+                ast::space(),
+                ast::str_("end"),
+                note("last"),
+            ])]
+        );
+        // With the furniture layer on, a placed note body is still not a block.
+        let opts = PandocExportOptions {
+            layers: ContentLayers::ALL,
+            ..Default::default()
+        };
+        let (s, _) = from_docling_json(&j, &opts).unwrap();
+        assert!(!s.contains("docling-footnote"), "{s}");
+    }
+
+    /// #538: a furniture footnote nothing calls (Python docling's JSON has no
+    /// call sites) still reaches the AST, as a trailing `Note`.
+    #[test]
+    fn uncalled_furniture_footnotes_trail_as_notes() {
+        let j = doc(
+            &["#/texts/0", "#/texts/1"],
+            json!([
+                text(0, "text", "body", json!({})),
+                text(
+                    1,
+                    "footnote",
+                    "MARKFN",
+                    json!({"content_layer": "furniture"})
+                ),
+            ]),
+            json!([]),
+            json!([]),
+        );
+        assert_eq!(
+            blocks(&j),
+            vec![
+                ast::para(vec![ast::str_("body")]),
+                ast::para(vec![ast::note(vec![ast::para(vec![ast::str_("MARKFN")])])]),
+            ]
+        );
+    }
+
+    /// #537: every picture is an `Image` — embedded by default, in a `Para`
+    /// without a caption, in a `Figure` (caption = alt text) with one; with
+    /// no target (placeholder mode, an undecodable payload) it is classed
+    /// `docling-placeholder` instead of vanishing as raw HTML.
+    #[test]
+    fn pictures_are_always_images() {
+        let mut j = doc(
+            &["#/pictures/0", "#/pictures/1", "#/pictures/2"],
+            json!([text(0, "caption", "A duck", json!({})),]),
+            json!([]),
+            json!([]),
+        );
+        j["pictures"] = json!([
+            {"self_ref": "#/pictures/0", "children": [], "label": "picture", "content_layer": "body",
+             "image": {"uri": "data:image/png;base64,AAAA"}, "captions": []},
+            {"self_ref": "#/pictures/1", "children": [], "label": "picture", "content_layer": "body",
+             "image": {"uri": "data:image/png;base64,BBBB"}, "captions": [{"$ref": "#/texts/0"}]},
+            {"self_ref": "#/pictures/2", "children": [], "label": "picture", "content_layer": "body",
+             "captions": []},
+        ]);
+        let b = blocks(&j);
+        assert_eq!(
+            b[0],
+            ast::para(vec![ast::image(&[], vec![], "data:image/png;base64,AAAA")])
+        );
+        assert_eq!(
+            b[1],
+            ast::figure(
+                &[],
+                ast::caption(vec![ast::plain(vec![
+                    ast::str_("A"),
+                    ast::space(),
+                    ast::str_("duck")
+                ])]),
+                vec![ast::plain(vec![ast::image(
+                    &[],
+                    vec![ast::str_("A"), ast::space(), ast::str_("duck")],
+                    "data:image/png;base64,BBBB"
+                )])]
+            )
+        );
+        assert_eq!(
+            b[2],
+            ast::para(vec![ast::image(&["docling-placeholder"], vec![], "")])
+        );
+        assert_eq!(b.len(), 3);
+        // Placeholder mode keeps the node, without the pixels.
+        let opts = PandocExportOptions {
+            image_mode: ImageMode::Placeholder,
+            ..Default::default()
+        };
+        let (s, _) = from_docling_json(&j, &opts).unwrap();
+        assert!(!s.contains("base64") && !s.contains("RawBlock"), "{s}");
+        assert_eq!(s.matches("docling-placeholder").count(), 3, "{s}");
     }
 
     #[test]

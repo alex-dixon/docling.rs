@@ -34,7 +34,8 @@
 //! - `scale` — `to=images` render scale in pixels per PDF point:
 //!   0.1–4.0, default 2.0 (= 144 dpi, the ML pipeline's own render scale)
 //! - `strict` — cleaner Markdown instead of docling-legacy output
-//! - `images` — `placeholder` (default) | `embedded` (Markdown only)
+//! - `images` — `placeholder` (default; `embedded` for `to=pandoc`, #537) | `embedded`
+//!   (Markdown, HTML and the Pandoc AST)
 //! - `no_ocr`, `skip_ocr`, `no_table_former`, `force_full_page_ocr`,
 //!   `no_text_panels`, `heading_hierarchy` — PDF/image pipeline switches (`skip_ocr`, #244: keep
 //!   layout + TableFormer, never OCR — docling's independent `do_ocr=False`;
@@ -867,7 +868,15 @@ fn validate_output(options: &ConvertOptions) -> Result<(String, ImageMode), ApiE
         docling::pandoc::check_api_version(v)
             .map_err(|e| ApiError::Bad(format!("pandoc_api_version: {e}")))?;
     }
-    let image_mode = match options.images.as_deref().unwrap_or("placeholder") {
+    // #537: `to=pandoc` embeds its pictures unless `images` says otherwise —
+    // the AST is fed to `pandoc -t docx`, whose writers drop a target-less
+    // picture.
+    let default_images = if to == "pandoc" {
+        "embedded"
+    } else {
+        "placeholder"
+    };
+    let image_mode = match options.images.as_deref().unwrap_or(default_images) {
         "placeholder" => ImageMode::Placeholder,
         "embedded" => ImageMode::Embedded,
         other => {

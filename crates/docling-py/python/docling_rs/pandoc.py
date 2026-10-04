@@ -52,14 +52,16 @@ def _mode(image_mode: Any) -> str:
 def export_to_pandoc(
     doc: Any,
     *,
-    image_mode: Any = "placeholder",
+    image_mode: Any = "embedded",
     api_version: Optional[str] = None,
 ) -> str:
     """The document as Pandoc's JSON AST.
 
     ``doc`` is a ``DoclingDocument``, a docling-JSON dict or a JSON string.
-    ``image_mode`` is ``"placeholder"`` (default) or ``"embedded"`` (pictures
-    as data URIs); use :func:`save_as_pandoc` for ``"referenced"`` images.
+    ``image_mode`` is ``"embedded"`` (default: pictures as data URIs, so
+    ``pandoc -t docx`` rebuilds them, #537) or ``"placeholder"`` (an
+    ``Image`` with no target, classed ``docling-placeholder``); use
+    :func:`save_as_pandoc` for ``"referenced"`` images.
     ``api_version`` (e.g. ``"1.23"``) must name the version the serializer
     writes; any other raises ``ValueError``.
     """
@@ -74,7 +76,7 @@ def save_as_pandoc(
     doc: Any,
     filename: Union[str, Path],
     *,
-    image_mode: Any = "placeholder",
+    image_mode: Any = "embedded",
     artifacts_dir: Optional[Union[str, Path]] = None,
     api_version: Optional[str] = None,
 ) -> None:

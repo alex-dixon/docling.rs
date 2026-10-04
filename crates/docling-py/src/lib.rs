@@ -989,14 +989,15 @@ type PyArtifacts<'py> = Vec<(String, Bound<'py, PyBytes>)>;
 /// Pandoc's JSON AST (#515) for a document in docling's JSON wire format
 /// (what `DoclingDocument.export_to_dict()` serializes to) — the Rust
 /// serializer behind `docling-rs --to pandoc`, so Python output matches the
-/// CLI's. `image_mode` is `"placeholder"` | `"embedded"` | `"referenced"`;
+/// CLI's. `image_mode` is `"embedded"` (default, #537) | `"placeholder"` |
+/// `"referenced"`;
 /// `referenced` returns the image files as `(path under artifacts_dir,
 /// bytes)` pairs for the caller to write. `api_version`, when given, must be
 /// one the serializer writes (1.23) — anything else raises `ValueError`.
 #[pyfunction]
 #[pyo3(signature = (
     document_json,
-    image_mode = "placeholder".to_string(),
+    image_mode = "embedded".to_string(),
     artifacts_dir = "artifacts".to_string(),
     api_version = None,
 ))]

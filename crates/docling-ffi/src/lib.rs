@@ -189,7 +189,13 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
     let result = converter.convert(source).map_err(|e| e.to_string())?;
     let document = result.document;
 
-    let image_mode = match options.images.as_deref().unwrap_or("placeholder") {
+    // #537: the Pandoc AST embeds its pictures unless `images` says otherwise.
+    let default_images = if options.to.as_deref() == Some("pandoc") {
+        "embedded"
+    } else {
+        "placeholder"
+    };
+    let image_mode = match options.images.as_deref().unwrap_or(default_images) {
         "placeholder" => ImageMode::Placeholder,
         "embedded" => ImageMode::Embedded,
         other => {

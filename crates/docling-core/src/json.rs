@@ -246,7 +246,22 @@ fn image_ref_json(img: &crate::PictureImage) -> Value {
 
 /// Build the docling-core JSON object for `doc`.
 pub fn to_json(doc: &DoclingDocument) -> Value {
-    let mut b = Builder::default();
+    build_json(doc, false)
+}
+
+/// [`to_json`] plus the note calls docling's model cannot express: a text
+/// item calling footnotes carries `"_notes": [[offset, text], …]`, a
+/// footnote item that is such a note's body `"_note_body": true` (#538).
+/// The Pandoc writer reads these; nothing is ever exported with them.
+pub(crate) fn to_json_with_notes(doc: &DoclingDocument) -> Value {
+    build_json(doc, true)
+}
+
+fn build_json(doc: &DoclingDocument, note_keys: bool) -> Value {
+    let mut b = Builder {
+        note_keys,
+        ..Builder::default()
+    };
     // A backend that built docling's item tree ([`crate::tree`]) has already
     // decided every parent, child and creation index; serialize that. The
     // flat nodes are for the other serializers.
@@ -580,6 +595,10 @@ fn table_data_with(t: &Table, raw: bool) -> Value {
 
 #[derive(Default)]
 struct Builder {
+    /// Write the internal `_notes` / `_note_body` keys of tree text items
+    /// ([`crate::tree::TreeItem::notes`]) — for the Pandoc writer only
+    /// ([`to_json_with_notes`]); docling's JSON has no such fields.
+    note_keys: bool,
     texts: Vec<Value>,
     groups: Vec<Value>,
     tables: Vec<Value>,
@@ -891,6 +910,19 @@ impl Builder {
                         }),
                     );
                     merge(&mut item_json, Value::Object(tail));
+                    if self.note_keys {
+                        if !item.notes.is_empty() {
+                            item_json["_notes"] = Value::Array(
+                                item.notes
+                                    .iter()
+                                    .map(|n| json!([n.offset, n.text]))
+                                    .collect(),
+                            );
+                        }
+                        if item.note_body {
+                            item_json["_note_body"] = json!(true);
+                        }
+                    }
                     self.texts.push(item_json);
                     r
                 }

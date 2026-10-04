@@ -187,9 +187,10 @@ pub struct OutputOptions {
     /// pictures follow `imageMode` like Markdown) or `"pandoc"` (Pandoc's
     /// JSON AST for `pandoc -f json`, #515 — pictures follow `imageMode`).
     pub to: Option<String>,
-    /// Picture handling for Markdown: `"placeholder"` (default), `"embedded"`
-    /// (base64 data URIs inline), or `"referenced"` (returns image files in
-    /// `images`). Ignored for JSON, which always embeds images as data URIs.
+    /// Picture handling for Markdown: `"placeholder"` (default; `"embedded"`
+    /// for `to: "pandoc"`, #537), `"embedded"` (base64 data URIs inline), or
+    /// `"referenced"` (returns image files in `images`). Ignored for JSON,
+    /// which always embeds images as data URIs.
     pub image_mode: Option<String>,
     /// Directory name used in `referenced` image links. Default `"artifacts"`.
     pub artifacts_dir: Option<String>,
@@ -506,7 +507,7 @@ fn build_config(o: ConvertOptions) -> Result<ConvertConfig> {
         )?,
         allowed_formats: allowed,
         to: parse_output_kind(o.to.as_deref())?,
-        image_mode: parse_image_mode(o.image_mode.as_deref())?,
+        image_mode: parse_image_mode(o.image_mode.as_deref(), parse_output_kind(o.to.as_deref())?)?,
         artifacts_dir: o.artifacts_dir.unwrap_or_else(|| "artifacts".to_string()),
         page_break_placeholder: o.page_break_placeholder,
     })
@@ -1076,7 +1077,10 @@ impl DocumentConverter {
             vlm: self.vlm.clone(),
             allowed_formats: self.allowed_formats.clone(),
             to: parse_output_kind(out.to.as_deref())?,
-            image_mode: parse_image_mode(out.image_mode.as_deref())?,
+            image_mode: parse_image_mode(
+                out.image_mode.as_deref(),
+                parse_output_kind(out.to.as_deref())?,
+            )?,
             artifacts_dir: out.artifacts_dir.unwrap_or_else(|| "artifacts".to_string()),
             page_break_placeholder: out.page_break_placeholder,
         })
@@ -1699,7 +1703,10 @@ fn output_config(out: Option<OutputOptions>, strict: bool) -> Result<ConvertConf
         page_images: false,
         allowed_formats: None,
         to: parse_output_kind(out.to.as_deref())?,
-        image_mode: parse_image_mode(out.image_mode.as_deref())?,
+        image_mode: parse_image_mode(
+            out.image_mode.as_deref(),
+            parse_output_kind(out.to.as_deref())?,
+        )?,
         artifacts_dir: out.artifacts_dir.unwrap_or_else(|| "artifacts".to_string()),
         page_break_placeholder: out.page_break_placeholder,
     })
@@ -2108,8 +2115,11 @@ fn parse_output_kind(to: Option<&str>) -> Result<OutputKind> {
     }
 }
 
-fn parse_image_mode(mode: Option<&str>) -> Result<ImageMode> {
+/// `imageMode` for output `to`: unset is placeholder, except embedded for
+/// the Pandoc AST (#537 — `pandoc -t docx` drops a target-less picture).
+fn parse_image_mode(mode: Option<&str>, to: OutputKind) -> Result<ImageMode> {
     match mode.map(str::to_ascii_lowercase).as_deref() {
+        None if to == OutputKind::Pandoc => Ok(ImageMode::Embedded),
         None | Some("placeholder") => Ok(ImageMode::Placeholder),
         Some("embedded") => Ok(ImageMode::Embedded),
         Some("referenced") => Ok(ImageMode::Referenced),

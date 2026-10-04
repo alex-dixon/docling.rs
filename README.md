@@ -719,8 +719,13 @@ included:
 
 ```bash
 docling-rs paper.pdf --to pandoc | pandoc -f json -t docx -o paper.docx
-docling-rs paper.pdf --to pandoc --images embedded | pandoc -f json -t epub -o paper.epub
+docling-rs report.docx --to pandoc | pandoc -f json -t gfm      # footnotes as [^n]
 ```
+
+Pictures are embedded by default for this output (#537): `--to pandoc`
+without `--images` writes `data:` URIs, so the AST alone rebuilds a DOCX with
+its pictures (serve's `images`, the Node `imageMode`, FFI / wasm `images` and
+Python's `image_mode` default the same way for the Pandoc AST only).
 
 It is built from the same docling-JSON structure the HTML and LaTeX exports
 walk, mapped to Pandoc's constructors:
@@ -735,14 +740,19 @@ walk, mapped to Pandoc's constructors:
 | `formula` | `Math DisplayMath` (`InlineMath` inside a paragraph) |
 | `checkbox_selected` / `_unselected` | `☒` / `☐` + the text — Pandoc's task-list convention |
 | `table` | `Table`: leading all-header rows as `TableHead`, `rowspan`/`colspan`, rich cells as blocks, captions |
-| `picture` | `Figure` with the `Image` per `--images` (`embedded` → `data:` URI, `referenced` → `<stem>_artifacts/` files), caption, a chart's data as a `Table`; a caption-less placeholder is docling's `<!-- image -->` as raw HTML |
+| `picture` | `Para [Image]` — Pandoc's own readers' shape — or, with a caption (also the alt text) or a chart's data `Table`, a `Figure`; the target per `--images` (`embedded` → `data:` URI, `referenced` → `<stem>_artifacts/` files). A picture without one (`placeholder`, or an EMF/WMF docling cannot decode) is still an `Image`, classed `docling-placeholder` with an empty target |
 | table / picture footnotes | `Note` in the caption |
+| DOCX footnotes / endnotes, ODT `text:note`s (#538) | `Note` at the reference, inside its paragraph / heading / list item / cell (pandoc writes them back as real notes: `word/footnotes.xml`, `[^n]`); a footnote with no recorded call site (a JSON from Python docling) as a trailing `Note` |
 | key-value graphs, form field regions | `Div .key-value-region` / `.form-container` / `.field-region` holding a `DefinitionList` |
 | any other label (`page_header`, `reference`, `handwritten_text`, …) | `Div .docling-<label>` |
 
 Not mapped, because Pandoc has no place for it: page provenance and bounding
 boxes, confidence / classification meta, form field geometry, comment
-authorship; furniture and notes stay out like in the HTML export. The output
+authorship; furniture (headers, footers) and reviewer comments stay out like
+in the HTML export. Note call sites are not in docling's JSON model, so they
+travel only inside the Rust document: the CLI, serve, Node, FFI and wasm place
+notes at their calls, while Python's `export_to_pandoc` (which reads a
+docling `DoclingDocument`) appends them at the end. The output
 is stamped `pandoc-api-version` **1.23.1.1** (`pandoc-types` for Pandoc 3.x;
 `docling_core::pandoc::PANDOC_API_VERSION`) — the only version written.
 `--pandoc-api-version V` (serve `pandoc_api_version`, the library's
@@ -750,8 +760,9 @@ is stamped `pandoc-api-version` **1.23.1.1** (`pandoc-types` for Pandoc 3.x;
 anything Pandoc would not read as 1.23 fails with `unsupported Pandoc API
 version '…'` instead of producing a document Pandoc rejects. Every
 convertible declarative fixture (305) and the PDF corpus pass `pandoc -f json
--t native`; `crates/docling/tests/pandoc.rs` pins 13 documents both as JSON
-and as Pandoc's `native` reading of it.
+-t native`; `crates/docling/tests/pandoc.rs` pins 16 documents both as JSON
+and as Pandoc's `native` reading of it, and rebuilds a DOCX through
+`pandoc -t docx` to check its pictures and footnotes.
 
 ```rust
 println!("{}", result.document.export_to_pandoc_json()); // {"pandoc-api-version":[1,23,1,1],…}
