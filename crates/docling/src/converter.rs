@@ -599,6 +599,40 @@ impl DocumentConverter {
         self
     }
 
+    /// The document-level settings [`convert`](Self::convert) applies to
+    /// every backend's output: the serializer knobs carried on the document
+    /// (`strict`, `compact_tables`, `page_break_placeholder`) so each later
+    /// Markdown export agrees, and first-class cells for every table. Public
+    /// for callers that run a backend themselves — docling-serve converts
+    /// PDFs and images on a warm `Pipeline` and finishes
+    /// them here, so a request's options reach them as they reach every
+    /// other format (#547).
+    pub fn finish_document(&self, document: &mut docling_core::DoclingDocument) {
+        // Carry the mode so `result.document.export_to_markdown()` reflects it.
+        document.strict_markdown = self.strict;
+        // Compact tables (#271) is additive: the PDF backend already turns it
+        // on for its own corpus; never turn it back off here.
+        if self.compact_tables {
+            document.compact_tables = true;
+        }
+        // Page-break placeholder: a serializer knob like `strict`, carried on
+        // the document so every Markdown export of it agrees.
+        if self.page_break_placeholder.is_some() {
+            document.page_break_placeholder = self.page_break_placeholder.clone();
+        }
+        // First-class cells for every table (#240): backends with page
+        // geometry (the PDF TableFormer paths) set them; everything else —
+        // declarative tables included — derives them from the grid plus the
+        // structure overlay (real spans for DOCX/XLSX merges, HTML `th`
+        // headers, ODF covered cells; 1×1 records otherwise), so the repair
+        // API and the JSON `table_cells` are populated uniformly.
+        for table in document.tables_mut() {
+            if table.cells.is_none() {
+                table.cells = Some(table.derive_cells());
+            }
+        }
+    }
+
     /// The copybook layout for EBCDIC sources (#252): docling's
     /// `EbcdicLayout` JSON, inline (a string starting with `{`) or as a file
     /// path. Without it, a path-loaded source looks for a
@@ -1191,29 +1225,7 @@ impl DocumentConverter {
                 )))
             }
         };
-        // Carry the mode so `result.document.export_to_markdown()` reflects it.
-        document.strict_markdown = self.strict;
-        // Compact tables (#271) is additive: the PDF backend already turns it
-        // on for its own corpus; never turn it back off here.
-        if self.compact_tables {
-            document.compact_tables = true;
-        }
-        // Page-break placeholder: a serializer knob like `strict`, carried on
-        // the document so every Markdown export of it agrees.
-        if self.page_break_placeholder.is_some() {
-            document.page_break_placeholder = self.page_break_placeholder.clone();
-        }
-        // First-class cells for every table (#240): backends with page
-        // geometry (the PDF TableFormer paths) set them; everything else —
-        // declarative tables included — derives them from the grid plus the
-        // structure overlay (real spans for DOCX/XLSX merges, HTML `th`
-        // headers, ODF covered cells; 1×1 records otherwise), so the repair
-        // API and the JSON `table_cells` are populated uniformly.
-        for table in document.tables_mut() {
-            if table.cells.is_none() {
-                table.cells = Some(table.derive_cells());
-            }
-        }
+        self.finish_document(&mut document);
 
         let status = if errors.is_empty() {
             ConversionStatus::Success

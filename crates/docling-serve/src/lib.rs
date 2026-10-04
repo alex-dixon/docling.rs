@@ -2527,15 +2527,26 @@ fn convert_document_inner(
     // streaming path's buffered branch pick it up in one place. A VLM failure
     // is a per-request error like any other, never a server crash.
     if let Some(vlm) = resolve_vlm_options(state, options, true)? {
+        let finish = request_converter(state, options)?;
         return docling::vlm::convert_vlm(&source, &vlm)
-            .map(|document| Converted {
-                document,
-                errors: Vec::new(),
+            .map(|mut document| {
+                finish.finish_document(&mut document);
+                Converted {
+                    document,
+                    errors: Vec::new(),
+                }
             })
             .map_err(|e| ApiError::Unsupported(e.to_string()));
     }
     match source.format {
         InputFormat::Pdf | InputFormat::Image => {
+            // The warm pipeline bypasses `DocumentConverter::convert`, so the
+            // document-level settings it applies to every other format —
+            // `compact_tables`, `strict`, `md_page_break_placeholder`, derived
+            // table cells — are applied here from the same request converter
+            // (#547: `compact_tables=true` used to come back padded for a
+            // PDF while a DOCX in the same request shape came back compact).
+            let finish = request_converter(state, options)?;
             // Recover from a poisoned lock instead of propagating the panic: a
             // single crafted PDF/image that panics inside `convert` below drops
             // the guard mid-unwind and poisons the mutex. Without this recovery
@@ -2583,7 +2594,7 @@ fn convert_document_inner(
             ));
             // The document budget (#497) is per-request too.
             pipeline.set_document_timeout(parse_document_timeout(options.document_timeout)?);
-            let converted = match source.format {
+            let mut converted = match source.format {
                 InputFormat::Pdf => pipeline
                     .convert_outcome(&source.bytes, None, &source.name)
                     .map(|c| Converted {
@@ -2603,6 +2614,7 @@ fn convert_document_inner(
                     }),
             }
             .map_err(|e| ApiError::Internal(e.to_string()))?;
+            finish.finish_document(&mut converted.document);
             Ok(converted)
         }
         _ => {
