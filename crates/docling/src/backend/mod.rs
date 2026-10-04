@@ -54,6 +54,7 @@ mod latex_walker;
 mod lotus;
 mod markdown;
 mod md_tree;
+mod metafile;
 mod mhtml;
 mod msg;
 mod odf;

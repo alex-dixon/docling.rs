@@ -740,7 +740,7 @@ walk, mapped to Pandoc's constructors:
 | `formula` | `Math DisplayMath` (`InlineMath` inside a paragraph) |
 | `checkbox_selected` / `_unselected` | `☒` / `☐` + the text — Pandoc's task-list convention |
 | `table` | `Table`: leading all-header rows as `TableHead`, `rowspan`/`colspan`, rich cells as blocks, captions |
-| `picture` | `Para [Image]` — Pandoc's own readers' shape — or, with a caption (also the alt text) or a chart's data `Table`, a `Figure`; the target per `--images` (`embedded` → `data:` URI, `referenced` → `<stem>_artifacts/` files). A picture without one (`placeholder`, or an EMF/WMF docling cannot decode) is still an `Image`, classed `docling-placeholder` with an empty target |
+| `picture` | `Para [Image]` — Pandoc's own readers' shape — or, with a caption (also the alt text) or a chart's data `Table`, a `Figure`; the target per `--images` (`embedded` → `data:` URI, `referenced` → `<stem>_artifacts/` files). A picture without one (`placeholder`, or an image that could not be decoded) is still an `Image`, classed `docling-placeholder` with an empty target |
 | table / picture footnotes | `Note` in the caption |
 | DOCX footnotes / endnotes, ODT `text:note`s (#538) | `Note` at the reference, inside its paragraph / heading / list item / cell (pandoc writes them back as real notes: `word/footnotes.xml`, `[^n]`); a footnote with no recorded call site (a JSON from Python docling) as a trailing `Note` |
 | key-value graphs, form field regions | `Div .key-value-region` / `.form-container` / `.field-region` holding a `DefinitionList` |
@@ -867,6 +867,16 @@ for (path, bytes) in files { std::fs::write(path, bytes).unwrap(); }
 > `<graphic xlink:href>` — `data:` URIs, local files, remote `http(s)` URLs, and
 > EPUB/MHTML archive entries — and embed the bytes. Remote URLs are fetched over
 > the network, so enable it only for input you trust.
+>
+> Windows metafile pictures (EMF / WMF — Word/Visio drawings, clip art, OLE
+> previews) in DOCX, DOC, PPTX, XLSX, ODF, RTF and the other office formats
+> are rendered to PNG in-process (#536): the GDI records become SVG that
+> resvg rasterizes, at the metafile's own size (≤ 2048 px a side) on white.
+> Upstream renders them through LibreOffice when it is installed. Not drawn:
+> clipping regions, hatch/pattern brushes (solid), and EMF+ records (a dual
+> EMF+ file's plain-EMF records are drawn). A metafile that draws nothing,
+> a Mac PICT, or a build without the `pdf` feature (wasm) leaves the
+> picture payload-less as before.
 
 ### `strict` Markdown (Rust-only)
 

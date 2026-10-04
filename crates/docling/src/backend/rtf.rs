@@ -18,7 +18,8 @@
 //! - tables: `\trowd` … `\cell` … `\row` rows, ragged rows padded; nested
 //!   groups inside cells contribute their text
 //! - embedded pictures: `\pict` with `\pngblip`/`\jpegblip` hex data becomes a
-//!   [`Node::Picture`] with the decoded bytes
+//!   [`Node::Picture`] with the decoded bytes; `\emfblip`/`\wmetafile` ones
+//!   are rendered to PNG (`{\nonshppict}` fallback copies are skipped)
 //! - encodings: `\'xx` bytes through the `\ansicpg` codepage (1252 default,
 //!   1250/1251 supported), `\uN` unicode with the `\uc` skip protocol
 //!
@@ -73,6 +74,9 @@ struct GroupState {
     /// identity, what `numId` is in DOCX. Writers that emit only the
     /// `\listtext` compatibility markers leave it unset.
     ls: Option<i32>,
+    /// Inside `{\nonshppict …}`: the WMF copy Word writes for readers that
+    /// predate `\shppict`, of a picture already read from the `\shppict`.
+    nonshppict: bool,
 }
 
 /// One formatted run of paragraph text.
@@ -324,7 +328,11 @@ impl<'a> Parser<'a> {
             "row" => self.end_row(),
             "nestcell" | "nestrow" => {} // nested tables flatten into the cell
             "stylesheet" => self.read_stylesheet(),
-            "pict" => self.read_picture(doc),
+            "pict" if !self.state.nonshppict => self.read_picture(doc),
+            "nonshppict" => {
+                self.state.skip = true;
+                self.state.nonshppict = true;
+            }
             "fonttbl" | "colortbl" | "info" | "listtable" | "listoverridetable" | "header"
             | "headerl" | "headerr" | "headerf" | "footer" | "footerl" | "footerr" | "footerf"
             | "footnote" | "ftnsep" | "ftnsepc" => {
@@ -469,11 +477,14 @@ impl<'a> Parser<'a> {
     }
 
     /// `{\pict \pngblip|\jpegblip … <hex>}` → a picture node with the decoded
-    /// bytes. Metafile-only pictures (`\wmetafile`/`\emfblip`) are skipped —
-    /// no portable decoder — as is the rare inline-binary `\bin` form.
+    /// bytes. A metafile (`\emfblip`, `\wmetafileN` — a WMF without its
+    /// placeable header, sized by `\picwgoal`/`\pichgoal` twips) is rendered
+    /// to PNG (#536); the rare inline-binary `\bin` form is skipped.
     fn read_picture(&mut self, doc: &mut DoclingDocument) {
         let mut depth = 0usize;
         let mut mimetype: Option<&'static str> = None;
+        let mut metafile = false;
+        let mut goal: (Option<i64>, Option<i64>) = (None, None);
         let mut hex = String::new();
         let mut skip_binary = false;
         while let Some(b) = self.next_byte() {
@@ -495,15 +506,22 @@ impl<'a> Parser<'a> {
                         .iter()
                         .map(|&b| b as char)
                         .collect();
+                    let num = self.pos;
                     while self.peek().is_some_and(|b| b.is_ascii_digit() || b == b'-') {
                         self.pos += 1;
                     }
+                    let param: Option<i64> = std::str::from_utf8(&self.bytes[num..self.pos])
+                        .ok()
+                        .and_then(|n| n.parse().ok());
                     if self.peek() == Some(b' ') {
                         self.pos += 1;
                     }
                     match word.as_str() {
                         "pngblip" => mimetype = Some("image/png"),
                         "jpegblip" => mimetype = Some("image/jpeg"),
+                        "emfblip" | "wmetafile" => metafile = true,
+                        "picwgoal" => goal.0 = param,
+                        "pichgoal" => goal.1 = param,
                         "bin" => skip_binary = true,
                         _ => {}
                     }
@@ -512,8 +530,7 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
-        let Some(mimetype) = mimetype else { return };
-        if skip_binary || hex.is_empty() {
+        if skip_binary || hex.is_empty() || (mimetype.is_none() && !metafile) {
             return;
         }
         let data: Vec<u8> = hex
@@ -521,6 +538,23 @@ impl<'a> Parser<'a> {
             .chunks_exact(2)
             .filter_map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
             .collect();
+        let Some(mimetype) = mimetype else {
+            // 15 twips per pixel at 96 dpi.
+            let hint = match goal {
+                (Some(w), Some(h)) if w > 0 && h > 0 => Some((w as f64 / 15.0, h as f64 / 15.0)),
+                _ => None,
+            };
+            if let Some(image) = super::metafile::render(&data, hint) {
+                doc.push(Node::Picture {
+                    caption: None,
+                    caption_href: None,
+                    image: Some(image),
+                    classification: None,
+                    caption_parent: Default::default(),
+                });
+            }
+            return;
+        };
         let (width, height) = image_size(mimetype, &data).unwrap_or((0, 0));
         doc.push(Node::Picture {
             caption: None,
@@ -1209,6 +1243,43 @@ mod tests {
         assert_eq!(img.mimetype, "image/png");
         assert_eq!((img.width, img.height), (1, 1));
         assert_eq!(&img.data[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    /// A `\wmetafile8` picture renders to PNG at its `\picwgoal`/`\pichgoal`
+    /// size; the `{\nonshppict}` WMF fallback of a `\shppict` PNG does not
+    /// add a second picture.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn renders_metafile_pictures_once() {
+        let wmf = crate::backend::metafile::tests::wmf(
+            None,
+            &crate::backend::metafile::tests::wmf_body(),
+        );
+        let hex: String = wmf.iter().map(|b| format!("{b:02x}")).collect();
+        let rtf = format!(
+            r"{{\rtf1\ansi{{\pict\wmetafile8\picw1000\pich500\picwgoal1800\pichgoal900 {hex}}}\par}}"
+        );
+        let doc = convert(&rtf);
+        let Node::Picture {
+            image: Some(img), ..
+        } = &doc.nodes[0]
+        else {
+            panic!("expected a picture, got {:?}", doc.nodes)
+        };
+        assert_eq!(
+            (img.mimetype.as_str(), img.width, img.height),
+            ("image/png", 120, 60)
+        );
+
+        let rtf = format!(
+            r"{{\rtf1\ansi{{\*\shppict{{\pict\wmetafile8 {hex}}}}}{{\nonshppict{{\pict\wmetafile8 {hex}}}}}\par}}"
+        );
+        let pictures = convert(&rtf)
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, Node::Picture { .. }))
+            .count();
+        assert_eq!(pictures, 1);
     }
 
     #[test]
