@@ -1464,8 +1464,37 @@ fn page_glyphs_cached(
             caches,
             &mut out,
         );
+        out.retain(|g| on_page(g, pb.w, pb.h));
     }
     out
+}
+
+/// Whether a glyph is on the page (#529): docling-parse keeps a character
+/// only when its whole box lies inside the display box — the CropBox, or
+/// the MediaBox without one — edges included, so a FrameMaker print slug
+/// drawn beside the CropBox or a tiled page's neighbouring text beyond the
+/// MediaBox never becomes a cell, and a line crossing the edge is cut at the
+/// last glyph that fits (`Crossing the rig`). The box is docling-parse's
+/// char box — the advance by the font's ascent/descent, the loose box here
+/// (its axis-aligned extent for rotated text) — in the frame `page_glyphs`
+/// already moved to the display box's corner, so the page is `[0, w] × [0,
+/// h]`. A glyph without a finite box is kept, as before. (A standard-14 font
+/// without a FontDescriptor gets the 750 / −250 default ascent / descent
+/// here where docling-parse reads the AFM's — Helvetica's 718 / −207 — so
+/// for those a glyph within ~0.04 em of the top or bottom edge can fall the
+/// other way; horizontally the advance is the same.)
+fn on_page(g: &Glyph, w: f32, h: f32) -> bool {
+    // f32 noise only: docling-parse already drops a glyph 0.01 pt over.
+    const EPS: f32 = 1e-3;
+    let (l, b, r, t) = if [g.ll, g.lb, g.lr, g.lt].iter().all(|v| v.is_finite()) {
+        (g.ll, g.lb, g.lr, g.lt)
+    } else {
+        (g.l, g.b, g.r, g.t)
+    };
+    if ![l, b, r, t].iter().all(|v| v.is_finite()) {
+        return true;
+    }
+    l >= -EPS && b >= -EPS && r <= w + EPS && t <= h + EPS
 }
 
 /// Run a content stream's operators, emitting glyphs into `out`. Recurses into
@@ -2164,7 +2193,15 @@ mod page_box_frame {
     /// One page, `boxes` spliced into the page dictionary verbatim, one text
     /// run at user-space `(x, y)`.
     fn pdf(boxes: &str, x: f32, y: f32) -> Vec<u8> {
-        let content = format!("BT /F1 12 Tf {x} {y} Td (First printing) Tj ET\n");
+        pdf_content(
+            boxes,
+            &format!("BT /F1 12 Tf {x} {y} Td (First printing) Tj ET\n"),
+        )
+    }
+
+    /// One page, `boxes` spliced into the page dictionary, `content` as its
+    /// content stream (font `/F1` = Helvetica).
+    fn pdf_content(boxes: &str, content: &str) -> Vec<u8> {
         let objs: Vec<String> = vec![
             "<</Type/Catalog/Pages 2 0 R>>".into(),
             format!("<</Type/Pages/Kids[3 0 R]/Count 1{boxes}>>"),
@@ -2230,6 +2267,58 @@ mod page_box_frame {
             );
         }
         assert!((plain[0].l - 37.0).abs() < 1e-3, "{}", plain[0].l);
+    }
+
+    fn text(glyphs: &[Glyph]) -> String {
+        glyphs.iter().map(|g| g.ch).collect()
+    }
+
+    /// #529: text drawn outside the display box — a print slug beside the
+    /// CropBox, a tiled page's neighbour beyond the MediaBox — is dropped,
+    /// glyph by glyph like docling-parse, instead of being clamped onto the
+    /// page edge; a line crossing the edge keeps the glyphs that fit.
+    #[test]
+    fn glyphs_outside_the_display_box_are_dropped() {
+        let (_, g) = only_page(&pdf_content(
+            "/MediaBox[0 0 400 400]/CropBox[100 100 400 400]",
+            "BT /F1 14 Tf 120 300 Td (Visible.) Tj ET\nBT /F1 8 Tf 5 40 Td (Slug) Tj ET\n",
+        ));
+        assert_eq!(text(&g), "Visible.");
+        let (_, g) = only_page(&pdf_content(
+            "/MediaBox[0 0 300 400]",
+            "BT /F1 14 Tf 40 300 Td (On page) Tj ET\nBT /F1 14 Tf 400 250 Td (Beyond) Tj ET\n",
+        ));
+        assert_eq!(text(&g), "On page");
+        // docling-parse: "Crossing the right edge" on a 300 pt page → "Crossing the rig".
+        let (_, g) = only_page(&pdf_content(
+            "/MediaBox[0 0 300 400]",
+            "BT /F1 14 Tf 200 250 Td (Crossing the right edge) Tj ET\n",
+        ));
+        assert_eq!(text(&g), "Crossing the rig");
+    }
+
+    /// The containment test is docling-parse's: the whole char box (advance
+    /// × the font's ascent / descent) inside the display box, edges
+    /// included — a Helvetica `W` at 50 pt (47.2 wide) ending exactly on the
+    /// right edge stays, 0.01 pt further it goes; likewise on the left.
+    #[test]
+    fn a_glyph_on_the_edge_stays_one_over_it_goes() {
+        let w_at = |x: f32, y: f32| {
+            let (_, g) = only_page(&pdf_content(
+                "/MediaBox[0 0 300 400]",
+                &format!("BT /F1 50 Tf {x} {y} Td (W) Tj ET\n"),
+            ));
+            text(&g)
+        };
+        assert_eq!(w_at(252.8, 200.0), "W");
+        assert_eq!(w_at(252.81, 200.0), "");
+        assert_eq!(w_at(0.0, 200.0), "W");
+        assert_eq!(w_at(-0.01, 200.0), "");
+        // Vertically the box is the font's ascent / descent: a baseline far
+        // enough up keeps the descender on the page, one at 0 does not.
+        assert_eq!(w_at(100.0, 20.0), "W");
+        assert_eq!(w_at(100.0, 0.0), "");
+        assert_eq!(w_at(100.0, 380.0), "");
     }
 
     /// pdfium's fallbacks: no MediaBox → Letter; a CropBox is clipped to the
