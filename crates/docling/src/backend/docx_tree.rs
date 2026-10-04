@@ -21,9 +21,10 @@
 //! walks read the file the same way; only the item structure differs.
 //!
 //! What cannot be reproduced without upstream's optional tools is noted
-//! where it happens: a blip-less DrawingML shape, an EMF/WMF picture and a
-//! chart image are rendered through LibreOffice upstream and become pictures
-//! with an `image` payload; here the same pictures carry no payload.
+//! where it happens: a blip-less DrawingML shape and a chart image are
+//! rendered through LibreOffice upstream and become pictures with an `image`
+//! payload; here the same pictures carry no payload. An EMF/WMF picture is
+//! rendered to PNG in-process (`metafile.rs`, #536).
 
 use std::collections::{HashMap, HashSet};
 
