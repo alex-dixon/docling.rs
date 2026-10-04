@@ -546,7 +546,10 @@ headings, paragraphs, rich inline runs (`<bold>` / `<italic>` / `<underline>` /
 `<strikethrough>` / `<subscript>` / `<superscript>`), lists with enumeration
 `<marker>`s, tables with per-cell `<location>` provenance, code blocks with a
 language `<label>`, formulas, pictures and furniture. The pretty-printed
-indentation follows Python's `minidom.toprettyxml` byte-for-byte.
+indentation follows Python's `minidom.toprettyxml` byte-for-byte. A picture's
+`<src uri="assets/image_NNNNNN_<sha256>.png"/>` is named like docling's: the
+index counts every body picture, the digest is over the decoded pixels (PIL
+`tobytes()`) — exact for PNG images; JPEG and other encodings hash the file bytes.
 
 ```rust
 println!("{}", result.document.export_to_doclang()); // <doclang> XML string

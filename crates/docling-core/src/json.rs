@@ -264,7 +264,11 @@ pub fn to_json(doc: &DoclingDocument) -> Value {
                     }
                 }
             }
-            b.write_tree(tree)
+            // docling-core's `validate_misplaced_list_items` runs on every
+            // document it serializes; apply it the same way.
+            let mut tree = tree.clone();
+            tree.wrap_misplaced_list_items();
+            b.write_tree(&tree)
         }
         None => b.walk_into(&doc.nodes, "#/body"),
     };
@@ -817,7 +821,15 @@ impl Builder {
                 continue;
             }
             let parent = item.parent.map_or("#/body", |p| refs[p].as_str());
-            let children: Vec<Value> = item.children.iter().map(|&c| ref_of(c)).collect();
+            // A deleted item has no ref; one still listed as a child (a stale
+            // backend link) is left out rather than written as `"$ref": ""`,
+            // which docling-core rejects on load (#527).
+            let children: Vec<Value> = item
+                .children
+                .iter()
+                .filter(|&&c| !tree.items[c].deleted)
+                .map(|&c| ref_of(c))
+                .collect();
             let layer = item.layer.map_or("body", |l| l.value());
             // The item's own provenance, consumed by the writer below
             // (`take_prov`); an item without one writes `prov: []`.
@@ -1031,7 +1043,11 @@ impl Builder {
             };
             debug_assert_eq!(self_ref, refs[id], "tree item {id} numbered out of order");
         }
-        tree.body.iter().map(|&c| ref_of(c)).collect()
+        tree.body
+            .iter()
+            .filter(|&&c| !tree.items[c].deleted)
+            .map(|&c| ref_of(c))
+            .collect()
     }
 
     fn add_node(&mut self, node: &Node, parent: &str) -> Option<String> {
@@ -2803,6 +2819,129 @@ mod tests {
         );
     }
 
+    /// docling-core's `validate_misplaced_list_items`, as it re-homes list
+    /// items outside a `list` group (#527) — the refs below are what
+    /// docling-core 2.99 writes for the same document: the two consecutive
+    /// items on the body share a group, each item in another group gets its
+    /// own, the runs are handled last-first (new groups and re-added texts
+    /// numbered in that order), and a well-placed item is left alone.
+    #[test]
+    fn misplaced_list_items_are_wrapped_like_docling_core() {
+        use crate::tree::{ItemTree, ListMeta, TreeKind};
+        let mut t = ItemTree::default();
+        let li = |txt: &str| TreeKind::Text {
+            label: "list_item".into(),
+            text: txt.into(),
+            orig: None,
+            formatting: None,
+            hyperlink: None,
+            level: None,
+            list: Some(ListMeta {
+                enumerated: false,
+                marker: "-".into(),
+            }),
+        };
+        let group = |label: &str, name: &str| TreeKind::Group {
+            label: label.into(),
+            name: name.into(),
+        };
+        t.add(None, None, li("A"));
+        t.add(None, None, li("B"));
+        t.add(
+            None,
+            None,
+            TreeKind::Text {
+                label: "text".into(),
+                text: "plain".into(),
+                orig: None,
+                formatting: None,
+                hyperlink: None,
+                level: None,
+                list: None,
+            },
+        );
+        let cell = t.add(None, None, group("unspecified", "cell"));
+        t.add(Some(cell), None, li("C"));
+        t.add(Some(cell), None, li("D"));
+        let list = t.add(None, None, group("list", "list"));
+        t.add(Some(list), None, li("E"));
+        let doc = DoclingDocument {
+            tree: Some(t),
+            ..DoclingDocument::new("t")
+        };
+        let v: Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let refs = |x: &Value| -> Vec<String> {
+            x.as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["$ref"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            refs(&v["body"]["children"]),
+            ["#/groups/4", "#/texts/0", "#/groups/0", "#/groups/1"]
+        );
+        assert_eq!(
+            refs(&v["groups"][0]["children"]),
+            ["#/groups/3", "#/groups/2"]
+        );
+        for (g, name, kids) in [
+            (2, "group", vec!["#/texts/2"]),
+            (3, "group", vec!["#/texts/3"]),
+            (4, "group", vec!["#/texts/4", "#/texts/5"]),
+            (1, "list", vec!["#/texts/1"]),
+        ] {
+            assert_eq!(v["groups"][g]["label"], "list");
+            assert_eq!(v["groups"][g]["name"], name);
+            assert_eq!(refs(&v["groups"][g]["children"]), kids);
+        }
+        let texts: Vec<&str> = v["texts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, ["plain", "E", "D", "C", "A", "B"]);
+        assert_eq!(v["texts"][2]["parent"]["$ref"], "#/groups/2");
+    }
+
+    /// A child the tree still lists after deleting it is left out instead
+    /// of written as `"$ref": ""`, which docling-core rejects (#527).
+    #[test]
+    fn a_deleted_child_is_not_written_as_an_empty_ref() {
+        use crate::tree::{ItemTree, TreeKind};
+        let mut t = ItemTree::default();
+        let text = |txt: &str| TreeKind::Text {
+            label: "text".into(),
+            text: txt.into(),
+            orig: None,
+            formatting: None,
+            hyperlink: None,
+            level: None,
+            list: None,
+        };
+        let g = t.add(
+            None,
+            None,
+            TreeKind::Group {
+                label: "unspecified".into(),
+                name: "g".into(),
+            },
+        );
+        let gone = t.add(Some(g), None, text(""));
+        t.add(Some(g), None, text("kept"));
+        t.items[gone].deleted = true; // still in `g`'s children
+        let doc = DoclingDocument {
+            tree: Some(t),
+            ..DoclingDocument::new("t")
+        };
+        let v: Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        assert_eq!(
+            v["groups"][0]["children"],
+            serde_json::json!([{"$ref": "#/texts/0"}])
+        );
+    }
+
     #[test]
     fn a_backend_item_tree_is_written_verbatim() {
         use crate::tree::{Formatting, ItemTree, ListMeta, TreeKind};
@@ -2866,7 +3005,7 @@ mod tests {
                 list: None,
             },
         );
-        t.add(
+        let item = t.add(
             Some(sub),
             None,
             TreeKind::Text {
@@ -2943,6 +3082,18 @@ mod tests {
         }
         let after = t.add(Some(sub), None, text("text", "after the region"));
         let _ = (title, after);
+        // A list item belongs in a `list` group — one outside it would be
+        // re-homed by `wrap_misplaced_list_items` (created last, so the
+        // other groups keep their numbers).
+        let list = t.add(
+            Some(sub),
+            None,
+            TreeKind::Group {
+                label: "list".into(),
+                name: "list".into(),
+            },
+        );
+        t.reparent(item, Some(list));
 
         let doc = DoclingDocument {
             tree: Some(t),

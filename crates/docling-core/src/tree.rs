@@ -354,6 +354,95 @@ impl ItemTree {
         self.items[id].deleted = true;
     }
 
+    /// Mark `id` and its whole subtree deleted — `delete_items` drops an
+    /// item "and any children it has".
+    fn delete_subtree(&mut self, id: usize) {
+        self.delete(id);
+        let mut stack = self.items[id].children.clone();
+        while let Some(c) = stack.pop() {
+            self.items[c].deleted = true;
+            stack.extend(self.items[c].children.iter().copied());
+        }
+    }
+
+    /// docling-core's `DoclingDocument.validate_misplaced_list_items` (a
+    /// model validator, so it runs whenever docling-core serializes or loads
+    /// a document): every `list_item` whose parent is not a `list` group is
+    /// re-homed into a new one. A pre-order walk of the body (groups
+    /// included) collects them; consecutive misplaced items directly on the
+    /// body share one group, any other misplaced item gets its own. Working
+    /// from the last run back, each run gets a `ListGroup` (name `group`)
+    /// inserted where its first item stood, the items are deleted — with any
+    /// children — and re-added under the group as fresh items, so they move
+    /// to the end of the text numbering (#527: the DOCX backend leaves such
+    /// items in rich table cells). A no-op for a well-formed tree.
+    pub fn wrap_misplaced_list_items(&mut self) {
+        let is_list_item = |t: &Self, id: usize| matches!(&t.items[id].kind, TreeKind::Text { label, .. } if label == "list_item");
+        let in_list_group = |t: &Self, id: usize| {
+            t.items[id].parent.is_some_and(
+                |p| matches!(&t.items[p].kind, TreeKind::Group { label, .. } if label == "list"),
+            )
+        };
+        let mut runs: Vec<Vec<usize>> = Vec::new();
+        // `None` = the body itself, which the walk yields first.
+        let mut prev: Option<usize> = None;
+        let mut stack: Vec<usize> = self.body.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            if self.items[id].deleted {
+                continue;
+            }
+            if is_list_item(self, id) && !in_list_group(self, id) {
+                let continues =
+                    prev.is_some_and(|p| is_list_item(self, p) && self.items[p].parent.is_none());
+                match runs.last_mut() {
+                    Some(run) if continues => run.push(id),
+                    _ => runs.push(vec![id]),
+                }
+            }
+            prev = Some(id);
+            stack.extend(self.items[id].children.iter().rev().copied());
+        }
+        for run in runs.into_iter().rev() {
+            let parent = self.items[run[0]].parent;
+            let group = self.add(
+                parent,
+                None,
+                TreeKind::Group {
+                    label: "list".into(),
+                    name: "group".into(),
+                },
+            );
+            let siblings = match parent {
+                Some(p) => &mut self.items[p].children,
+                None => &mut self.body,
+            };
+            siblings.pop();
+            let at = siblings
+                .iter()
+                .position(|&c| c == run[0])
+                .unwrap_or(siblings.len());
+            siblings.insert(at, group);
+            for &li in &run {
+                self.delete_subtree(li);
+            }
+            // `add_list_item` keeps the text, marker, formatting, hyperlink
+            // and first provenance — not children, comments or a source.
+            for &li in &run {
+                let copy = TreeItem {
+                    parent: Some(group),
+                    children: Vec::new(),
+                    comments: Vec::new(),
+                    source: None,
+                    deleted: false,
+                    ..self.items[li].clone()
+                };
+                let id = self.items.len();
+                self.items.push(copy);
+                self.items[group].children.push(id);
+            }
+        }
+    }
+
     /// The last live text-bucket item (docling's `doc.texts[-1]`).
     pub fn last_text(&self) -> Option<usize> {
         self.items.iter().rposition(|it| {

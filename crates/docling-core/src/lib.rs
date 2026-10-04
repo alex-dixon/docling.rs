@@ -25,6 +25,7 @@ mod latex;
 mod markdown;
 mod mathml;
 pub mod pandoc;
+mod pixel_digest;
 pub mod tree;
 
 pub use confidence::{ConfidenceReport, PageConfidence, QualityGrade};

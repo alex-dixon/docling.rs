@@ -59,12 +59,13 @@ for fmt in "${fmts[@]}"; do
     else
       unzip -p "$ref" document.xml > "$tmp/ref.xml" 2>/dev/null
       unzip -p "$ours" document.xml > "$tmp/ours.xml" 2>/dev/null
-      # Canonicalize exported image asset names. docling names referenced images
-      # assets/image_NNNNNN_<sha256>.png, where the digest is over the PIL-re-encoded
-      # PNG bytes — not reproducible outside docling. We emit the same structure with
-      # a source-bytes hash, so the index+digest are normalized on both sides here;
-      # only a genuine structural difference (missing/extra <src>) then shows up.
-      sed -E -i 's#image_[0-9]{6}_[0-9a-f]+\.png#image_NORM.png#g' \
+      # Canonicalize the digest of exported image asset names. docling names
+      # referenced images assets/image_NNNNNN_<sha256>.png, the digest over the
+      # decoded pixels (PIL `tobytes()`). We reproduce it for PNG sources
+      # (docling-core pixel_digest.rs) and the index for every picture, but not
+      # for JPEG (libjpeg's IDCT) or LibreOffice-rendered EMF/DrawingML, so only
+      # the digest is normalized: a wrong index or a missing/extra <src> shows.
+      sed -E -i 's#(image_[0-9]{6})_[0-9a-f]+\.png#\1_NORM.png#g' \
         "$tmp/ref.xml" "$tmp/ours.xml"
       # Same rationale for base64 data URIs (furniture pictures embed the PIL
       # re-encoded PNG inline): normalize the payload, keep the structure.

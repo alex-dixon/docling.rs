@@ -105,8 +105,84 @@ struct Walker {
     pending_code_blank_lines: usize,
     /// `paragraph_to_items`: the items each paragraph produced.
     para_items: HashMap<Key, Vec<usize>>,
+    /// The `#/texts/N` index each deleted blank spacer had when it was
+    /// created — the stale ref a rich cell's `provs_in_cell` still holds for
+    /// it (#527, see [`Walker::resolve_cell_provs`]).
+    stale: HashMap<usize, usize>,
+    /// The body element (paragraph, table, …) each item was created for —
+    /// the innermost one, for [`rich_cell_layout`].
+    item_src: HashMap<usize, Key>,
     /// `paragraph_comment_map`, in insertion order.
     para_comments: Vec<(Key, Vec<String>)>,
+}
+
+/// The block layout docling's Markdown gives a rich table cell when it
+/// differs from the cell's paragraph order (#527): each block is the body
+/// elements of one top-level item of the cell group, in group order — a
+/// list group's items, or a single paragraph / nested table. Upstream's
+/// stale `provs_in_cell` refs ([`Walker::resolve_cell_provs`]) pull the list
+/// item after a deleted blank spacer out of its list to where the blank
+/// stood: `- First item` / blank / `- Second item` becomes two lists, and
+/// with a third item directly after the second, that third one stays in the
+/// first list ahead of the second. Walks the cell on its own, as upstream's
+/// `_isolated_list_context` does; `None` when no blank was deleted (the
+/// cell's own order holds) or when an item cannot be traced to exactly one
+/// element (the caller keeps its rendering).
+pub(super) fn rich_cell_layout(tc: XmlNode, ctx: &Ctx) -> Option<Vec<Vec<NodeId>>> {
+    let mut w = Walker::new();
+    let provs = w.walk_linear(tc, ctx);
+    if !provs.iter().any(|&p| w.tree.items[p].deleted) {
+        return None;
+    }
+    let g = w.add(None, None, group_kind("unspecified", "rich_cell"));
+    for p in w.resolve_cell_provs(&provs) {
+        w.tree.reparent(p, Some(g));
+    }
+    let src = |id: usize| w.item_src.get(&id).map(|k| k.1);
+    let mut seen = HashSet::new();
+    let mut blocks = Vec::new();
+    for &c in &w.tree.items[g].children {
+        let block: Vec<NodeId> = match &w.tree.items[c].kind {
+            TreeKind::Group { label, .. } if label == "list" => w.tree.items[c]
+                .children
+                .iter()
+                .map(|&i| src(i))
+                .collect::<Option<_>>()?,
+            _ => vec![src(c)?],
+        };
+        if !block.iter().all(|n| seen.insert(*n)) {
+            return None;
+        }
+        blocks.push(block);
+    }
+    Some(blocks)
+}
+
+/// How many empty inline groups a rich table cell leaves behind on the body
+/// (#527). `_create_or_reuse_parent` opens an inline group on the current
+/// parent for every paragraph with more than one formatting run and adds
+/// the runs to it, but the cell walk returns the runs themselves as
+/// `provs_in_cell`, and `_group_cell_elements` moves them into the cell
+/// group: the inline group stays where it was opened, empty, after the
+/// table. Markdown, HTML and JSON-derived output never show it; DocLang
+/// writes it as `<text></text>`.
+pub(super) fn rich_cell_orphan_groups(tc: XmlNode, ctx: &Ctx) -> usize {
+    let mut w = Walker::new();
+    let provs = w.walk_linear(tc, ctx);
+    let g = w.add(None, None, group_kind("unspecified", "rich_cell"));
+    for p in w.resolve_cell_provs(&provs) {
+        w.tree.reparent(p, Some(g));
+    }
+    w.tree
+        .items
+        .iter()
+        .filter(|it| {
+            !it.deleted
+                && it.parent.is_none()
+                && it.children.is_empty()
+                && matches!(&it.kind, TreeKind::Group { label, .. } if label == "inline")
+        })
+        .count()
 }
 
 /// Build docling's item tree for a parsed `word/document.xml` body, its
@@ -291,6 +367,8 @@ impl Walker {
             pending_code_blank_lines: 0,
             para_items: HashMap::new(),
             para_comments: Vec::new(),
+            stale: HashMap::new(),
+            item_src: HashMap::new(),
         }
     }
 
@@ -414,6 +492,12 @@ impl Walker {
                     continue;
                 }
                 if id == group {
+                    // `delete_items` takes the whole batch at once: every
+                    // blank's index is the one it was created with.
+                    for &blank in &trailing_empty {
+                        let at = self.tree.bucket_index(blank);
+                        self.stale.insert(blank, at);
+                    }
                     for blank in trailing_empty {
                         self.tree.delete(blank);
                     }
@@ -895,12 +979,42 @@ impl Walker {
         })
     }
 
+    /// What each of a rich cell's `provs_in_cell` refs points at by the time
+    /// `_group_cell_elements` resolves them (#527). Upstream collects the refs
+    /// as the cell is walked, but a list resumed after blank spacer
+    /// paragraphs deletes those blanks (`delete_items`), which renumbers
+    /// `doc.texts`: the blank's ref, `#/texts/K`, now resolves to whatever
+    /// text item took index K — the list item that followed it. That item is
+    /// pulled out of its list group into the cell group at the blank's
+    /// position (and later wrapped in a list group of its own by docling-core,
+    /// [`ItemTree::wrap_misplaced_list_items`]). A stale index past the end
+    /// resolves to nothing — upstream would fail the conversion there.
+    fn resolve_cell_provs(&self, provs: &[usize]) -> Vec<usize> {
+        provs
+            .iter()
+            .filter_map(|&p| {
+                if !self.tree.items[p].deleted {
+                    return Some(p);
+                }
+                let k = *self.stale.get(&p)?;
+                (0..self.tree.items.len())
+                    .filter(|&i| {
+                        let it = &self.tree.items[i];
+                        !it.deleted
+                            && matches!(it.kind, TreeKind::Text { .. } | TreeKind::Code { .. })
+                    })
+                    .nth(k)
+            })
+            .collect()
+    }
+
     // ----- the walk -----------------------------------------------------------
 
     /// `_walk_linear` over a container's element children.
     fn walk_linear(&mut self, container: XmlNode, ctx: &Ctx) -> Vec<usize> {
         let mut added: Vec<usize> = Vec::new();
         for element in child_elements(container) {
+            let first_new = self.tree.items.len();
             let tag = element.tag_name().name();
             let blips: Vec<XmlNode> = element
                 .descendants()
@@ -971,6 +1085,9 @@ impl Walker {
                 }
             } else if tag == "p" {
                 added.extend(self.handle_text_elements(element, ctx, false));
+            }
+            for id in first_new..self.tree.items.len() {
+                self.item_src.entry(id).or_insert(key);
             }
         }
         added
@@ -1374,7 +1491,7 @@ impl Walker {
                         row_idx
                     );
                     let g = self.add(Some(table_id), self.layer, group_kind("unspecified", &name));
-                    for p in provs {
+                    for p in self.resolve_cell_provs(&provs) {
                         self.tree.reparent(p, Some(g));
                     }
                     group = Some(g);

@@ -1604,13 +1604,18 @@ fn emit_picture(
     // An image-bearing picture carries a referenced-image `<src>` naming the
     // exported asset (`assets/image_{index:06}_{sha256}.png`), matching docling's
     // referenced-image mode. docling re-encodes every image to PNG through PIL, so
-    // the extension is always `.png` and the content hash is over those re-encoded
-    // bytes — not reproducible here, so we hash the source bytes and the
-    // conformance harness canonicalizes the digest before comparing.
+    // the extension is always `.png`, and the digest is over the decoded pixels
+    // (`PIL img.tobytes()`) — reproduced exactly for PNG sources, the encoded
+    // bytes otherwise (pixel_digest.rs).
+    // The index counts every body picture, image-less ones too — docling's
+    // `_with_pictures_refs` bumps `img_count` per `PictureItem`, not per image.
+    let idx = out.pic_index;
+    out.pic_index += 1;
     let src = image.map(|img| {
-        let idx = out.pic_index;
-        out.pic_index += 1;
-        format!("assets/image_{idx:06}_{}.png", sha256_hex(&img.data))
+        format!(
+            "assets/image_{idx:06}_{}.png",
+            crate::pixel_digest::image_digest(&img.data)
+        )
     });
     if location.is_none() && caption.is_none() && src.is_none() {
         out.push(depth, "<picture></picture>".to_string());
@@ -1669,14 +1674,6 @@ fn strip_lone_link(text: &str) -> Cow<'_, str> {
         }
     }
     Cow::Borrowed(text)
-}
-
-/// Lowercase hex SHA-256 of `bytes` (image asset content hash).
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Render a [`Node::Located`] wrapper: the inner element with its `<location>`

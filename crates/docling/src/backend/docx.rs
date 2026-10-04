@@ -62,6 +62,7 @@ impl DeclarativeBackend for DocxBackend {
             images: &images,
             charts: &charts,
             table_depth: std::cell::Cell::new(0),
+            orphan_inline_groups: std::cell::Cell::new(0),
         };
 
         let mut doc = DoclingDocument::new(&source.name);
@@ -438,6 +439,10 @@ pub(super) struct Ctx<'a> {
     /// per level, and a 35 KB file with 2 000 tables nested one inside the next
     /// overflowed the stack — an abort, not an error.
     pub(super) table_depth: std::cell::Cell<u32>,
+    /// Empty inline groups the last top-level table's rich cells left on
+    /// the body (see [`super::docx_tree::rich_cell_orphan_groups`]) — taken
+    /// by the caller that pushes the table.
+    pub(super) orphan_inline_groups: std::cell::Cell<usize>,
 }
 
 impl<'a> Ctx<'a> {
@@ -461,6 +466,7 @@ impl<'a> Ctx<'a> {
             images,
             charts,
             table_depth: std::cell::Cell::new(0),
+            orphan_inline_groups: std::cell::Cell::new(0),
         }
     }
 }
@@ -512,6 +518,15 @@ fn process_block(node: XmlNode, ctx: &Ctx, state: &mut ListState, doc: &mut Docl
                 }
             } else if let Some(table) = parse_table(node, ctx) {
                 doc.push(Node::Table(table));
+                // docling leaves an empty inline group on the body for every
+                // multi-run paragraph of a rich cell (its runs move into the
+                // cell group); DocLang writes each as `<text></text>`, the
+                // other serializers write nothing.
+                for _ in 0..ctx.orphan_inline_groups.replace(0) {
+                    doc.push(Node::DoclangOnly(Box::new(Node::Paragraph {
+                        text: String::new(),
+                    })));
+                }
                 state.list_run_base = None;
                 state.last_list_num_id = None;
             }
@@ -1672,6 +1687,17 @@ fn parse_table_inner(tbl: XmlNode, ctx: &Ctx, nested: bool) -> Option<Table> {
     let mut col_cont = vec![vec![false; num_cols]; rows.len()];
     let mut row_cont = vec![vec![false; num_cols]; rows.len()];
     let mut any_span = false;
+    // Positions a *rich* merged cell covers beyond its first (#527). docling
+    // writes a rich cell through its group ref and marks the items visited,
+    // so the Markdown table shows its content once — at the top-left grid
+    // position, the first the row-major walk reaches — and the rest of the
+    // merge empty; a plain merged cell repeats its text everywhere.
+    let mut rich_at = vec![vec![false; num_cols]; rows.len()];
+    let mut rich_cover = vec![vec![false; num_cols]; rows.len()];
+    // Counted for the outermost table only: a nested table's rich cells are
+    // part of the outer cell's walk.
+    let top_level = !nested && ctx.table_depth.get() == 1;
+    let mut orphans = 0usize;
     for (ri, row) in rows.iter().enumerate() {
         // The grid cursor starts past the row's skipped leading columns
         // (`w:gridBefore`) and advances by each cell's span — true grid
@@ -1716,6 +1742,20 @@ fn parse_table_inner(tbl: XmlNode, ctx: &Ctx, nested: bool) -> Option<Table> {
             for cell in grid[ri].iter_mut().take(col_end).skip(ci) {
                 *cell = text.clone();
             }
+            if !nested && ci < col_end {
+                let rich = if v_continue && ri > 0 {
+                    rich_at[ri - 1][ci]
+                } else {
+                    is_rich_cell(tc)
+                };
+                if top_level && rich && !(v_continue && ri > 0) {
+                    orphans += super::docx_tree::rich_cell_orphan_groups(tc, ctx);
+                }
+                for c in ci..col_end {
+                    rich_at[ri][c] = rich;
+                    rich_cover[ri][c] = rich && (c > ci || (v_continue && ri > 0));
+                }
+            }
             for c in col_cont[ri].iter_mut().take(col_end).skip(ci + 1) {
                 *c = true;
                 any_span = true;
@@ -1727,6 +1767,16 @@ fn parse_table_inner(tbl: XmlNode, ctx: &Ctx, nested: bool) -> Option<Table> {
                 any_span = true;
             }
             ci += span;
+        }
+    }
+    if top_level {
+        ctx.orphan_inline_groups.set(orphans);
+    }
+    for (row, cover) in grid.iter_mut().zip(&rich_cover) {
+        for (cell, &covered) in row.iter_mut().zip(cover) {
+            if covered {
+                cell.clear();
+            }
         }
     }
     let structure = any_span.then(|| {
@@ -1888,7 +1938,11 @@ fn run_has_format(r: XmlNode) -> bool {
 fn rich_cell_markdown(tc: XmlNode, ctx: &Ctx) -> String {
     let mut sub = DoclingDocument::new("");
     let mut state = ListState::default();
+    // The node range each child element rendered to, for the regrouping
+    // below.
+    let mut spans: Vec<(roxmltree::NodeId, std::ops::Range<usize>)> = Vec::new();
     for child in child_elements(tc) {
+        let start = sub.nodes.len();
         match child.tag_name().name() {
             "p" => handle_paragraph_inner(child, ctx, &mut state, &mut sub, true, false),
             "tbl" => {
@@ -1908,10 +1962,74 @@ fn rich_cell_markdown(tc: XmlNode, ctx: &Ctx) -> String {
             }
             _ => {}
         }
+        spans.push((child.id(), start..sub.nodes.len()));
     }
+    regroup_rich_cell(tc, ctx, &mut sub.nodes, &spans);
     // In-cell rendering: a heading inside the cell is plain text
     // (docling-core#540).
     sub.export_to_table_cell_markdown().trim().to_string()
+}
+
+/// A blank spacer between items of one list makes docling regroup a rich
+/// cell (#527): rearrange the cell's rendered `nodes` (`spans` = the node
+/// range each child element produced) into its block layout when it has one.
+fn regroup_rich_cell(
+    tc: XmlNode,
+    ctx: &Ctx,
+    nodes: &mut Vec<Node>,
+    spans: &[(roxmltree::NodeId, std::ops::Range<usize>)],
+) {
+    let blanks: std::collections::HashSet<roxmltree::NodeId> = child_elements(tc)
+        .filter(|c| c.has_tag_name("p") && plain_paragraph_text(*c).trim().is_empty())
+        .map(|c| c.id())
+        .collect();
+    if blanks.is_empty() {
+        return;
+    }
+    if let Some(layout) = super::docx_tree::rich_cell_layout(tc, ctx) {
+        if let Some(regrouped) = regroup_cell_nodes(nodes, spans, &layout, &blanks) {
+            *nodes = regrouped;
+        }
+    }
+}
+
+/// `nodes` rearranged into `layout`'s blocks (see
+/// [`super::docx_tree::rich_cell_layout`]): each block's elements' nodes in
+/// order, a list item opening a new list exactly at the start of a block.
+/// A blank paragraph the layout leaves out was deleted upstream and is
+/// dropped; `None` when any other element that rendered something is
+/// missing — the cell then keeps its own order.
+fn regroup_cell_nodes(
+    nodes: &[Node],
+    spans: &[(roxmltree::NodeId, std::ops::Range<usize>)],
+    layout: &[Vec<roxmltree::NodeId>],
+    blanks: &std::collections::HashSet<roxmltree::NodeId>,
+) -> Option<Vec<Node>> {
+    let placed: std::collections::HashSet<_> = layout.iter().flatten().collect();
+    if spans
+        .iter()
+        .any(|(id, range)| !range.is_empty() && !placed.contains(id) && !blanks.contains(id))
+    {
+        return None;
+    }
+    let mut out = Vec::with_capacity(nodes.len());
+    for block in layout {
+        let mut first = true;
+        for id in block {
+            let Some((_, range)) = spans.iter().find(|(s, _)| s == id) else {
+                continue;
+            };
+            for node in &nodes[range.clone()] {
+                let mut node = node.clone();
+                if let Node::ListItem { first_in_list, .. } = &mut node {
+                    *first_in_list = first;
+                }
+                first = false;
+                out.push(node);
+            }
+        }
+    }
+    Some(out)
 }
 
 /// A rich cell's DocLang block content — the structured counterpart of
@@ -1925,7 +2043,9 @@ fn cell_blocks_of(tc: XmlNode, ctx: &Ctx) -> Vec<Node> {
     }
     let mut sub = DoclingDocument::new("");
     let mut state = ListState::default();
+    let mut spans: Vec<(roxmltree::NodeId, std::ops::Range<usize>)> = Vec::new();
     for child in child_elements(tc) {
+        let start = sub.nodes.len();
         match child.tag_name().name() {
             "p" => handle_paragraph_inner(child, ctx, &mut state, &mut sub, true, false),
             "tbl" => {
@@ -1935,7 +2055,9 @@ fn cell_blocks_of(tc: XmlNode, ctx: &Ctx) -> Vec<Node> {
             }
             _ => {}
         }
+        spans.push((child.id(), start..sub.nodes.len()));
     }
+    regroup_rich_cell(tc, ctx, &mut sub.nodes, &spans);
     sub.nodes
 }
 
