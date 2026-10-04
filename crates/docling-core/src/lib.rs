@@ -19,6 +19,7 @@ pub mod doctags;
 mod document;
 pub mod env;
 mod html;
+pub mod jpeg;
 mod json;
 mod labels;
 mod latex;

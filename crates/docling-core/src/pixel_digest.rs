@@ -4,13 +4,19 @@
 //! docling-core's `PictureItem._image_to_hexhash` hashes `PIL img.tobytes()` —
 //! the *decoded* pixel buffer in the image's PIL mode — not the encoded file,
 //! so the `image_{NNNNNN}_{sha256}.png` names of a referenced-image export are
-//! independent of how the PNG was compressed. For a PNG source that buffer is
-//! fully determined by the file: Pillow's `PngImagePlugin` maps every
-//! (bit depth, colour type) pair to one mode/rawmode (`_MODES`), and the
-//! backends' PNG round-trip (`save(format="PNG")` + reopen) keeps that mode.
-//! [`pil_png_digest`] reproduces the same bytes from the raw (untransformed)
-//! samples. Other encodings (JPEG's IDCT, GIF, …) are not reproduced and keep
-//! the encoded-bytes digest.
+//! independent of how the PNG was compressed. That buffer is reproduced here
+//! for the two encodings office documents embed:
+//!
+//! - **PNG**: Pillow's `PngImagePlugin` maps every (bit depth, colour type)
+//!   pair to one mode/rawmode (`_MODES`), and the backends' PNG round-trip
+//!   (`save(format="PNG")` + reopen) keeps that mode; [`pil_png_bytes`]
+//!   rebuilds the bytes from the raw (untransformed) samples.
+//! - **JPEG**: Pillow decodes through libjpeg(-turbo) at its defaults, which
+//!   [`crate::jpeg`] reproduces byte for byte (gray → `L`, otherwise `RGB`;
+//!   CMYK is left out — PIL cannot write it as PNG, so docling's office
+//!   backends never keep such an image).
+//!
+//! Anything else (GIF, BMP, EMF, …) keeps the encoded-bytes digest.
 
 use sha2::{Digest, Sha256};
 
@@ -22,15 +28,61 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// The asset digest of an embedded image: docling's pixel hash when the
-/// image is a PNG we can decode, else the hash of the encoded bytes.
+/// image is a PNG or JPEG we can decode, else the hash of the encoded bytes.
 pub(crate) fn image_digest(data: &[u8]) -> String {
-    pil_png_digest(data).unwrap_or_else(|| sha256_hex(data))
+    match pil_bytes(data) {
+        Some(px) => sha256_hex(&px),
+        None => sha256_hex(data),
+    }
 }
 
-/// `sha256(PIL.Image.open(png).tobytes())`, or `None` when `data` is not a
-/// decodable PNG.
-pub(crate) fn pil_png_digest(data: &[u8]) -> Option<String> {
-    pil_png_bytes(data).map(|b| sha256_hex(&b))
+/// `PIL.Image.open(data).tobytes()` for a PNG or (gray/RGB) JPEG.
+fn pil_bytes(data: &[u8]) -> Option<Vec<u8>> {
+    if is_png(data) {
+        pil_png_bytes(data)
+    } else {
+        decode_jpeg(data).map(|j| j.data)
+    }
+}
+
+fn is_png(data: &[u8]) -> bool {
+    data.starts_with(b"\x89PNG\r\n\x1a\n")
+}
+
+/// A gray or RGB JPEG decoded like libjpeg (CMYK and anything the decoder
+/// does not support → `None`).
+fn decode_jpeg(data: &[u8]) -> Option<crate::jpeg::Image> {
+    if !data.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    crate::jpeg::decode(data, true, 1)
+        .ok()
+        .filter(|j| matches!(j.channels, 1 | 3))
+}
+
+/// The image as a PNG file — what an archive stores under the asset's
+/// `.png` name (docling writes every picture asset as PNG): a PNG source
+/// as-is, a gray/RGB JPEG re-encoded from its libjpeg pixels (the same ones
+/// the digest covers). `None` for other encodings, which the caller converts
+/// with a general-purpose decoder if it has one.
+pub(crate) fn asset_png(data: &[u8]) -> Option<Vec<u8>> {
+    if is_png(data) {
+        return Some(data.to_vec());
+    }
+    let j = decode_jpeg(data)?;
+    let mut buf = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut buf, j.width as u32, j.height as u32);
+        enc.set_color(if j.channels == 1 {
+            png::ColorType::Grayscale
+        } else {
+            png::ColorType::Rgb
+        });
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().ok()?;
+        w.write_image_data(&j.data).ok()?;
+    }
+    Some(buf)
 }
 
 /// The bytes `PIL.Image.open(png).tobytes()` returns for a PNG.
@@ -44,9 +96,6 @@ pub(crate) fn pil_png_digest(data: &[u8]) -> Option<String> {
 /// `info["transparency"]`, never the mode, so it does not enter the bytes.
 fn pil_png_bytes(data: &[u8]) -> Option<Vec<u8>> {
     use png::{BitDepth, ColorType};
-    if !data.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return None;
-    }
     let mut dec = png::Decoder::new(std::io::Cursor::new(data));
     dec.set_transformations(png::Transformations::IDENTITY);
     let mut reader = dec.read_info().ok()?;
@@ -103,6 +152,20 @@ fn unpack(row: &[u8], depth: u8, w: usize) -> impl Iterator<Item = u8> + '_ {
         let shift = 8 - depth as usize * (i % per + 1);
         (row[i / per] >> shift) & mask
     })
+}
+
+/// The `(mimetype, data: URI)` docling writes for an inline image:
+/// `ImageRef.from_pil` always stores a PNG, so a JPEG is re-encoded from its
+/// libjpeg pixels (the same pixels docling's PIL decode yields); a PNG — or
+/// an encoding we cannot decode — keeps its bytes and its own type.
+pub(crate) fn docling_data_uri(img: &crate::PictureImage) -> (String, String) {
+    match asset_png(&img.data) {
+        Some(png) if !is_png(&img.data) => (
+            "image/png".to_string(),
+            format!("data:image/png;base64,{}", crate::base64::encode(&png)),
+        ),
+        _ => (img.mimetype.clone(), img.data_uri()),
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +227,39 @@ mod tests {
         // LA;16B → RGBA.
         let f = png(1, 1, 16, 4, &[&[7, 8, 9, 10]], None);
         assert_eq!(pil_png_bytes(&f).unwrap(), vec![7, 7, 7, 9]);
+    }
+
+    /// docling-pdf's libjpeg fixtures (one crate over); digests from Pillow
+    /// 12.3: `sha256(Image.open(f).tobytes())`, unchanged by the PNG round-trip.
+    #[test]
+    fn jpeg_digest_is_pillows_libjpeg_decode() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docling-pdf/tests/data/jpeg");
+        for (name, want) in [
+            (
+                "rgb_420",
+                "50690f45a9c80a48b5e2e0e38008cd3ac26b8d92af24f2acddbdabcb6ec0c4c1",
+            ),
+            (
+                "gray_progressive",
+                "dc231f8f1ef7b807f59587511af8a8d1b830b4e0cff8a185aa16188195641f06",
+            ),
+            (
+                "rgb_444_progressive",
+                "e78a1d2a7181f6781e71b695d918f431e8735ecea30fc14983206f5cbd214a1e",
+            ),
+        ] {
+            let Ok(jpg) = std::fs::read(dir.join(format!("{name}.jpg"))) else {
+                return; // a packaged docling-core has no sibling crate
+            };
+            assert_eq!(image_digest(&jpg), want, "{name}");
+            // The archive part is a PNG of exactly those pixels.
+            let png = asset_png(&jpg).unwrap();
+            assert_eq!(
+                pil_png_bytes(&png).map(|b| sha256_hex(&b)).as_deref(),
+                Some(want)
+            );
+        }
     }
 
     #[test]

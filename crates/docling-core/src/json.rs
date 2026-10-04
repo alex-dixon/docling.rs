@@ -232,13 +232,15 @@ fn track_json(t: &crate::tree::TreeTrack) -> Value {
 }
 
 /// docling-core's `ImageRef` (pydantic field order: mimetype, dpi, size —
-/// as floats — uri), with the bytes inlined as a `data:` URI.
+/// as floats — uri), with the bytes inlined as a `data:` URI — a PNG, like
+/// `ImageRef.from_pil`'s (`pixel_digest::docling_data_uri`).
 fn image_ref_json(img: &crate::PictureImage) -> Value {
+    let (mimetype, uri) = crate::pixel_digest::docling_data_uri(img);
     json!({
-        "mimetype": img.mimetype,
+        "mimetype": mimetype,
         "dpi": img.dpi,
         "size": { "width": img.width as f64, "height": img.height as f64 },
-        "uri": img.data_uri(),
+        "uri": uri,
     })
 }
 

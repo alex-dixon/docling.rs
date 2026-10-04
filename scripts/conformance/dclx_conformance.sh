@@ -61,9 +61,10 @@ for fmt in "${fmts[@]}"; do
       unzip -p "$ours" document.xml > "$tmp/ours.xml" 2>/dev/null
       # Canonicalize the digest of exported image asset names. docling names
       # referenced images assets/image_NNNNNN_<sha256>.png, the digest over the
-      # decoded pixels (PIL `tobytes()`). We reproduce it for PNG sources
-      # (docling-core pixel_digest.rs) and the index for every picture, but not
-      # for JPEG (libjpeg's IDCT) or LibreOffice-rendered EMF/DrawingML, so only
+      # decoded pixels (PIL `tobytes()`). We reproduce it for PNG and JPEG
+      # sources (docling-core pixel_digest.rs) and the index for every picture
+      # — every reference in the corpus matches — but a LibreOffice-rendered
+      # EMF/DrawingML picture (docling with soffice installed) cannot, so only
       # the digest is normalized: a wrong index or a missing/extra <src> shows.
       sed -E -i 's#(image_[0-9]{6})_[0-9a-f]+\.png#\1_NORM.png#g' \
         "$tmp/ref.xml" "$tmp/ours.xml"

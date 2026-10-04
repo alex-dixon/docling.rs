@@ -518,11 +518,14 @@ fn process_block(node: XmlNode, ctx: &Ctx, state: &mut ListState, doc: &mut Docl
                 }
             } else if let Some(table) = parse_table(node, ctx) {
                 doc.push(Node::Table(table));
-                // docling leaves an empty inline group on the body for every
-                // multi-run paragraph of a rich cell (its runs move into the
-                // cell group); DocLang writes each as `<text></text>`, the
-                // other serializers write nothing.
-                for _ in 0..ctx.orphan_inline_groups.replace(0) {
+                // docling leaves an empty inline group at `parents[level-1]`
+                // for every multi-run paragraph of a rich cell (its runs move
+                // into the cell group). DocLang wraps it as `<text></text>`
+                // under the body, but not under a heading `TextItem` — where
+                // it sits once a heading was emitted (`seen_heading`); the
+                // other serializers write nothing either way.
+                let orphans = ctx.orphan_inline_groups.replace(0);
+                for _ in 0..if state.seen_heading { 0 } else { orphans } {
                     doc.push(Node::DoclangOnly(Box::new(Node::Paragraph {
                         text: String::new(),
                     })));

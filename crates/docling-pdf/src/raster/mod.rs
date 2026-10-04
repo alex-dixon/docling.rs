@@ -40,7 +40,9 @@
 
 pub mod fax;
 pub mod filters;
-pub mod jpeg;
+pub use docling_core::jpeg;
+#[cfg(test)]
+mod jpeg_tests;
 pub mod stretch;
 
 use std::collections::HashMap;
