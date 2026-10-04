@@ -27,10 +27,11 @@ older, pypdfium2-era docling's and the pipeline was scored with OCR on.
 **9 / 18 strict** · **10 / 18 whitespace-normalized** against upstream's
 current groundtruth (docling ≥ 2.123: docling-parse render, `do_ocr=False`,
 `compact_tables=True`; 18 fixtures — `table_misidentified_as_form`
-(docling#4064) joined the corpus with this refresh). Total 374 diff lines with
-the docling-parse renderer the baselines are measured with; the default
-build's pure-Rust renderer scores 454 on the same files ("The PDF
-stack" below). (The two Korean image-only pages `skipped_1page` /
+(docling#4064) joined the corpus with this refresh). Total 346 diff lines with
+the docling-parse renderer the baselines are measured with (374 before #528
+recovered redp5110's rotated table headers); the default build's pure-Rust
+renderer scored 454 on the same files before that change ("The PDF stack"
+below). (The two Korean image-only pages `skipped_1page` /
 `skipped_2pages` carry no text groundtruth and are not scored.)
 
 | PDF | diff | dominant remaining blocker |
@@ -50,7 +51,7 @@ stack" below). (The two Korean image-only pages `skipped_1page` /
 | 2206.01062 | 22 | author-block cluster splits (model-borderline) |
 | table_misidentified_as_form | 48 | the form container's nested table / picture (docling#4064): docling nests them inside the form region and keeps the heading, we flatten the region |
 | table_mislabeled_as_picture | 85 | the survey over-detected as tables; docling keeps a cell's leading indentation (`\|   They work in parallel…`) |
-| redp5110_sampled | 180 | TOC: docling's cell matching puts the dot leaders into the page-number column (`. . . . . . . vii`), ours keeps them with the title (`. vii`); cover-page ordering |
+| redp5110_sampled | 152 | TOC: docling's cell matching puts the dot leaders into the page-number column (`. . . . . . . vii`), ours keeps them with the title (`. vii`); cover-page ordering |
 
 Measured on the current tree with `scripts/conformance/pdf_groundtruth.sh`
 (`--skip-ocr --compact-tables`, docling-parse renderer). Two ports landed with
@@ -244,7 +245,7 @@ diff history of each port lives in the git log of these files).
 | RapidOCR's text detection (#429) | the `PP-OCRv6_det_small` DB detector runs over a bitmap page alongside layout and adds the lines no recognized cell covers (> 30 % overlap = covered, cumulatively) as orphan cells (confidence 1.0); input capped at 960 px a side (`DOCLING_RS_OCR_DET_MAX_SIDE`, PaddleOCR's default, ~⅓ the time); without the model OCR stays region-scoped | `ocr_det.rs`, `Worker::detect_alongside` |
 | pdfium's `CPDF_Page` frame, docling#4008 | glyphs, link rects and the page size live in the `CropBox ∩ MediaBox` frame with `/Rotate` applied to the display frame, so a trimmed book page or a rotated digital page lines its cells up with the render | `textparse::page_box`, `pdfium_backend::to_display_frame` |
 | docling-parse's page-box filter (#529) | a glyph is kept only when its whole char box (advance × the font's ascent / descent) lies inside the display box — the CropBox, else the MediaBox — edges included: a FrameMaker print slug beside the CropBox or a tiled page's neighbouring text beyond the MediaBox never becomes a cell (it used to be clamped onto the page edge, often to zero width), and a line crossing the edge is cut at the last glyph that fits, as docling-parse cuts it; no corpus page changes | `textparse::on_page` |
-| docling-parse's char rect (`page_cell.h`, #528) | a glyph drawn with a non-upright text matrix — the `0 s -s 0 tx ty Tm` runs landscape `/Rotate 90` pages are built from, 180°/270°, or tilted — keeps its rotated quad, so the corner-distance contraction reads the line in its own reading order and the cell box is the quad's extent (before: zero-width boxes, every such run dropped; 180° read backwards). Upright glyphs keep the plain loose rectangle, so the pinned baselines are untouched | `textparse::show_text`, `dp_lines::build_cells` |
+| docling-parse's char rect (`page_cell.h`, #528) | a glyph drawn with a non-upright text matrix — the `0 s -s 0 tx ty Tm` runs landscape `/Rotate 90` pages are built from, 180°/270°, or tilted — keeps its rotated quad, so the corner-distance contraction reads the line in its own reading order and the cell box is the quad's extent (before: zero-width boxes, every such run dropped; 180° read backwards). Upright glyphs keep the plain loose rectangle, so upright output is byte-identical. redp5110's 90° column headers (`*JOBCTL`, `QIBM_DB_SECADM`, …) now reach TableFormer and the table matches the groundtruth cell for cell (180 → 152 diff lines); the ODF-exported presentations — landscape slides drawn onto a portrait page through a 90° `cm` — get their text layer instead of OCR | `textparse::show_text`, `dp_lines::build_cells` |
 | docling-parse `create_word_cells`, the TeX math encodings, the quote-normalization table | word cells are docling-parse's second contraction over the char cells (space glyphs as barriers, erased after); `CMSY*`/`CMMI*` without an `/Encoding` decode by the TeXbook tables; every curly quote → `'` | `dp_lines.rs`, `textparse.rs` |
 
 **Deliberate deviations** (completeness over the metric; each costs a few

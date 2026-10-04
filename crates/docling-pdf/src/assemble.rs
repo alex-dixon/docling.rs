@@ -829,7 +829,14 @@ pub fn add_orphan_regions(regions: &mut Vec<Region>, cells: &[TextCell]) {
         if let Some(last) = merged.last_mut() {
             let same_line = (last.t - c.t).abs() < h * 0.5;
             let touching = c.l <= last.r + h && c.l >= last.l - h;
-            if same_line && touching {
+            // Both tolerances scale with the cell's own height, so a run set
+            // vertically (the arXiv stamp up the margin, #528 — a cell a few
+            // points wide and hundreds tall) would read as "on the line" of
+            // whatever precedes it and glue a whole column into one region.
+            // Lines of one row differ by a drop cap's few multiples at most.
+            let lh = (last.b - last.t).abs().max(1.0);
+            let comparable = h <= 4.0 * lh && lh <= 4.0 * h;
+            if same_line && touching && comparable {
                 last.l = last.l.min(c.l);
                 last.r = last.r.max(c.r);
                 last.t = last.t.min(c.t);

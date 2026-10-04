@@ -339,11 +339,6 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
         if !g.ll.is_finite() {
             continue;
         }
-        // Drop *degenerate* space glyphs (zero-width loose box): pdfium's generated
-        // spaces get a zero-width box at the wrong baseline that breaks the
-        // corner-distance adjacency. Without them the inter-word gap drives
-        // `merge_with`'s space insertion. Spaces with a real width are kept (they
-        // carry justified double-space information).
         // The char cell's quad: the loose rectangle for upright text, the
         // glyph's own rotated quad otherwise (#528) — the contraction below
         // works on corners and edge lengths, so it reads a 90°/180°/270° line
@@ -352,28 +347,27 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
             let (l, b, r, t) = (g.ll as f64, g.lb as f64, g.lr as f64, g.lt as f64);
             [l, b, r, b, r, t, l, t]
         });
-        // The advance is the baseline edge — a rotated glyph's x extent is
-        // its em height, which would keep a zero-advance space.
+        // Drop *degenerate* space glyphs (zero-width loose box): pdfium's generated
+        // spaces get a zero-width box at the wrong baseline that breaks the
+        // corner-distance adjacency. Without them the inter-word gap drives
+        // `merge_with`'s space insertion. Spaces with a real width are kept (they
+        // carry justified double-space information). The width is the baseline
+        // edge — a rotated glyph's x extent is its em height.
         if g.ch == ' ' && (q[2] - q[0]).hypot(q[3] - q[1]) < 0.5 {
             continue;
         }
         // Recompose a ligature: pdfium decomposes one font glyph (Latin fi/ffi,
         // Arabic lam-alef) into several chars at the *same* loose box. Append them
         // into one cell so the contraction never inserts a space inside it.
-        // "Same box" compares the advance span along the baseline — x for
-        // horizontal text, y for a 90°-turned glyph, whose x span is the same
-        // for every glyph of its line.
+        // "Same box": an upright glyph compares its x span (as it always
+        // has); a quad glyph compares both baseline corners as points — its
+        // reading axis is not x, and glyphs stacked at one position along the
+        // baseline (chart ticks set one under another) are separate cells.
         if let Some(last) = cells.last_mut() {
-            let along = |x: f64, y: f64| {
-                if (q[2] - q[0]).abs() >= (q[3] - q[1]).abs() {
-                    x
-                } else {
-                    y
-                }
+            let near = |ax: f64, ay: f64, bx: f64, by: f64| {
+                (ax - bx).abs() < 0.5 && (g.quad.is_none() || (ay - by).abs() < 0.5)
             };
-            if (along(last.rx0, last.ry0) - along(q[0], q[1])).abs() < 0.5
-                && (along(last.rx1, last.ry1) - along(q[2], q[3])).abs() < 0.5
-            {
+            if near(last.rx0, last.ry0, q[0], q[1]) && near(last.rx1, last.ry1, q[2], q[3]) {
                 // Overprint duplicate: the *same* character re-stamped, offset by a
                 // fraction of its width (a kashida/elongation segment re-drawn for
                 // weight). docling-parse drops it; appending over-counts
@@ -381,7 +375,10 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
                 // (> 0.1) so a ligature expansion — which decomposes one glyph into
                 // several chars at the *identical* box (`ﬀ`→`ff`, diff ≈ 0) — is still
                 // recomposed; real doubled letters sit a full advance apart (> 0.5).
-                let offset = (along(q[0], q[1]) - along(last.rx0, last.ry0)).abs();
+                let offset = match g.quad {
+                    None => (q[0] - last.rx0).abs(),
+                    Some(_) => (q[0] - last.rx0).hypot(q[1] - last.ry0),
+                };
                 if euclidean && offset > 0.1 && last.text.ends_with(g.ch) {
                     continue;
                 }
