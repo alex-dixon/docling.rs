@@ -1305,6 +1305,13 @@ impl Builder {
                 self.set_layer(&item, "furniture");
                 Some(item)
             }
+            // A labelled furniture paragraph (a `.doc` header / footer or
+            // note body, #535): the item docling's office backends write.
+            Node::FurnitureText { label, text } => {
+                let item = self.add_text(label, text, parent, json!({}));
+                self.set_layer(&item, "furniture");
+                Some(item)
+            }
             // A PDF picture's contained text (docling's `_add_child_elements`):
             // items parented to the picture just written, listed after its
             // caption in that picture's `children`.

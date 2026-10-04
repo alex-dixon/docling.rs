@@ -636,7 +636,7 @@ impl Walker<'_> {
             // A PDF page header/footer is a furniture-layer JSON text item:
             // never chunked (docling's chunker reads the body layer), but it
             // takes a `#/texts/N` number, so later refs keep matching the JSON.
-            Node::PageFurniture { .. } => {
+            Node::PageFurniture { .. } | Node::FurnitureText { .. } => {
                 self.alloc.text();
             }
             // A picture's children are JSON items docling's chunker never

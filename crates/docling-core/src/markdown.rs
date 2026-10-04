@@ -707,7 +707,7 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         // Furniture (page headers/footers, HTML `<title>`) is excluded from
         // Markdown by default, mirroring docling.
         Node::Furniture { .. } => {}
-        Node::PageFurniture { .. } => {}
+        Node::PageFurniture { .. } | Node::FurnitureText { .. } => {}
         // A picture's contained text is JSON-only: docling's Markdown picture
         // serializer prints the caption and the image, never the children.
         Node::PictureChildren(_) => {}

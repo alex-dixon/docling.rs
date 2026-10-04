@@ -21,7 +21,17 @@
 //! anchor → `sprmCPicLocation` → PICF in the Data stream) and floating
 //! (`0x08` anchor → PlcfSpa → the drawing's shape → BLIP store, with
 //! delay-stream data in `WordDocument`), decoded via [`officeart`].
-//! Footnotes and headers/footers remain out of scope.
+//!
+//! The other **stories** (#535) follow the main text in the same CP space —
+//! footnotes (`ccpFtn`), headers/footers (`ccpHdd`), comments, endnotes,
+//! text boxes (`ccpTxbx`) — and are read too: a text box's story
+//! (`PlcftxbxTxt`, linked to its shape by `lid`) is placed at the shape's
+//! anchor (a `textbox` section group, or extra paragraphs of the table cell
+//! it is anchored in, as the DOCX backend reads the same document); each
+//! section's header/footer stories (`PlcfHdd`, after the six separator
+//! stories) become `page_header` / `page_footer` furniture; footnote and
+//! endnote bodies (`PlcffndTxt` / `PlcfendTxt`) `footnote` furniture after
+//! the body. Comments and header text boxes are not read.
 //!
 //! The FIB is read through [`Fib`], which locates `fibRgLw` and
 //! `fibRgFcLcb` from the counts the stream itself declares (`csw`, `cslw`,
@@ -133,49 +143,297 @@ impl DeclarativeBackend for DocBackend {
         let spa = parse_plcf_spa(fib.part(&table, Fib::PLCSPA_MOM));
         let drawings = Drawings::parse(fib.part(&table, Fib::DGG_INFO), &word);
 
+        // The stories follow each other in one CP space ([MS-DOC] 2.3.1):
+        // main text, footnotes, headers, comments, endnotes, text boxes.
+        let ftn_base = ccp_text;
+        let hdd_base = ftn_base + fib.ccp_ftn as u64;
+        let edn_base = hdd_base + fib.ccp_hdd as u64 + fib.ccp_atn as u64;
+        let txbx_base = edn_base + fib.ccp_edn as u64;
+        let story = Story {
+            word: &word,
+            pieces: &pieces,
+            bte,
+            btec,
+            stis: &stis,
+            data: &data,
+            spa: &spa,
+            drawings: &drawings,
+            textboxes: parse_textboxes(
+                fib.part(&table, Fib::PLCF_TXBX_TXT),
+                txbx_base,
+                fib.ccp_txbx as u64,
+            ),
+            placed: Default::default(),
+            lists: &lists,
+        };
+
         // Walk the main-document text paragraph by paragraph, assembling nodes.
         let mut doc = DoclingDocument::new(&source.name);
-        let mut builder = NodeBuilder::new(lists);
+        story.walk(&mut chpx_cache, 0, ccp_text, true, &mut doc);
+        // A text box no anchor in the main text placed (its shape lives in a
+        // header, or the drawing tables disagree) still reaches the document:
+        // at the end of the body, in story order.
+        let mut unplaced: Vec<(u64, u64)> = story
+            .textboxes
+            .iter()
+            .filter(|(spid, _)| !story.placed.borrow().contains(spid))
+            .map(|(_, &range)| range)
+            .collect();
+        unplaced.sort_unstable();
+        for (a, b) in unplaced {
+            let mut inner = DoclingDocument::new("");
+            story.walk(&mut chpx_cache, a, b, false, &mut inner);
+            if !inner.nodes.is_empty() {
+                doc.push(Node::Group {
+                    label: "section".into(),
+                    name: Some("textbox".into()),
+                    layer: None,
+                    children: inner.nodes,
+                });
+            }
+        }
+
+        // The other stories (#535): headers/footers, then the note bodies —
+        // furniture, after the body, where the DOCX backend puts them.
+        for (footer, text) in header_footer_texts(
+            &story,
+            &mut chpx_cache,
+            fib.part(&table, Fib::PLCF_HDD),
+            hdd_base,
+            fib.ccp_hdd as u64,
+        ) {
+            doc.push(Node::FurnitureText {
+                label: if footer { "page_footer" } else { "page_header" }.into(),
+                text,
+            });
+        }
+        for (refs, txt, base, len) in [
+            (Fib::PLCF_FND_REF, Fib::PLCF_FND_TXT, ftn_base, fib.ccp_ftn),
+            (Fib::PLCF_END_REF, Fib::PLCF_END_TXT, edn_base, fib.ccp_edn),
+        ] {
+            for text in note_texts(
+                &story,
+                &mut chpx_cache,
+                fib.part(&table, refs),
+                fib.part(&table, txt),
+                base,
+                len as u64,
+            ) {
+                doc.push(Node::FurnitureText {
+                    label: "footnote".into(),
+                    text,
+                });
+            }
+        }
+        Ok(doc)
+    }
+}
+
+/// One Word 97 document's text, for walking any of its stories: the piece
+/// table over the whole CP space and the lookups a paragraph needs.
+struct Story<'a> {
+    word: &'a [u8],
+    pieces: &'a [Piece],
+    bte: &'a [u8],
+    btec: &'a [u8],
+    stis: &'a [StyleDef],
+    data: &'a [u8],
+    spa: &'a [(u64, u32)],
+    drawings: &'a Drawings,
+    /// Shape id → its text box story, as absolute CPs (`[start, end)`).
+    textboxes: std::collections::HashMap<u32, (u64, u64)>,
+    /// The text boxes placed at an anchor so far (shape ids).
+    placed: std::cell::RefCell<std::collections::HashSet<u32>>,
+    lists: &'a ListTables,
+}
+
+impl Story<'_> {
+    /// The character at absolute `cp` and its FC, via the piece table.
+    fn char_at(&self, cp: u64) -> Option<(char, u64)> {
+        let k = self.pieces.partition_point(|p| p.cp_end <= cp);
+        let piece = self.pieces.get(k).filter(|p| p.cp_start <= cp)?;
+        let i = cp - piece.cp_start;
+        Some((piece_char(self.word, piece, i), piece_fc(piece, i)))
+    }
+
+    /// Walk CPs `from..to` paragraph by paragraph into `doc`. Only the main
+    /// story places text boxes (`textboxes`): a text box's own story never
+    /// anchors another.
+    fn walk(
+        &self,
+        cache: &mut ChpxCache,
+        from: u64,
+        to: u64,
+        textboxes: bool,
+        doc: &mut DoclingDocument,
+    ) {
+        let mut builder = NodeBuilder::new(self.lists.clone());
         let mut para = ParaAccum::default();
-        let mut cp: u64 = 0;
-        'pieces: for piece in &pieces {
-            let count = piece.cp_end.saturating_sub(piece.cp_start);
-            for i in 0..count {
-                if cp >= ccp_text {
-                    break 'pieces;
+        for cp in from..to {
+            let Some((ch, fc)) = self.char_at(cp) else {
+                break;
+            };
+            match ch {
+                '\r' | '\u{0007}' | '\u{000C}' => {
+                    // Paragraph / cell / page mark: property lookup is by
+                    // the mark's own FC.
+                    let props = paragraph_props(self.word, self.bte, fc);
+                    para.finish(ch, props, self.stis, &mut builder, doc);
                 }
-                let ch = piece_char(&word, piece, i);
-                let fc = piece_fc(piece, i);
-                cp += 1;
-                match ch {
-                    '\r' | '\u{0007}' | '\u{000C}' => {
-                        // Paragraph / cell / page mark: property lookup is by
-                        // the mark's own FC.
-                        let props = paragraph_props(&word, bte, fc);
-                        para.finish(ch, props, &stis, &mut builder, &mut doc);
+                // Inline picture anchor: the run's CHPX locates the PICF.
+                '\u{0001}' => {
+                    if let Some(pic_fc) = cache.props(self.word, self.btec, fc).pic_fc {
+                        para.add_picture(inline_picture(self.data, pic_fc));
                     }
-                    // Inline picture anchor: the run's CHPX locates the PICF.
-                    '\u{0001}' => {
-                        if let Some(pic_fc) = chpx_cache.props(&word, btec, fc).pic_fc {
-                            para.add_picture(inline_picture(&data, pic_fc));
+                }
+                // Floating-shape anchor: PlcfSpa maps this CP to a shape — its
+                // pictures, and its text box story (#535).
+                '\u{0008}' => {
+                    if let Some(spid) = spa_shape_at(self.spa, cp) {
+                        for image in self.drawings.shape_pictures(spid, 0) {
+                            para.add_picture(image);
                         }
-                    }
-                    // Floating-shape anchor: PlcfSpa maps this CP to a shape.
-                    '\u{0008}' => {
-                        if let Some(spid) = spa_shape_at(&spa, cp - 1) {
-                            for image in drawings.shape_pictures(spid, 0) {
-                                para.add_picture(image);
+                        if let Some(&(a, b)) = self.textboxes.get(&spid).filter(|_| textboxes) {
+                            self.placed.borrow_mut().insert(spid);
+                            let mut inner = DoclingDocument::new("");
+                            self.walk(cache, a, b, false, &mut inner);
+                            if !inner.nodes.is_empty() {
+                                para.textboxes.push(inner.nodes);
                             }
                         }
                     }
-                    _ => para.push(ch, chpx_cache.props(&word, btec, fc)),
+                }
+                _ => para.push(ch, cache.props(self.word, self.btec, fc)),
+            }
+        }
+        para.finish('\r', ParaProps::default(), self.stis, &mut builder, doc);
+        builder.flush(doc);
+    }
+
+    /// The plain text of CPs `from..to`, one entry per non-empty paragraph
+    /// (fields resolved to their results, note reference marks dropped) —
+    /// header/footer and note bodies.
+    fn paragraphs(&self, cache: &mut ChpxCache, from: u64, to: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut para = ParaAccum::default();
+        for cp in from..to {
+            let Some((ch, fc)) = self.char_at(cp) else {
+                break;
+            };
+            match ch {
+                '\r' | '\u{0007}' | '\u{000C}' => {
+                    let text = para.plain().trim().to_string();
+                    para.segments.clear();
+                    para.field_stack.clear();
+                    if !text.is_empty() {
+                        out.push(text);
+                    }
+                }
+                _ => para.push(ch, cache.props(self.word, self.btec, fc)),
+            }
+        }
+        let text = para.plain().trim().to_string();
+        if !text.is_empty() {
+            out.push(text);
+        }
+        out
+    }
+}
+
+/// `PlcftxbxTxt` ([MS-DOC] 2.8.28): `n + 1` CPs into the text box story,
+/// then `n` 22-byte FTXBXS whose `lid` (at byte 14) is the shape id of the
+/// box showing that story — what PlcfSpa's anchors name. Word appends a
+/// dummy last entry (`lid` 0 / -1), skipped. Ranges come back absolute
+/// (`base` = the text box story's first CP), clamped to its `len`.
+fn parse_textboxes(plc: &[u8], base: u64, len: u64) -> std::collections::HashMap<u32, (u64, u64)> {
+    let mut out = std::collections::HashMap::new();
+    if plc.len() < 4 {
+        return out;
+    }
+    let n = (plc.len() - 4) / (4 + 22);
+    for i in 0..n {
+        let (Some(a), Some(b)) = (u32_at(plc, i * 4), u32_at(plc, i * 4 + 4)) else {
+            break;
+        };
+        let Some(lid) = u32_at(plc, (n + 1) * 4 + i * 22 + 14) else {
+            break;
+        };
+        let (a, b) = (a as u64, (b as u64).min(len));
+        if lid != 0 && lid != u32::MAX && b > a {
+            out.insert(lid, (base + a, base + b));
+        }
+    }
+    out
+}
+
+/// Each section's header / footer text (#535): `PlcfHdd`'s CPs into the
+/// header story — six separator stories first, then per section even /
+/// odd (default) / first header and footer, as `(is_footer, paragraph)`
+/// in reading order (default, first, even — headers before footers), each
+/// distinct paragraph once.
+fn header_footer_texts(
+    story: &Story,
+    cache: &mut ChpxCache,
+    plc: &[u8],
+    base: u64,
+    len: u64,
+) -> Vec<(bool, String)> {
+    let cps: Vec<u64> = plc
+        .chunks_exact(4)
+        .filter_map(|c| u32_at(c, 0).map(u64::from))
+        .collect();
+    let mut out: Vec<(bool, String)> = Vec::new();
+    let mut section = 6;
+    while section + 6 < cps.len() {
+        // Story order within a section: even hdr, odd hdr, even ftr, odd
+        // ftr, first hdr, first ftr.
+        for (k, footer) in [
+            (1, false),
+            (4, false),
+            (0, false),
+            (3, true),
+            (5, true),
+            (2, true),
+        ] {
+            let (a, b) = (cps[section + k], cps[section + k + 1].min(len));
+            if a >= b {
+                continue;
+            }
+            for text in story.paragraphs(cache, base + a, base + b) {
+                if !out.iter().any(|(f, t)| *f == footer && *t == text) {
+                    out.push((footer, text));
                 }
             }
         }
-        para.finish('\r', ParaProps::default(), &stis, &mut builder, &mut doc);
-        builder.flush(&mut doc);
-        Ok(doc)
+        section += 6;
     }
+    out
+}
+
+/// The footnote (or endnote) bodies (#535): `refs` (PlcffndRef: `n + 1`
+/// CPs + `n` 2-byte FRDs) says how many there are; `txt` (PlcffndTxt) gives
+/// each one's CPs in its story, starting at `base`. A note's paragraphs
+/// are joined with a space, like the DOCX backend's.
+fn note_texts(
+    story: &Story,
+    cache: &mut ChpxCache,
+    refs: &[u8],
+    txt: &[u8],
+    base: u64,
+    len: u64,
+) -> Vec<String> {
+    if refs.len() < 4 || len == 0 {
+        return Vec::new();
+    }
+    let n = (refs.len() - 4) / 6;
+    (0..n)
+        .filter_map(|i| {
+            let a = u32_at(txt, i * 4)? as u64;
+            let b = (u32_at(txt, i * 4 + 4)? as u64).min(len);
+            (a < b).then(|| story.paragraphs(cache, base + a, base + b).join(" "))
+        })
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// The Word 97+ FIB, located from the counts the stream declares
@@ -186,6 +444,14 @@ impl DeclarativeBackend for DocBackend {
 /// non-standard or truncated FIB from silently reading garbage.
 struct Fib<'a> {
     ccp_text: u32,
+    /// The other stories' lengths in CPs, in their CP-space order after the
+    /// main text ([MS-DOC] 2.5.4 `FibRgLw97`); 0 when the FIB is too short
+    /// to say.
+    ccp_ftn: u32,
+    ccp_hdd: u32,
+    ccp_atn: u32,
+    ccp_edn: u32,
+    ccp_txbx: u32,
     /// `fibRgFcLcbBlob`: `(fc, lcb)` u32 pairs.
     fc_lcb: &'a [u8],
 }
@@ -193,11 +459,17 @@ struct Fib<'a> {
 impl<'a> Fib<'a> {
     /// Indices into `FibRgFcLcb97` (each an 8-byte `fc`/`lcb` pair).
     const STSHF: usize = 1;
+    const PLCF_FND_REF: usize = 2;
+    const PLCF_FND_TXT: usize = 3;
+    const PLCF_HDD: usize = 11;
     const PLCF_BTE_CHPX: usize = 12;
     const PLCF_BTE_PAPX: usize = 13;
     const CLX: usize = 33;
     const PLCSPA_MOM: usize = 40;
+    const PLCF_END_REF: usize = 46;
+    const PLCF_END_TXT: usize = 47;
     const DGG_INFO: usize = 50;
+    const PLCF_TXBX_TXT: usize = 56;
     const PLF_LST: usize = 73;
     const PLF_LFO: usize = 74;
 
@@ -218,13 +490,29 @@ impl<'a> Fib<'a> {
             )));
         }
         let ccp_text = u32_at(word, lw_at + 12).ok_or_else(|| short("ccpText", lw_at + 16))?;
+        // `fibRgLw` index → CP count, when the writer's `cslw` covers it.
+        let lw = |i: usize| {
+            if i < cslw {
+                u32_at(word, lw_at + i * 4).unwrap_or(0)
+            } else {
+                0
+            }
+        };
         let cb_at = lw_at + cslw * 4;
         let cb = u16_at(word, cb_at).ok_or_else(|| short("cbRgFcLcb", cb_at + 2))? as usize;
         let blob_at = cb_at + 2;
         let fc_lcb = word
             .get(blob_at..blob_at + cb * 8)
             .ok_or_else(|| short("fibRgFcLcbBlob", blob_at + cb * 8))?;
-        Ok(Self { ccp_text, fc_lcb })
+        Ok(Self {
+            ccp_text,
+            ccp_ftn: lw(4),
+            ccp_hdd: lw(5),
+            ccp_atn: lw(7),
+            ccp_edn: lw(8),
+            ccp_txbx: lw(9),
+            fc_lcb,
+        })
     }
 
     /// The `index`-th `(fc, lcb)` pair; `(0, 0)` — "absent" — past the
@@ -928,7 +1216,7 @@ struct LvlInfo {
 
 /// The document's list tables: `ilfo` (1-based, from `sprmPIlfo`) resolves
 /// through the LFO array to a list (`lsid`) and its per-level numbering.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ListTables {
     /// LFO index (0-based) → lsid.
     lfo_lsids: Vec<u32>,
@@ -1031,6 +1319,8 @@ struct ParaAccum {
     /// Result-text state of any field (`0x13 code 0x14 result 0x15`) stack:
     /// characters inside the *code* part are dropped.
     field_stack: Vec<bool>, // true = in result part
+    /// Text boxes anchored in this paragraph, each its story's nodes (#535).
+    textboxes: Vec<Vec<Node>>,
 }
 
 impl ParaAccum {
@@ -1118,9 +1408,10 @@ impl ParaAccum {
         let plain = self.plain();
         let markdown = self.markdown();
         let pictures = std::mem::take(&mut self.pictures);
+        let textboxes = std::mem::take(&mut self.textboxes);
         self.segments.clear();
         self.field_stack.clear();
-        builder.paragraph(plain, markdown, pictures, mark, props, stis, doc);
+        builder.paragraph(plain, markdown, pictures, textboxes, mark, props, stis, doc);
     }
 }
 
@@ -1160,6 +1451,7 @@ impl NodeBuilder {
         plain: String,
         markdown: String,
         pictures: Vec<(bool, Option<PictureImage>)>,
+        textboxes: Vec<Vec<Node>>,
         mark: char,
         props: ParaProps,
         stis: &[StyleDef],
@@ -1184,12 +1476,32 @@ impl NodeBuilder {
             }
             self.cell_text
                 .push_str(markdown.trim_end_matches('\u{0007}'));
+            // A text box anchored in the cell: its paragraphs are more of the
+            // cell's (#535), as the DOCX backend reads the same document.
+            for text in textboxes.iter().flatten().filter_map(node_text) {
+                if !self.cell_text.is_empty() {
+                    self.cell_text.push_str("\n\n");
+                }
+                self.cell_text.push_str(&text);
+            }
             if mark == '\u{0007}' {
                 self.cells.push(std::mem::take(&mut self.cell_text));
             }
             return;
         }
         self.flush(doc);
+        // Text boxes anchored here (#535): a `textbox` section group each, in
+        // front of the anchoring paragraph — the DOCX backend's shape.
+        for children in textboxes {
+            doc.push(Node::Group {
+                label: "section".into(),
+                name: Some("textbox".into()),
+                layer: None,
+                children,
+            });
+            self.last_ilfo = None;
+            self.run_base = None;
+        }
 
         let picture_node = |image: Option<PictureImage>| Node::Picture {
             caption: None,
@@ -1417,6 +1729,31 @@ impl NodeBuilder {
     }
 }
 
+/// A text box node's text, for placing it in a table cell: a paragraph,
+/// heading or list item's text, a table's cells.
+fn node_text(node: &Node) -> Option<String> {
+    let text = match node {
+        Node::Paragraph { text } | Node::Heading { text, .. } | Node::ListItem { text, .. } => {
+            text.clone()
+        }
+        Node::Table(t) => t
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| !c.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" "),
+        Node::Group { children, .. } => children
+            .iter()
+            .filter_map(node_text)
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => return None,
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
 fn u16_at(d: &[u8], o: usize) -> Option<u16> {
     Some(u16::from_le_bytes(d.get(o..o + 2)?.try_into().ok()?))
 }
@@ -1559,6 +1896,57 @@ mod tests {
         );
         let bytes = std::fs::read(&path).expect("fixture exists");
         SourceDocument::from_bytes(name, InputFormat::Doc, bytes)
+    }
+
+    /// #535: the stories after the main text — a text box anchored in a
+    /// paragraph and one in a table cell, a page header, a footnote — all
+    /// reach the document (Word's own `.doc` of the reporter's repro:
+    /// `debut` + footnote MARKFN + text box MARKTB1, a 2×2 table with text
+    /// box MARKTB2 in cell (2,1), header MARKHDR, `fin`).
+    #[test]
+    fn text_boxes_headers_and_footnotes_are_read() {
+        let path = format!(
+            "{}/tests/data/doc/sources/doc_textbox_header_footnote.doc",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).expect("fixture exists");
+        let doc = DocBackend
+            .convert(&SourceDocument::from_bytes(
+                "doc_textbox_header_footnote.doc",
+                InputFormat::Doc,
+                bytes,
+            ))
+            .expect("converts");
+        let md = doc.export_to_markdown();
+        assert!(md.contains("MARKTB1"), "{md}");
+        // In its cell, not after the table.
+        assert!(md.contains("| MARKTB2 | b2"), "{md}");
+        // Furniture: in the JSON, not the Markdown.
+        assert!(!md.contains("MARKHDR") && !md.contains("MARKFN"), "{md}");
+        let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let furniture: Vec<(String, String)> = json["texts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["content_layer"] == "furniture")
+            .map(|t| {
+                (
+                    t["label"].as_str().unwrap().to_string(),
+                    t["text"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            furniture,
+            vec![
+                ("page_header".to_string(), "MARKHDR".to_string()),
+                ("footnote".to_string(), "MARKFN".to_string()),
+            ]
+        );
+        // The text box sits where it is anchored: right after `debut`.
+        let groups = json["groups"].as_array().unwrap();
+        assert_eq!(groups[0]["name"], "textbox");
+        assert_eq!(json["body"]["children"][1]["$ref"], "#/groups/0");
     }
 
     #[test]

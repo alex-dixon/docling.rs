@@ -308,6 +308,14 @@ pub enum Node {
         location: [u16; 4],
         text: String,
     },
+    /// A furniture-layer text item with an explicit docling label — a page
+    /// header / footer paragraph (`page_header` / `page_footer`) or a note
+    /// body (`footnote`) from a backend that builds no item tree (#535: the
+    /// Word 97 `.doc` stories). The JSON writes a body-parented item of that
+    /// label on the furniture layer; DocLang `<{label}>` with a `<layer
+    /// value="furniture"/>` head (docling-core's own shape); Markdown, LaTeX
+    /// and the chunker leave it out like any furniture.
+    FurnitureText { label: String, text: String },
     /// The text a PDF picture contains, kept the way docling keeps it: every
     /// regular layout cluster > 80 % inside a picture cluster is that
     /// `PictureItem`'s child (`LayoutPostprocessor._set_cluster_children`,
