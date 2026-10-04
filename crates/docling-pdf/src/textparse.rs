@@ -2589,6 +2589,25 @@ mod base14_fonts {
         }
     }
 
+    /// A rotated run past the page edge (a cover's spine title) is dropped
+    /// by the on-page test (#529) — measured on the quad's extent, not the
+    /// zero-width box rotated glyphs used to get — instead of clamping onto
+    /// the edge as a zero-width cell. One inside the page is kept.
+    #[test]
+    fn rotated_text_off_the_page_is_dropped() {
+        const HELV: &[u8] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>";
+        let off = pdf_with_content(
+            HELV,
+            b"BT /F1 1 Tf 0 14 -14 0 -4 200 Tm (Spine title) Tj ET\n",
+        );
+        assert!(cells(&off).is_empty(), "{:?}", cells(&off));
+        let on = pdf_with_content(
+            HELV,
+            b"BT /F1 1 Tf 0 14 -14 0 30 200 Tm (Margin note) Tj ET\n",
+        );
+        assert_eq!(cells(&on).len(), 1);
+    }
+
     /// Upright text keeps the plain loose rectangle — no quad, and the
     /// sanitizer path is the one every pinned PDF baseline was made with.
     #[test]
