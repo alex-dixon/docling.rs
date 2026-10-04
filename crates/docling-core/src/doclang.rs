@@ -953,6 +953,15 @@ fn emit_nodes(out: &mut Out, depth: i32, nodes: &[Node], i: &mut usize, level: u
                 out.push(depth, format!("</{tag}>"));
                 *i += 1;
             }
+            Node::FurnitureText { label, text } => {
+                out.push(depth, format!("<{label}>"));
+                out.push(depth + 1, "<layer value=\"furniture\"/>".to_string());
+                if !text.is_empty() {
+                    out.push(depth + 1, escape_text(text));
+                }
+                out.push(depth, format!("</{label}>"));
+                *i += 1;
+            }
             Node::Table(t) => {
                 emit_table(out, depth, t);
                 *i += 1;
