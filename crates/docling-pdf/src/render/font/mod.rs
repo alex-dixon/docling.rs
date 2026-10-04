@@ -15,6 +15,7 @@
 //! drawn with a host face chosen by [`fallback`].
 
 pub mod cmap;
+pub mod dotsection;
 pub mod encodings;
 pub mod fallback;
 pub mod type1;
@@ -977,7 +978,8 @@ fn cff_matrix(m: ttf_parser::cff::Matrix) -> Mat {
     }
 }
 
-fn sfnt_program(data: Vec<u8>) -> Option<Program> {
+fn sfnt_program(mut data: Vec<u8>) -> Option<Program> {
+    dotsection::strip_sfnt(&mut data);
     let face = ttf_parser::Face::parse(&data, 0).ok()?;
     let tables = face.tables();
     let has_glyf = tables.glyf.is_some();
@@ -999,7 +1001,8 @@ fn sfnt_program(data: Vec<u8>) -> Option<Program> {
     })
 }
 
-fn cff_program(data: Vec<u8>) -> Option<Program> {
+fn cff_program(mut data: Vec<u8>) -> Option<Program> {
+    dotsection::strip(&mut data);
     let table = ttf_parser::cff::Table::parse(&data)?;
     let matrix = cff_matrix(table.matrix());
     let cid_to_gid = cid_map(&table);

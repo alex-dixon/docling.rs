@@ -119,7 +119,13 @@ password is required` — the `pdf_password` snapshot records it).
   Neugebauer model (`render/color.rs`; pure K is (35, 31, 32)), an
   unresolvable glyph as its thin blue box.
 * **Fonts** (`render/font/`): TrueType/OpenType and bare CFF through
-  `ttf-parser`, Type 1 through an own charstring interpreter (`type1.rs`),
+  `ttf-parser` — with the Type 2 `dotsection` operator (`12 0`, a Type 1
+  hint Adobe's converters leave in front of every dot) stripped from the
+  charstrings first (`dotsection.rs`, #531): the spec says to ignore it, but
+  ttf-parser abandons the glyph there, which drew no period and dot-less
+  `i`s, so FrameMaker index pages lost their dot leaders and heron read
+  them as one page-wide `table` instead of `document_index` columns —,
+  Type 1 through an own charstring interpreter (`type1.rs`),
   Type 3 through the glyph procedures, selected per ISO 32000-1 9.6.6 /
   9.7.4 (`/Differences`, base encodings, `cmap` subtable rules, `post`
   names, predefined and embedded CMaps, `/CIDToGIDMap`); fonts without a
@@ -163,13 +169,20 @@ the docling-parse-rendered baselines with the two conformance scripts:
 | model inputs rendered by | snapshots exact (98) | groundtruth (18 files) |
 |---|---|---|
 | docling-parse shim (`DOCLING_RS_RENDERER=docling-parse`, the reference) | 98 | 374 diff lines, 9 strict |
-| **Rust renderer** (the default) | 72 | 454 diff lines, 9 strict |
+| **Rust renderer** (the default) | 60 | 429 diff lines, 9 strict |
 
 Heron's borderline labels move with ±1/255 of anti-aliasing, so the
 snapshots that drift are the ML-borderline ones: the matplotlib heat-map
 figures of `2412.19437`, whose tick-label soup TableFormer reads as
-differently shaped grids (131–139 lines each), `redp5110`'s TOC (98),
-`html_v_otsl_intro_v2` (80), `2203.01017v2` (45). What separates the two
+differently shaped grids (131–139 lines each), `redp5110`'s TOC (103),
+`html_v_otsl_intro_v2` (76), `2203.01017v2` (45). (Re-measured with #531,
+which made the Rust render draw the TOC's dot leaders — the CFF
+`dotsection` fix in "Fonts" above. That moved `redp5110`'s render closer
+to the shim on every page — the TOC's mean |Δ| 1.92 → 1.07 — and left the
+counts where they were: 60/98 either way, the TOC table a borderline read
+for TableFormer under both renders (98 → 103 snapshot lines, 158 → 161
+groundtruth lines). The 72/98 and 454 lines recorded before came from an
+older tree; the drop happened between that run and this one, not in #531.) What separates the two
 renders there is the anti-aliasing of text, not its placement: the ink per
 glyph is the same (17.94 vs 17.71 mean levels on `2206.01062` p2) and there
 is no sub-pixel offset (the best-aligned shift is zero), but tiny-skia puts
@@ -687,7 +700,7 @@ model-level (or by-design) residual each issue closed with:
    drawing rules with tiny-skia's coverage values (mean |Δ| ≈ 1 / 255 against
    the shim — "The PDF stack" above), so the default build's model inputs are
    close to, not identical with, docling's, and heron's borderline labels
-   move on the ML-borderline fixtures (72/98 snapshots exact
+   move on the ML-borderline fixtures (60/98 snapshots exact
    against baselines pinned to the shim). Closing that gap means the 8-bit
    coverage values themselves.
 
