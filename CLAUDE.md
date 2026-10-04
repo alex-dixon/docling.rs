@@ -2,7 +2,8 @@
 
 Rust port of [docling](https://github.com/docling-project/docling): document
 conversion (PDF/Office/HTML/audio/video/…) to Markdown / docling-JSON / DCLX,
-validated for byte-for-byte conformance against upstream Python docling.
+measured against upstream Python docling as the reference — not bound to
+reproduce it byte for byte (see "Conformance & fixtures").
 
 ## Workflow rules
 
@@ -175,11 +176,21 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
 
 ## Conformance & fixtures
 
+- **docling is the reference, not the spec.** Correct, useful output comes
+  first; Python docling's behavior is the default to follow where it is
+  sensible, and the comparison against it is how changes are measured. A
+  deliberate divergence — docling is wrong, lossy, or not worth the cost of
+  reproducing — is fine when it is documented: say why in the code comment
+  and record it in `docs/MIGRATION.md` (or `docs/PDF_CONFORMANCE.md`'s
+  deviations) instead of chasing byte parity. A *difference* from docling is
+  a signal to look at, not automatically a bug; an unexplained one is.
 - `tests/data/<format>/sources/` + `groundtruth/` (+ `groundtruth_dclx/`,
-  `-enriched/`): the corpus mirrored from upstream docling. Declarative
-  formats must match Python docling **byte-for-byte**; the ML pipeline is
-  pinned by deterministic snapshots (`tests/snapshots/`,
-  `scripts/conformance/`, see `docs/PDF_CONFORMANCE.md`).
+  `-enriched/`): the corpus mirrored from upstream docling, and the
+  regression net for the point above — declarative formats are compared
+  against it (byte-for-byte where we do match, and that is the usual case),
+  the ML pipeline is pinned by deterministic snapshots (`tests/snapshots/`,
+  `scripts/conformance/`, see `docs/PDF_CONFORMANCE.md`). Keep the numbers in
+  the docs honest when a change moves them, in either direction.
 - Output-regression suite: `crates/docling/tests/regression.rs`, expected
   outputs under `crates/docling/tests/data/<format>/expected/`; regenerate
   intentional changes with `DOCLING_RS_REGEN=1`. **A source file lives in one
@@ -211,9 +222,11 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
 - Degradation over failure: a missing optional tool/model (ffmpeg, enrichment
   model) warns and degrades; only "nothing convertible at all" errors.
 - Docs live in `README.md` (user-facing) + `docs/MIGRATION.md` (parity table
-  with real conformance numbers) — update both with behavior changes;
+  with real conformance numbers and the deliberate divergences from docling)
+  — update both with behavior changes;
   `docs/PDF_CONFORMANCE.md` for pipeline/model changes.
 - MSRV 1.88 (1.85 for docling-core), edition 2021; CI lints on the 1.96
   toolchain — `cargo fmt` + clippy clean; comments explain *why*
-  (docling parity, perf tradeoffs), matching the existing dense doc-comment
+  (docling parity or a deliberate divergence from it, perf tradeoffs),
+  matching the existing dense doc-comment
   style.
