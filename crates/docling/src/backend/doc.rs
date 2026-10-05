@@ -47,8 +47,17 @@
 //! and are not read, so its output is body paragraphs (no headings, lists,
 //! tables or pictures) — where it used to be rejected outright. Text decodes
 //! as Windows-1252, the code page of the Western editions, or as UTF-16LE
-//! when the FIB's `fExtChar` is set (the Far East editions). Older files
-//! (Word for Windows 1.x/2.0) are not compound files and never reach here.
+//! when the FIB's `fExtChar` is set (the Far East editions).
+//!
+//! **Word for Windows 1.x / 2.0** (`wIdent` 0xA59B / 0xA59C / 0xA5DB,
+//! `nFib` ≤ 63, #566) is not a compound file at all: the FIB sits at byte 0
+//! of a flat file, the text at `fcMin`, and the formatting in 512-byte FKP
+//! pages reached through bin tables the FIB locates with 6-byte
+//! (`fc`, `cb`) pairs. [`convert_word2`] reads the main story as
+//! paragraphs, the tables (cell marks `\r\x07`, the row-end paragraph's
+//! PAPX), and bold / italic from the CHPX — enough to match what Word's own
+//! re-save of such a file converts to; styles (headings), pictures and
+//! fast-saved (`fComplex`) files are not read.
 
 use docling_core::{DoclingDocument, Node, PictureImage, Table};
 
@@ -62,6 +71,10 @@ pub struct DocBackend;
 
 impl DeclarativeBackend for DocBackend {
     fn convert(&self, source: &SourceDocument) -> Result<DoclingDocument, ConversionError> {
+        // A Word for Windows 1.x / 2.0 file is flat — no container to open.
+        if is_word2(&source.bytes) {
+            return convert_word2(&source.name, &source.bytes);
+        }
         let cfb = CompoundFile::open(&source.bytes).ok_or_else(|| {
             ConversionError::Parse(CompoundFile::open_error("doc", &source.bytes))
         })?;
@@ -603,6 +616,162 @@ fn convert_word6(name: &str, word: &[u8], flags: u16) -> Result<DoclingDocument,
     para.finish('\r', ParaProps::default(), &[], &mut builder, &mut doc);
     builder.flush(&mut doc);
     Ok(doc)
+}
+
+/// Whether `data` is a flat Word for Windows 1.x / 2.0 file (#566): the
+/// pre-Word-6 `wIdent` at byte 0, an `nFib` of that era, and a text start
+/// (`fcMin`) inside the file.
+pub(crate) fn is_word2(data: &[u8]) -> bool {
+    matches!(u16_at(data, 0), Some(0xA59B | 0xA59C | 0xA5DB))
+        && u16_at(data, 2).is_some_and(|n| (1..=63).contains(&n))
+        && u32_at(data, 0x18).is_some_and(|fc_min| (fc_min as usize) < data.len())
+}
+
+/// Word for Windows 1.x / 2.0 (#566; module docs). The flat file's FIB:
+/// `fcMin` 0x18, `fcMac` 0x1C, `ccpText` 0x34, and from 0x52 on 6-byte
+/// (`fc` u32, `cb` u16) pairs — the CHPX bin table at 0xA0, the PAPX one at
+/// 0xA6. Each bin table is a PLC of FCs and 16-bit page numbers; a page is a
+/// 512-byte FKP: `crun` in its last byte, `crun + 1` FCs, then one byte per
+/// run — the word offset of its PAPX / CHPX in the page (0: none), which
+/// starts with its byte count. A PAPX is the style code, six fixed bytes,
+/// then single-byte sprms; a CHPX starts with the character flags (bit 0
+/// bold, bit 1 italic). Paragraph marks are `\r\n`, cell marks `\r\x07`,
+/// the row end a `\r\x07` paragraph whose PAPX carries the table sprms.
+fn convert_word2(name: &str, data: &[u8]) -> Result<DoclingDocument, ConversionError> {
+    let flags = u16_at(data, 0x0A).unwrap_or(0);
+    if flags & 0x0100 != 0 {
+        return Err(ConversionError::Parse("doc: document is encrypted".into()));
+    }
+    if flags & 0x0004 != 0 {
+        return Err(ConversionError::Parse(
+            "doc: fast-saved (complex) Word 1.x/2.0 file — its text is in pieces this reader \
+             does not follow; open it in Word and save without Fast Save"
+                .into(),
+        ));
+    }
+    let field = |o: usize, what: &str| {
+        u32_at(data, o).map(|v| v as usize).ok_or_else(|| {
+            ConversionError::Parse(format!(
+                "doc: Word 2.0 FIB truncated — no {what} at {o:#x} ({} bytes)",
+                data.len()
+            ))
+        })
+    };
+    let fc_min = field(0x18, "fcMin")?;
+    let fc_mac = field(0x1C, "fcMac")?;
+    let ccp_text = field(0x34, "ccpText")?;
+    let end = fc_min.saturating_add(ccp_text).min(fc_mac).min(data.len());
+    let text = data.get(fc_min..end).unwrap_or(&[]);
+    // The bin tables; a FIB too short for them means no formatting at all.
+    let plc = |o: usize| -> &[u8] {
+        let (Some(fc), Some(cb)) = (u32_at(data, o), u16_at(data, o + 4)) else {
+            return &[];
+        };
+        let (fc, cb) = (fc as usize, cb as usize);
+        fc.checked_add(cb)
+            .and_then(|e| data.get(fc..e))
+            .unwrap_or(&[])
+    };
+    let chpx_plc = plc(0xA0);
+    let papx_plc = plc(0xA6);
+
+    let mut doc = DoclingDocument::new(name);
+    let mut builder = NodeBuilder::new(ListTables::default());
+    let mut para = ParaAccum::default();
+    let mut i = 0usize;
+    while i < text.len() {
+        let fc = fc_min + i;
+        let b = text[i];
+        if b == 0x0D {
+            // `\r\n`: a paragraph; `\r\x07`: a cell (or the row end — the
+            // PAPX says which); a bare `\r`: a paragraph too.
+            let next = text.get(i + 1).copied();
+            i += if matches!(next, Some(0x0A | 0x07)) {
+                2
+            } else {
+                1
+            };
+            let mut props = ParaProps::default();
+            if next == Some(0x07) {
+                let (in_table, ttp) = word2_fkp(data, papx_plc, fc as u64)
+                    .map(word2_table_flags)
+                    .unwrap_or((true, false));
+                props.in_table = in_table || !ttp;
+                props.ttp = ttp;
+            }
+            let mark = if next == Some(0x07) { '\u{0007}' } else { '\r' };
+            para.finish(mark, props, &[], &mut builder, &mut doc);
+            continue;
+        }
+        let fmt = word2_fkp(data, chpx_plc, fc as u64)
+            .and_then(|chpx| chpx.first())
+            .map_or(CharFmt::default(), |&flags| CharFmt {
+                bold: flags & 0x01 != 0,
+                italic: flags & 0x02 != 0,
+                ..CharFmt::default()
+            });
+        para.push(cp1252(b), fmt);
+        i += 1;
+    }
+    para.finish('\r', ParaProps::default(), &[], &mut builder, &mut doc);
+    builder.flush(&mut doc);
+    Ok(doc)
+}
+
+/// The PAPX / CHPX bytes (after their count byte) of the run holding `fc`,
+/// through a Word 2.0 bin table and its FKP page; `None` when the run has no
+/// property bytes (the defaults apply) or the structures are out of range.
+fn word2_fkp<'a>(data: &'a [u8], plc: &[u8], fc: u64) -> Option<&'a [u8]> {
+    let n = plc.len().checked_sub(4)? / 6;
+    let pn = (0..n).find_map(|k| {
+        let start = u32_at(plc, k * 4)? as u64;
+        let end = u32_at(plc, (k + 1) * 4)? as u64;
+        (start <= fc && fc < end).then(|| u16_at(plc, (n + 1) * 4 + k * 2))?
+    })?;
+    let page = data.get(pn as usize * 512..pn as usize * 512 + 512)?;
+    let crun = *page.last()? as usize;
+    let fcs_end = (crun + 1) * 4;
+    let run = (0..crun).find(|&r| {
+        let start = u32_at(page, r * 4).unwrap_or(u32::MAX) as u64;
+        let end = u32_at(page, (r + 1) * 4).unwrap_or(0) as u64;
+        start <= fc && fc < end
+    })?;
+    let bx = *page.get(fcs_end + run)? as usize;
+    if bx == 0 {
+        return None;
+    }
+    let cb = *page.get(bx * 2)? as usize;
+    page.get(bx * 2 + 1..bx * 2 + 1 + cb)
+}
+
+/// `(in_table, row_end)` from a Word 2.0 PAPX: the style code, six fixed
+/// bytes, then sprms. The cell paragraphs of the sample file carry the
+/// operand-less `0x11`; the row-end paragraph `0x18 01 0x19 01` followed by
+/// the table sprms (`0x94` = half the cell gap, 108 twips). Read as: `0x11`
+/// and `0x18 n` put the paragraph in a table, `0x19 n` ends the row. The
+/// scan stops at the first other sprm, whose operand size is not known
+/// here — what matters comes first.
+fn word2_table_flags(papx: &[u8]) -> (bool, bool) {
+    let (mut in_table, mut ttp) = (false, false);
+    let mut i = 7usize;
+    while i < papx.len() {
+        match papx[i] {
+            0x11 => {
+                in_table = true;
+                i += 1;
+            }
+            0x18 => {
+                in_table |= papx.get(i + 1).is_some_and(|&v| v != 0);
+                i += 2;
+            }
+            0x19 => {
+                ttp |= papx.get(i + 1).is_some_and(|&v| v != 0);
+                i += 2;
+            }
+            _ => break,
+        }
+    }
+    (in_table, ttp)
 }
 
 /// One piece-table entry: characters `cp_start..cp_end` live at byte offset
@@ -2013,5 +2182,51 @@ mod tests {
         );
         let img = images[0].as_ref().unwrap();
         assert!(img.width > 0 && img.height > 0 && !img.data.is_empty());
+    }
+
+    /// #566: a flat Word for Windows 2.0 file (`wIdent` 0xA5DB) converts —
+    /// paragraphs, the 4 × 3 table through the `\r\x07` cell marks and the
+    /// row-end PAPX, bold / italic from the CHPX — to the Markdown Word's own
+    /// `.docx` re-save of it converts to; the sniffer knows the header too.
+    #[test]
+    fn word2_flat_file_converts_like_its_docx_resave() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/doc/sources/word2_pcjs.doc");
+        let bytes = std::fs::read(path).expect("fixture");
+        assert!(is_word2(&bytes));
+        assert_eq!(crate::sniff::detect(&bytes), Some(InputFormat::Doc));
+        let src = SourceDocument::from_bytes("word2", InputFormat::Doc, bytes.clone());
+        let doc = DocBackend.convert(&src).expect("converts");
+        let md = doc.export_to_markdown();
+        assert_eq!(
+            md.trim_end(),
+            "This IS a dummy word document\n\n1.\tsdfsdf\n\n2.\tsdfsdf\n\n3.\tlorem\n\n4.\tipsum\n\n\
+             **BOLD TEXT**\n\n***Italic text***\n\n***Underligned***\n\n\
+             | Animals     | testa     | testb     |\n\
+             |-------------|-----------|-----------|\n\
+             | cat         | loremtab  | ipsumtab  |\n\
+             | dog         | testacell | testbcell |\n\
+             | empty cells |           |           |"
+        );
+        // A fast-saved file is refused with a reason, not a container error.
+        let mut complex = bytes;
+        complex[0x0A] |= 0x04;
+        let err = DocBackend
+            .convert(&SourceDocument::from_bytes("c", InputFormat::Doc, complex))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("fast-saved"), "{err}");
+    }
+
+    /// The PAPX sprm patterns the sample's cells and row ends carry.
+    #[test]
+    fn word2_papx_table_flags() {
+        let cell = [0, 0, 0, 0, 0, 0, 0, 0x11];
+        assert_eq!(word2_table_flags(&cell), (true, false));
+        let row_end = [0, 0, 0, 0, 0, 0, 0, 0x18, 1, 0x19, 1, 0x94, 0x6c];
+        assert_eq!(word2_table_flags(&row_end), (true, true));
+        let plain = [0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(word2_table_flags(&plain), (false, false));
+        assert!(!is_word2(b"\xd0\xcf\x11\xe0 not word 2"));
     }
 }
