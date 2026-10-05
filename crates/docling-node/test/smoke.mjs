@@ -13,6 +13,9 @@ import {
   chunkDocumentAsync,
   chunkFileAsync,
   convert,
+  convertArchive,
+  convertArchiveFile,
+  convertArchiveFileAsync,
   convertAsync,
   convertFile,
   convertFileAsync,
@@ -47,7 +50,46 @@ const check = (name, fn) => {
 
 const MD = '# Title\n\nHello **world**.\n\n- one\n- two\n'
 
+// A small mixed archive (#557): two documents, an unsupported file, a broken
+// DOCX — written once with Python's zipfile (docs/a.md, b.csv, tool.exe,
+// broken.docx) and committed.
+const BUNDLE = new URL('./fixtures/bundle.zip', import.meta.url).pathname
+
 async function main() {
+  await check('convertArchiveFile converts each entry on its own (#557)', () => {
+    const items = convertArchiveFile(BUNDLE)
+    assert.deepEqual(
+      items.map((i) => [i.path, i.outcome]),
+      [
+        ['docs/a.md', 'converted'],
+        ['b.csv', 'converted'],
+        ['tool.exe', 'skipped'],
+        ['broken.docx', 'failed'],
+      ],
+    )
+    assert.ok(items[0].result.content.includes('alpha text'))
+    assert.equal(items[0].result.format, 'md')
+    assert.equal(items[2].error, 'unsupported file type')
+    assert.ok(items[3].error.includes('docx'))
+    // napi leaves an absent `Option` field undefined.
+    assert.equal(items[3].result ?? null, null)
+  })
+
+  await check('convertArchive takes bytes, async variants and the class agree', async () => {
+    const data = (await import('node:fs')).readFileSync(BUNDLE)
+    const sync = convertArchive({ name: 'bundle.zip', data }, { to: 'json' })
+    const viaFile = await convertArchiveFileAsync(BUNDLE, { to: 'json' })
+    const viaClass = await new DocumentConverter().convertArchiveAsync({ name: 'bundle.zip', data }, { to: 'json' })
+    for (const items of [sync, viaFile, viaClass]) {
+      assert.equal(items.length, 4)
+      assert.equal(items.filter((i) => i.outcome === 'converted').length, 2)
+      assert.ok(JSON.parse(items[0].result.content).texts.length > 0)
+    }
+    assert.throws(() => convertArchive({ name: 'x.zip', data: Buffer.from('plain') }))
+    // An archive is not a document: the plain converters still refuse it.
+    assert.throws(() => convertFile(BUNDLE))
+  })
+
   await check('supportedFormats lists md and pdf', () => {
     const formats = supportedFormats()
     assert.ok(formats.includes('md'))

@@ -8,11 +8,13 @@ import type {
   ConvertOptions,
   ConvertInput,
   ConvertResult,
+  ArchiveItem,
   ChunkOptions,
   Chunk,
 } from './native'
 
 export type {
+  ArchiveItem,
   ConverterOptions,
   OutputOptions,
   ConvertOptions,
@@ -40,6 +42,23 @@ export declare function convert(input: ConvertInput, options?: ConvertOptions | 
 export declare function convertFileAsync(path: string, options?: ConvertOptions | null): Promise<ConvertResult>
 /** Async (Promise) bytes conversion, off the event loop. Rejects for PDF/image/METS if deps aren't installed (see {@link convertFile}). */
 export declare function convertAsync(input: ConvertInput, options?: ConvertOptions | null): Promise<ConvertResult>
+
+/**
+ * Convert every document inside a ZIP archive on disk (#557): one
+ * {@link ArchiveItem} per entry in archive order — `converted` with its
+ * result, `skipped` with the reason (unsupported type, nested archive, unsafe
+ * path, over a `DOCLING_RS_ZIP_MAX_*` limit) or `failed` with the error. A
+ * broken document fails only its own item. Throws only when the file is not
+ * a readable ZIP archive. Not ML-guarded: a PDF entry without the models is
+ * that entry's `failed` item.
+ */
+export declare function convertArchiveFile(path: string, options?: ConvertOptions | null): Array<ArchiveItem>
+/** In-memory {@link convertArchiveFile}; `input.name` names the archive, `input.format` is ignored. */
+export declare function convertArchive(input: ConvertInput, options?: ConvertOptions | null): Array<ArchiveItem>
+/** Async (Promise) {@link convertArchiveFile}, off the event loop. */
+export declare function convertArchiveFileAsync(path: string, options?: ConvertOptions | null): Promise<Array<ArchiveItem>>
+/** Async (Promise) {@link convertArchive}, off the event loop. */
+export declare function convertArchiveAsync(input: ConvertInput, options?: ConvertOptions | null): Promise<Array<ArchiveItem>>
 
 /**
  * Chunk a file with docling's chunkers: convert it, then run the hierarchical
@@ -73,6 +92,11 @@ export declare class DocumentConverter {
   convertFileAsync(path: string, options?: OutputOptions | null): Promise<ConvertResult>
   convertAsync(input: ConvertInput, options?: OutputOptions | null): Promise<ConvertResult>
   convertFileStreaming(path: string, callback: StreamCallback, options?: OutputOptions | null): void
+  /** {@link convertArchiveFile} with this converter's config per entry. */
+  convertArchiveFile(path: string, options?: OutputOptions | null): Array<ArchiveItem>
+  convertArchive(input: ConvertInput, options?: OutputOptions | null): Array<ArchiveItem>
+  convertArchiveFileAsync(path: string, options?: OutputOptions | null): Promise<Array<ArchiveItem>>
+  convertArchiveAsync(input: ConvertInput, options?: OutputOptions | null): Promise<Array<ArchiveItem>>
 }
 
 /** Output options for {@link Pipeline.streamFileMarkdown} (streamable modes only). */

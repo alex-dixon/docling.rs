@@ -92,6 +92,27 @@ async function convertAsync(input, options) {
   return native.convertAsync(input, options)
 }
 
+// --- archives (#557) --------------------------------------------------------
+
+// No ML guard: a ZIP may hold anything, and the native side reports a PDF
+// entry that cannot convert (models missing) as that entry's `failed` item,
+// never by throwing — the archive's other documents still convert.
+function convertArchiveFile(path, options) {
+  return native.convertArchiveFile(path, options)
+}
+
+function convertArchive(input, options) {
+  return native.convertArchive(input, options)
+}
+
+async function convertArchiveFileAsync(path, options) {
+  return native.convertArchiveFileAsync(path, options)
+}
+
+async function convertArchiveAsync(input, options) {
+  return native.convertArchiveAsync(input, options)
+}
+
 // --- guarded chunking functions ---------------------------------------------
 
 // For the hybrid chunker with no explicit tokenizer, resolve the default one
@@ -174,6 +195,23 @@ class DocumentConverter {
   convertFileStreaming(path, callback, options) {
     assertMlReady(mlFormatOf(path), undefined, { pipeline: this._pipeline })
     return this._inner.convertFileStreaming(path, callback, options)
+  }
+
+  // Archives (#557): unguarded, see convertArchiveFile above.
+  convertArchiveFile(path, options) {
+    return this._inner.convertArchiveFile(path, options)
+  }
+
+  convertArchive(input, options) {
+    return this._inner.convertArchive(input, options)
+  }
+
+  async convertArchiveFileAsync(path, options) {
+    return this._inner.convertArchiveFileAsync(path, options)
+  }
+
+  async convertArchiveAsync(input, options) {
+    return this._inner.convertArchiveAsync(input, options)
   }
 }
 
@@ -322,6 +360,10 @@ module.exports.convert = convert
 module.exports.convertFile = convertFile
 module.exports.convertAsync = convertAsync
 module.exports.convertFileAsync = convertFileAsync
+module.exports.convertArchive = convertArchive
+module.exports.convertArchiveFile = convertArchiveFile
+module.exports.convertArchiveAsync = convertArchiveAsync
+module.exports.convertArchiveFileAsync = convertArchiveFileAsync
 module.exports.chunk = chunk
 module.exports.chunkFile = chunkFile
 module.exports.chunkAsync = chunkAsync

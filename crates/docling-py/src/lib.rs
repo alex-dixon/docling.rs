@@ -58,7 +58,8 @@ where
 /// The Rust processor's result: a conversion status, the input name, and the
 /// document as docling-core's JSON wire format. The Python layer validates the
 /// JSON into a genuine `DoclingDocument`.
-#[pyclass(name = "NativeResult")]
+#[pyclass(name = "NativeResult", skip_from_py_object)]
+#[derive(Clone)]
 struct PyNativeResult {
     #[pyo3(get)]
     status: String,
@@ -70,6 +71,22 @@ struct PyNativeResult {
     /// error_message)` tuples; non-empty exactly for `partial_success`.
     #[pyo3(get)]
     errors: Vec<(String, String, String)>,
+}
+
+/// One entry of a ZIP archive converted through
+/// `DocumentConverter.convert_archive` (#557): its path inside the archive,
+/// the outcome kind — `"converted"`, `"skipped"`, `"failed"` — and either the
+/// result or the reason / error message.
+#[pyclass(name = "NativeArchiveItem")]
+struct PyNativeArchiveItem {
+    #[pyo3(get)]
+    path: String,
+    #[pyo3(get)]
+    outcome: String,
+    #[pyo3(get)]
+    result: Option<PyNativeResult>,
+    #[pyo3(get)]
+    error: Option<String>,
 }
 
 fn error_tuples(errors: Vec<docling::ErrorItem>) -> Vec<(String, String, String)> {
@@ -344,7 +361,11 @@ impl PyDocumentConverter {
             Some((first, last)) => base.page_range(first, last),
             None => base,
         };
-        let base = base.document_timeout(document_timeout);
+        let base = base
+            .document_timeout(document_timeout)
+            // ZIP inputs (#557): the same `DOCLING_RS_ZIP_MAX_*` bounds the
+            // CLI and serve apply.
+            .archive_limits(docling::ArchiveLimits::from_env());
         // `ocr_lang` / `ocr_mode` / `ocr_scale` (#254) — validated here so a
         // typo raises instead of degrading; the parsed values also prime the
         // warm pipeline in `initialize_pipeline`.
@@ -569,6 +590,69 @@ impl PyDocumentConverter {
             ConversionError::new_err(format!("cannot detect input format from name {name:?}"))
         })?;
         self.convert_source(py, SourceDocument::from_bytes(&name, format, bytes), page_range)
+    }
+
+    /// Convert every document inside a ZIP archive on disk (#557): one item
+    /// per entry, in archive order — converted, skipped (with the reason:
+    /// unsupported type, nested archive, unsafe path, over a
+    /// `DOCLING_RS_ZIP_MAX_*` limit) or failed (with the error). Raises only
+    /// when the file is not a readable ZIP archive. PDFs inside go through the
+    /// transient pipeline, not the one `initialize_pipeline` primed.
+    fn convert_archive(
+        &self,
+        py: Python<'_>,
+        source: PathLike,
+    ) -> PyResult<Vec<PyNativeArchiveItem>> {
+        let bytes = std::fs::read(&source.0).map_err(|e| {
+            ConversionError::new_err(format!("{}: {e}", source.0.display()))
+        })?;
+        self.convert_archive_impl(py, bytes)
+    }
+
+    /// As [`convert_archive`](Self::convert_archive), for in-memory bytes.
+    fn convert_archive_bytes(
+        &self,
+        py: Python<'_>,
+        data: Bound<'_, PyBytes>,
+    ) -> PyResult<Vec<PyNativeArchiveItem>> {
+        let bytes = data.as_bytes().to_vec();
+        self.convert_archive_impl(py, bytes)
+    }
+}
+
+impl PyDocumentConverter {
+    fn convert_archive_impl(
+        &self,
+        py: Python<'_>,
+        bytes: Vec<u8>,
+    ) -> PyResult<Vec<PyNativeArchiveItem>> {
+        let converter = self.inner.clone();
+        run_interruptible(py, move || {
+            let items = converter
+                .convert_archive(std::io::Cursor::new(bytes))
+                .map_err(|e| ConversionError::new_err(e.to_string()))?;
+            Ok(items
+                .map(|item| {
+                    let (outcome, result, error) = match item.outcome {
+                        docling::ArchiveOutcome::Converted(r) => {
+                            ("converted", Some(native_result(*r)), None)
+                        }
+                        docling::ArchiveOutcome::Skipped(reason) => {
+                            ("skipped", None, Some(reason))
+                        }
+                        docling::ArchiveOutcome::Failed(e) => {
+                            ("failed", None, Some(e.to_string()))
+                        }
+                    };
+                    PyNativeArchiveItem {
+                        path: item.path,
+                        outcome: outcome.to_string(),
+                        result,
+                        error,
+                    }
+                })
+                .collect())
+        })
     }
 }
 
@@ -1042,6 +1126,7 @@ fn pandoc_from_json<'py>(
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDocumentConverter>()?;
     m.add_class::<PyNativeResult>()?;
+    m.add_class::<PyNativeArchiveItem>()?;
     m.add_class::<PyChunkStream>()?;
     m.add_function(pyo3::wrap_pyfunction!(chunk_document, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(pandoc_from_json, m)?)?;

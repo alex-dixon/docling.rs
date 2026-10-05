@@ -144,6 +144,7 @@ PY
 | `.convert_all(sources, raises_on_error=True) -> Iterator[ConversionResult]` | same | lazily converts many sources; `raises_on_error=False` yields a `failure` result instead of raising |
 | `.initialize_pipeline(format=None)` | same | pre-loads the PDF/image ML models so the first conversion isn't slow and later PDFs reuse the warm pipeline (no-op for non-ML formats; needs the models available) |
 | `.convert_bytes(name, data)` | `DocumentStream` | extension of `name` drives format detection |
+| `.convert_archive(source) -> Iterator[ArchiveItem]` | — (docling takes no archives) | every document inside a ZIP — a path, `bytes` or a `DocumentStream` — one `ArchiveItem` per entry: `outcome` `converted` (`result`) / `skipped` (`error` = the reason: unsupported type, nested archive, unsafe path, over a `DOCLING_RS_ZIP_MAX_*` limit) / `failed` (`error`); a broken document fails only itself (#557) |
 | `InputFormat`, `PdfPipelineOptions`, `PdfFormatOption`, `AcceleratorOptions`, `TableFormerMode`, `DocumentStream`, `ImageRefMode` | same modules | docling-shaped config re-exported from `docling_rs` (see below) |
 | `ConversionError` | `docling.exceptions.ConversionError` | raised on a failed conversion; caught by `convert_all(..., raises_on_error=False)` |
 | `result.status` / `result.document` / `result.input.file` | same | `.status` is a `ConversionStatus` str-enum (`"success" / "partial_success" / "failure"`); `.document` is a genuine `docling_core` `DoclingDocument` |

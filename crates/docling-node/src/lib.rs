@@ -365,6 +365,43 @@ fn error_items(errors: Vec<docling::ErrorItem>) -> Vec<ConversionErrorItem> {
         .collect()
 }
 
+/// One entry of a ZIP archive converted by [`convert_archive`] /
+/// [`convert_archive_file`] (#557): its path inside the archive and what
+/// became of it.
+#[napi(object)]
+pub struct ArchiveItem {
+    /// The entry's path inside the archive (`/`-separated).
+    pub path: String,
+    /// `"converted"` (`result` is set), `"skipped"` (`error` says why:
+    /// unsupported type, nested archive, unsafe path, over a
+    /// `DOCLING_RS_ZIP_MAX_*` limit) or `"failed"` (`error` is the
+    /// conversion error; the other entries are unaffected).
+    pub outcome: String,
+    pub result: Option<ConvertResult>,
+    pub error: Option<String>,
+}
+
+/// Send-safe [`ArchiveItem`], produced off the JS thread. Public only as a
+/// [`Task`] output; not exposed to JS.
+#[doc(hidden)]
+pub struct RawArchiveItem {
+    path: String,
+    outcome: &'static str,
+    result: Option<RawResult>,
+    error: Option<String>,
+}
+
+impl RawArchiveItem {
+    fn into_js(self) -> ArchiveItem {
+        ArchiveItem {
+            path: self.path,
+            outcome: self.outcome.to_string(),
+            result: self.result.map(RawResult::into_js),
+            error: self.error,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal, Send-safe conversion plumbing (shared by sync, async, streaming).
 // ---------------------------------------------------------------------------
@@ -835,6 +872,43 @@ fn run_convert(source: SourceDocument, cfg: &ConvertConfig) -> Result<RawResult>
     ))
 }
 
+/// Convert every document inside a ZIP archive (#557), each through
+/// [`run_convert`] with the same config (so `allowedFormats`, the VLM
+/// pipeline and the output options apply per entry), in archive order. The
+/// entries are vetted from the central directory before anything is
+/// inflated (`docling::archive`, `DOCLING_RS_ZIP_MAX_*`); an entry that does
+/// not convert is its own `skipped` / `failed` item. Errors only when the
+/// bytes are not a readable ZIP archive.
+fn run_convert_archive(bytes: Vec<u8>, cfg: &ConvertConfig) -> Result<Vec<RawArchiveItem>> {
+    let mut archive = docling::archive::Archive::open(
+        std::io::Cursor::new(bytes),
+        &docling::ArchiveLimits::from_env(),
+    )
+    .map_err(convert_err)?;
+    let entries = archive.entries().to_vec();
+    Ok(entries
+        .into_iter()
+        .map(|info| {
+            let (outcome, result, error) = match info.skipped {
+                Some(reason) => ("skipped", None, Some(reason)),
+                None => match archive.read(info.index).map_err(convert_err) {
+                    Ok(source) => match run_convert(source, cfg) {
+                        Ok(raw) => ("converted", Some(raw), None),
+                        Err(e) => ("failed", None, Some(e.reason.clone())),
+                    },
+                    Err(e) => ("failed", None, Some(e.reason.clone())),
+                },
+            };
+            RawArchiveItem {
+                path: info.path,
+                outcome,
+                result,
+                error,
+            }
+        })
+        .collect())
+}
+
 /// Load a [`SourceDocument`] from an in-memory [`ConvertInput`].
 fn source_from_input(input: ConvertInput) -> Result<SourceDocument> {
     let format = match &input.format {
@@ -905,6 +979,94 @@ pub fn convert_async(
         source: Some(source),
         cfg,
     }))
+}
+
+/// Convert every document inside a ZIP archive on disk (#557): one
+/// [`ArchiveItem`] per entry. Throws only when the file is not a readable ZIP.
+#[napi]
+pub fn convert_archive_file(
+    path: String,
+    options: Option<ConvertOptions>,
+) -> Result<Vec<ArchiveItem>> {
+    let cfg = build_config(options.unwrap_or_default())?;
+    let bytes = std::fs::read(&path)
+        .map_err(|e| Error::new(Status::GenericFailure, format!("{path}: {e}")))?;
+    Ok(run_convert_archive(bytes, &cfg)?
+        .into_iter()
+        .map(RawArchiveItem::into_js)
+        .collect())
+}
+
+/// Convert every document inside an in-memory ZIP archive (#557); `input.name`
+/// names it, `input.format` is ignored.
+#[napi]
+pub fn convert_archive(
+    input: ConvertInput,
+    options: Option<ConvertOptions>,
+) -> Result<Vec<ArchiveItem>> {
+    let cfg = build_config(options.unwrap_or_default())?;
+    Ok(run_convert_archive(input.data.to_vec(), &cfg)?
+        .into_iter()
+        .map(RawArchiveItem::into_js)
+        .collect())
+}
+
+/// Async (Promise-returning) [`convert_archive_file`].
+#[napi(ts_return_type = "Promise<Array<ArchiveItem>>")]
+pub fn convert_archive_file_async(
+    path: String,
+    options: Option<ConvertOptions>,
+) -> Result<AsyncTask<ConvertArchiveTask>> {
+    let cfg = build_config(options.unwrap_or_default())?;
+    Ok(AsyncTask::new(ConvertArchiveTask {
+        source: ArchiveSource::Path(path),
+        cfg,
+    }))
+}
+
+/// Async (Promise-returning) [`convert_archive`].
+#[napi(ts_return_type = "Promise<Array<ArchiveItem>>")]
+pub fn convert_archive_async(
+    input: ConvertInput,
+    options: Option<ConvertOptions>,
+) -> Result<AsyncTask<ConvertArchiveTask>> {
+    let cfg = build_config(options.unwrap_or_default())?;
+    Ok(AsyncTask::new(ConvertArchiveTask {
+        source: ArchiveSource::Bytes(input.data.to_vec()),
+        cfg,
+    }))
+}
+
+enum ArchiveSource {
+    Path(String),
+    Bytes(Vec<u8>),
+    Taken,
+}
+
+pub struct ConvertArchiveTask {
+    source: ArchiveSource,
+    cfg: ConvertConfig,
+}
+
+impl Task for ConvertArchiveTask {
+    type Output = Vec<RawArchiveItem>;
+    type JsValue = Vec<ArchiveItem>;
+
+    fn compute(&mut self) -> Result<Vec<RawArchiveItem>> {
+        let bytes = match std::mem::replace(&mut self.source, ArchiveSource::Taken) {
+            ArchiveSource::Path(path) => std::fs::read(&path)
+                .map_err(|e| Error::new(Status::GenericFailure, format!("{path}: {e}")))?,
+            ArchiveSource::Bytes(bytes) => bytes,
+            ArchiveSource::Taken => {
+                return Err(Error::new(Status::GenericFailure, "conversion task reused"))
+            }
+        };
+        run_convert_archive(bytes, &self.cfg)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Vec<RawArchiveItem>) -> Result<Vec<ArchiveItem>> {
+        Ok(output.into_iter().map(RawArchiveItem::into_js).collect())
+    }
 }
 
 pub struct ConvertFileTask {
@@ -1132,6 +1294,65 @@ impl DocumentConverter {
         let source = source_from_input(input)?;
         Ok(AsyncTask::new(ConvertBytesTask {
             source: Some(source),
+            cfg,
+        }))
+    }
+
+    /// Convert every document inside a ZIP archive on disk (#557), with this
+    /// converter's config per entry (sync).
+    #[napi]
+    pub fn convert_archive_file(
+        &self,
+        path: String,
+        options: Option<OutputOptions>,
+    ) -> Result<Vec<ArchiveItem>> {
+        let cfg = self.config(options)?;
+        let bytes = std::fs::read(&path)
+            .map_err(|e| Error::new(Status::GenericFailure, format!("{path}: {e}")))?;
+        Ok(run_convert_archive(bytes, &cfg)?
+            .into_iter()
+            .map(RawArchiveItem::into_js)
+            .collect())
+    }
+
+    /// Convert every document inside an in-memory ZIP archive (#557) (sync).
+    #[napi]
+    pub fn convert_archive(
+        &self,
+        input: ConvertInput,
+        options: Option<OutputOptions>,
+    ) -> Result<Vec<ArchiveItem>> {
+        let cfg = self.config(options)?;
+        Ok(run_convert_archive(input.data.to_vec(), &cfg)?
+            .into_iter()
+            .map(RawArchiveItem::into_js)
+            .collect())
+    }
+
+    /// Async (Promise-returning) archive conversion from disk.
+    #[napi(ts_return_type = "Promise<Array<ArchiveItem>>")]
+    pub fn convert_archive_file_async(
+        &self,
+        path: String,
+        options: Option<OutputOptions>,
+    ) -> Result<AsyncTask<ConvertArchiveTask>> {
+        let cfg = self.config(options)?;
+        Ok(AsyncTask::new(ConvertArchiveTask {
+            source: ArchiveSource::Path(path),
+            cfg,
+        }))
+    }
+
+    /// Async (Promise-returning) archive conversion from bytes.
+    #[napi(ts_return_type = "Promise<Array<ArchiveItem>>")]
+    pub fn convert_archive_async(
+        &self,
+        input: ConvertInput,
+        options: Option<OutputOptions>,
+    ) -> Result<AsyncTask<ConvertArchiveTask>> {
+        let cfg = self.config(options)?;
+        Ok(AsyncTask::new(ConvertArchiveTask {
+            source: ArchiveSource::Bytes(input.data.to_vec()),
             cfg,
         }))
     }
