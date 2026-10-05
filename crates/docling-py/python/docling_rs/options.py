@@ -176,7 +176,11 @@ class PdfFormatOption:
 class DocumentStream:
     """docling's ``DocumentStream``: an in-memory source whose ``name`` (with
     extension) drives format detection. ``stream`` is any binary file-like
-    object (e.g. ``io.BytesIO``)."""
+    object (e.g. ``io.BytesIO``). ``format`` (a docling.rs extension, #564)
+    names the :class:`InputFormat` outright when the name cannot — an email
+    attachment called ``scan.bin`` sent as ``application/pdf``; ``None``
+    keeps the extension-based detection."""
 
     name: str
     stream: BinaryIO
+    format: Optional["InputFormat"] = None

@@ -570,25 +570,37 @@ impl PyDocumentConverter {
     }
 
     /// Convert in-memory bytes; `name` (with extension) drives format detection,
-    /// mirroring docling's `DocumentStream(name=..., stream=...)`.
-    /// `page_range` as in [`convert`](Self::convert).
-    #[pyo3(signature = (name, data, page_range = None))]
+    /// mirroring docling's `DocumentStream(name=..., stream=...)` — unless
+    /// `format` names the format outright (an `InputFormat` id such as
+    /// `"pdf"`: an email attachment called `scan.bin` sent as
+    /// `application/pdf`, #564). `page_range` as in [`convert`](Self::convert).
+    #[pyo3(signature = (name, data, page_range = None, format = None))]
     fn convert_bytes(
         &self,
         py: Python<'_>,
         name: String,
         data: Bound<'_, PyBytes>,
         page_range: Option<(usize, usize)>,
+        format: Option<String>,
     ) -> PyResult<PyNativeResult> {
         let page_range = check_page_range(page_range)?;
         let bytes = data.as_bytes().to_vec();
-        let ext = std::path::Path::new(&name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let format = docling::InputFormat::from_extension(ext).ok_or_else(|| {
-            ConversionError::new_err(format!("cannot detect input format from name {name:?}"))
-        })?;
+        let format = match format {
+            Some(id) => docling::InputFormat::from_id(&id).ok_or_else(|| {
+                PyValueError::new_err(format!("unknown input format {id:?}"))
+            })?,
+            None => {
+                let ext = std::path::Path::new(&name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                docling::InputFormat::from_extension(ext).ok_or_else(|| {
+                    ConversionError::new_err(format!(
+                        "cannot detect input format from name {name:?}"
+                    ))
+                })?
+            }
+        };
         self.convert_source(py, SourceDocument::from_bytes(&name, format, bytes), page_range)
     }
 
@@ -1126,7 +1138,8 @@ fn pandoc_from_json<'py>(
 /// `(index, name, content_type, format, size, inline, skipped, data)` tuples
 /// — `data` the payload when it was kept (`None` for an attachment over a
 /// limit, or one without a payload). The limits are byte counts and default
-/// to the archive limits (10 000 attachments, 256 MiB each, 1 GiB in all).
+/// to the archive limits the converter applies (`DOCLING_RS_ZIP_MAX_*`;
+/// 10 000 attachments, 256 MiB each, 1 GiB in all).
 #[pyfunction]
 #[pyo3(signature = (data, max_entries = None, max_entry_size = None, max_total_size = None))]
 #[allow(clippy::type_complexity)]
@@ -1148,7 +1161,7 @@ fn email_attachments<'py>(
         Option<Bound<'py, PyBytes>>,
     )>,
 > {
-    let defaults = docling::ArchiveLimits::default();
+    let defaults = docling::ArchiveLimits::from_env();
     let limits = docling::ArchiveLimits {
         max_entries: max_entries.unwrap_or(defaults.max_entries),
         max_entry_size: max_entry_size.unwrap_or(defaults.max_entry_size),

@@ -383,3 +383,5 @@ module.exports.formatFromName = native.formatFromName
 // Email attachment payloads (#561): declarative, no ML guard needed.
 module.exports.emailAttachments = native.emailAttachments
 module.exports.emailAttachmentsFile = native.emailAttachmentsFile
+module.exports.emailAttachmentsAsync = native.emailAttachmentsAsync
+module.exports.emailAttachmentsFileAsync = native.emailAttachmentsFileAsync

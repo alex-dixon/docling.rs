@@ -56,3 +56,65 @@ def test_limits_skip_and_drop_payloads():
 def test_not_a_message_raises():
     with pytest.raises(docling_rs.ConversionError):
         email_attachments(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 not really a compound file")
+
+
+def _mixed_eml() -> bytes:
+    """A message with a Latin-1 text attachment (base64), a PDF disposed
+    `inline`, two attachments of the same name and a `scan.bin` sent as PDF."""
+    import base64
+
+    latin1 = "café".encode("latin-1")
+    parts = [
+        ("text/plain; charset=iso-8859-1", 'attachment; filename="note.txt"', latin1),
+        ("application/pdf", 'inline; filename="report.pdf"', b"%PDF-1.4 one"),
+        ("application/pdf", 'attachment; filename="report.pdf"', b"%PDF-1.4 two"),
+        ("text/markdown", 'attachment; filename="scan.bin"', b"# Scan\n\nsniffed by type"),
+    ]
+    out = (
+        "From: a@x.com\r\nSubject: S\r\nMIME-Version: 1.0\r\n"
+        'Content-Type: multipart/mixed; boundary="bb"\r\n\r\n'
+        "--bb\r\nContent-Type: text/plain\r\n\r\nBody.\r\n"
+    )
+    for ctype, disp, payload in parts:
+        out += (
+            f"--bb\r\nContent-Type: {ctype}\r\nContent-Disposition: {disp}\r\n"
+            "Content-Transfer-Encoding: base64\r\n\r\n"
+            + base64.b64encode(payload).decode()
+            + "\r\n"
+        )
+    return (out + "--bb--\r\n").encode()
+
+
+def test_payload_bytes_inline_images_only_and_unique_names():
+    """#564: a text attachment keeps its own bytes (no UTF-8 re-encoding),
+    `inline` marks images only, a repeated name gets a counter."""
+    atts = email_attachments(_mixed_eml())
+    assert [(a.name, a.inline) for a in atts] == [
+        ("note.txt", False),
+        ("report.pdf", False),
+        ("report-2.pdf", False),
+        ("scan.bin", False),
+    ]
+    assert atts[0].data == "café".encode("latin-1")
+    assert atts[2].data == b"%PDF-1.4 two"
+
+
+def test_as_stream_carries_the_detected_format():
+    """#564: `scan.bin` sent as Markdown converts through `as_stream()`,
+    whose `format` says what the extension cannot."""
+    scan = email_attachments(_mixed_eml())[3]
+    assert scan.format == InputFormat.MD
+    stream = scan.as_stream()
+    assert stream.format == InputFormat.MD
+    result = DocumentConverter().convert(stream)
+    assert "sniffed by type" in result.document.export_to_markdown()
+    # A plain DocumentStream still detects from the name alone.
+    with pytest.raises(docling_rs.ConversionError):
+        DocumentConverter().convert(DocumentStream(name="scan.bin", stream=io.BytesIO(scan.data)))
+
+
+def test_streams_are_rewound_before_reading():
+    """#564: a DocumentStream already read once still lists its attachments."""
+    stream = io.BytesIO(EML.read_bytes())
+    stream.read()
+    assert email_attachments(DocumentStream(name="m.eml", stream=stream)) == email_attachments(EML)

@@ -1356,9 +1356,10 @@ outcomes (`docling::archive`); the Python (`convert_archive`) and Node
 **Email attachments** (#561) are reachable the same way: an `.eml` or
 Outlook `.msg` renders as headers + body (plus the attachment *names* with
 `--list-attachments`), and `docling::EmailAttachments::open(bytes, &limits)`
-lists the payloads behind it — each with a safe file name, media type, size,
-whether the message shows it inline, and the format it converts as (from its
-extension, else its media type, else the bytes), or why it will not
+lists the payloads behind it — each with a safe file name (unique within the
+message: a second `report.pdf` is `report-2.pdf`), media type, size, whether
+it is an image the message shows inline, and the format it converts as (from
+its extension, else its media type, else the bytes), or why it will not
 (no payload: an attachment by reference or an OLE object; over a limit; a
 nested archive or an unsupported type — those bytes stay available through
 `data(i)`, a `.zip` for `convert_archive`). A forwarded message —
@@ -1367,9 +1368,14 @@ entry carrying the nested message. `DocumentConverter::convert_email_attachments
 converts them one at a time with the archive outcomes above; the `ArchiveLimits`
 apply (no compression ratio: MIME cannot bomb). Python:
 `docling_rs.email_attachments(path | bytes | DocumentStream)` →
-`EmailAttachment(…, data)` with `.as_stream()` for `convert`; Node:
-`emailAttachments({ name, data })` / `emailAttachmentsFile(path)`. The CLI and
-serve do not expand attachments (a message converts as one document).
+`EmailAttachment(…, data)` with `.as_stream()` for `convert` (the stream
+carries the detected `format`, so a `scan.bin` sent as `application/pdf`
+converts as a PDF); Node: `emailAttachments({ name, data })` /
+`emailAttachmentsFile(path)` (+ `*Async`), then
+`convert({ name: att.name, data: att.data, format: att.format })`. Payloads
+are the bytes as sent — only the transfer encoding is undone, so a
+windows-1252 text file stays windows-1252 (#564). The CLI and serve do not
+expand attachments (a message converts as one document).
 
 The PDF/image ML pipeline loads its models **once** and every matched file
 reuses the warm sessions — the same amortization `docling-rs serve` does
