@@ -22,6 +22,7 @@
 //! See `docs/MIGRATION.md` for the architecture, format-by-format parity
 //! status, and how conformance against Python docling is measured.
 
+pub mod archive;
 pub mod chunks;
 mod converter;
 pub mod dclx;
@@ -39,6 +40,7 @@ pub mod backend;
 #[cfg(feature = "asr")]
 pub mod video;
 
+pub use archive::{ArchiveLimits, ArchiveOutcome};
 pub use converter::{parse_page_range, DocumentConverter, DEFAULT_VIDEO_FRAMES};
 pub use error::ConversionError;
 pub use format::InputFormat;

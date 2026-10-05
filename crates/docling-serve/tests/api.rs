@@ -1712,3 +1712,32 @@ async fn latex_batch_items_and_zip_target_carry_tex() {
         "tex entry missing"
     );
 }
+
+/// A `.zip` upload converts every document inside as a batch (#557): one
+/// results item per convertible entry, a broken one failing only itself, an
+/// unsupported one left out.
+#[tokio::test]
+async fn zip_upload_converts_each_document() {
+    let zip = docling::dclx::zip_bytes(vec![
+        ("docs/a.md", b"# A\n\nalpha".as_slice()),
+        ("b.csv", b"x,y\n1,2\n".as_slice()),
+        ("tool.exe", b"MZ".as_slice()),
+        ("broken.docx", b"not a zip".as_slice()),
+    ]);
+    let (ct, body) = multipart_files(&[("bundle.zip", &zip)], &[("to", "md")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let results = v["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 3, "{v}");
+    assert_eq!(results[0]["status"], "success");
+    assert!(results[0]["md"].as_str().unwrap().contains("# A"));
+    assert_eq!(results[1]["status"], "success");
+    assert_eq!(results[2]["status"], "failure");
+
+    // Nothing convertible inside: a client error, not an empty success.
+    let only_exe = docling::dclx::zip_bytes(vec![("tool.exe", b"MZ".as_slice())]);
+    let (ct, body) = multipart("bundle.zip", &only_exe, &[]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

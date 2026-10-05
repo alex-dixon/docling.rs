@@ -144,7 +144,10 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   int8→fp32 layout-retry notice), `DOCLING_RS_MAX_XML_DEPTH` (512; XML
   element nesting any input/part may reach — roxmltree recurses per level),
   `DOCLING_RS_SHEET_MAX_CELLS` (10M; a sheet's used area before it is
-  skipped — calamine materializes a dense grid), `DOCLING_RS_MAX_HTML_DEPTH`
+  skipped — calamine materializes a dense grid),
+  `DOCLING_RS_ZIP_MAX_ENTRIES` / `_MAX_ENTRY_MB` / `_MAX_TOTAL_MB` /
+  `_MAX_RATIO` (10000 / 256 / 1024 / 200; what a ZIP input may make the CLI
+  or serve inflate, #557 — `ArchiveLimits::from_env`), `DOCLING_RS_MAX_HTML_DEPTH`
   (2000; over-deep HTML is emitted as text from a linear tag scan, never
   parsed), `DOCLING_RS_MAX_RENDER_PIXELS` (15000; per-side cap on a rendered
   PDF-page bitmap — a crafted `MediaBox` otherwise forces a multi-GB

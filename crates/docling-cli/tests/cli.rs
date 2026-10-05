@@ -609,3 +609,55 @@ fn images_scale_out_of_range_is_a_usage_error() {
         assert!(err.contains("--images-scale"), "{err}");
     }
 }
+
+/// A `.zip` source expands into the documents it holds (#557): each lands
+/// under `out/<archive>/<entry path>`, what does not convert is reported and
+/// left out, nothing escapes `--output`, and a lone archive without
+/// `--output` is a usage error (it is many documents). A directory sweep
+/// still takes only convertible extensions — archives in it stay untouched.
+#[test]
+fn zip_sources_convert_each_document_inside() {
+    let src = Scratch::new("zip");
+    let zip = docling::dclx::zip_bytes(vec![
+        ("a.md", b"# A\n\nalpha\n".as_slice()),
+        ("sub/b.md", b"# B\n".as_slice()),
+        ("tool.exe", b"MZ".as_slice()),
+        ("../evil.md", b"# evil\n".as_slice()),
+    ]);
+    std::fs::write(src.0.join("bundle.zip"), &zip).unwrap();
+    let out = Scratch::new("zip-out");
+    let plain = format!("{MD_FIXTURES}/duck.md");
+    let (code, stdout, stderr) = run(&[&src.path("bundle.zip"), &plain, "--output", &out.path("")]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    for rel in ["bundle/a.md", "bundle/sub/b.md", "duck.md"] {
+        assert!(out.0.join(rel).is_file(), "{rel} missing; stderr: {stderr}");
+        assert!(stdout.contains(rel), "stdout: {stdout}");
+    }
+    assert!(!out.0.join("bundle/tool.md").exists());
+    assert!(!out.0.join("evil.md").exists() && !src.0.join("evil.md").exists());
+    assert!(
+        stderr.contains("tool.exe: unsupported file type"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("../evil.md: unsafe path"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("batch: 3 converted, 0 failed, 2 archive entries not converted"),
+        "stderr: {stderr}"
+    );
+
+    let (code, _, stderr) = run(&[&src.path("bundle.zip")]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("needs --output DIR"), "stderr: {stderr}");
+
+    // A directory sweep keeps to convertible extensions: the archive in it
+    // is not expanded (no new outputs for an existing `--input DIR` run).
+    let swept = Scratch::new("zip-sweep-out");
+    std::fs::write(src.0.join("c.md"), "# C\n").unwrap();
+    let (code, _, stderr) = run(&[&src.path(""), "--output", &swept.path("")]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(swept.0.join("c.md").is_file());
+    assert!(!swept.0.join("bundle").exists(), "stderr: {stderr}");
+}

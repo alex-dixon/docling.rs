@@ -838,7 +838,15 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-        if let Err(e) = check_output_collisions(&files, Path::new(&outdir), &to) {
+        // A `.zip` source expands into its documents (#557), each named
+        // `<archive minus .zip>/<entry path>` for its outputs; what it holds
+        // that does not convert is reported now, before any work starts.
+        let (items, archive_report) = expand_archives(files);
+        let pairs: Vec<(std::path::PathBuf, std::path::PathBuf)> = items
+            .iter()
+            .map(|i| (i.file.clone(), i.base.clone()))
+            .collect();
+        if let Err(e) = check_output_collisions(&pairs, Path::new(&outdir), &to) {
             eprintln!("error: {e}");
             return ExitCode::from(2);
         }
@@ -898,7 +906,14 @@ fn main() -> ExitCode {
             vlm,
             document_timeout,
         };
-        return run_batch(files, Path::new(&outdir), jobs, abort_on_error, &cfg);
+        return run_batch(
+            items,
+            archive_report,
+            Path::new(&outdir),
+            jobs,
+            abort_on_error,
+            &cfg,
+        );
     }
 
     // Past the batch branch exactly one format remains (several returned
@@ -916,6 +931,13 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
+    if is_zip(Path::new(&path)) {
+        eprintln!(
+            "error: '{path}' is a ZIP archive: its documents convert one output each, \
+             so it needs --output DIR"
+        );
+        return ExitCode::from(2);
+    }
     let source = match SourceDocument::from_file(&path) {
         Ok(src) => src,
         Err(e) => {
@@ -1516,6 +1538,129 @@ fn glob_base(pattern: &str) -> std::path::PathBuf {
 
 /// Where a converted file lands: `--output` + the input's path relative to the
 /// glob base, with the extension swapped per `--to`.
+/// One unit of batch work: a file, or a document inside a ZIP archive (#557).
+struct BatchItem {
+    /// The file — for an archive entry `<archive minus .zip>/<entry path>`,
+    /// which places its outputs (`out/<archive>/<entry>.md`).
+    file: std::path::PathBuf,
+    base: std::path::PathBuf,
+    /// The archive and directory index an entry is read from.
+    entry: Option<(std::path::PathBuf, usize)>,
+}
+
+impl BatchItem {
+    /// How progress and errors name the item: the path, or `archive.zip:entry`.
+    fn label(&self) -> String {
+        match &self.entry {
+            None => self.file.display().to_string(),
+            Some((zip, _)) => {
+                let inner = self
+                    .file
+                    .strip_prefix(zip.with_extension(""))
+                    .unwrap_or(&self.file);
+                format!("{}:{}", zip.display(), inner.display())
+            }
+        }
+    }
+}
+
+/// What archive expansion left out: entries skipped (unsupported, nested,
+/// unsafe, over a limit) and archives that would not open.
+#[derive(Default)]
+struct ArchiveReport {
+    skipped: usize,
+    failed: usize,
+}
+
+/// Whether a path names a ZIP archive (by extension, as every input is).
+fn is_zip(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+}
+
+/// Turn the batch's files into work items, a `.zip` into one item per
+/// document it holds (#557). Its entries are listed from the central
+/// directory — nothing is inflated yet — and the ones that do not convert are
+/// reported here with the reason; an archive that cannot be read is an error
+/// for that source only.
+fn expand_archives(
+    files: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+) -> (Vec<BatchItem>, ArchiveReport) {
+    let mut items = Vec::new();
+    let mut report = ArchiveReport::default();
+    for (file, base) in files {
+        if !is_zip(&file) {
+            items.push(BatchItem {
+                file,
+                base,
+                entry: None,
+            });
+            continue;
+        }
+        let archive = std::fs::File::open(&file)
+            .map_err(|e| e.to_string())
+            .and_then(|f| {
+                docling::archive::Archive::open(
+                    std::io::BufReader::new(f),
+                    &docling::ArchiveLimits::from_env(),
+                )
+                .map_err(|e| e.to_string())
+            });
+        let archive = match archive {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("error: {}: {e}", file.display());
+                report.failed += 1;
+                continue;
+            }
+        };
+        let root = file.with_extension("");
+        for entry in archive.entries() {
+            if let Some(reason) = &entry.skipped {
+                eprintln!("skip: {}:{}: {reason}", file.display(), entry.path);
+                report.skipped += 1;
+                continue;
+            }
+            items.push(BatchItem {
+                file: root.join(&entry.path),
+                base: base.clone(),
+                entry: Some((file.clone(), entry.index)),
+            });
+        }
+    }
+    (items, report)
+}
+
+/// The archives a batch worker has open, so each is read once per worker
+/// rather than once per entry.
+#[derive(Default)]
+struct ArchiveCache {
+    open: std::collections::HashMap<
+        std::path::PathBuf,
+        docling::archive::Archive<std::io::BufReader<std::fs::File>>,
+    >,
+}
+
+impl ArchiveCache {
+    fn read(&mut self, zip: &Path, index: usize) -> Result<SourceDocument, String> {
+        if !self.open.contains_key(zip) {
+            let f = std::fs::File::open(zip).map_err(|e| e.to_string())?;
+            let archive = docling::archive::Archive::open(
+                std::io::BufReader::new(f),
+                &docling::ArchiveLimits::from_env(),
+            )
+            .map_err(|e| e.to_string())?;
+            self.open.insert(zip.to_path_buf(), archive);
+        }
+        self.open
+            .get_mut(zip)
+            .expect("inserted above")
+            .read(index)
+            .map_err(|e| e.to_string())
+    }
+}
+
 fn batch_out_path(file: &Path, base: &Path, output: &Path, to: &str) -> std::path::PathBuf {
     let rel = file
         .strip_prefix(base)
@@ -1671,14 +1816,19 @@ fn write_page_images(
 
 /// Convert one batch file and write its output; returns the output path.
 fn batch_convert_one(
-    file: &Path,
-    base: &Path,
+    item: &BatchItem,
     output: &Path,
     cfg: &BatchCfg,
     converter: &DocumentConverter,
     pipe: &std::sync::Mutex<Option<Pipeline>>,
+    archives: &mut ArchiveCache,
 ) -> Result<BatchOutcome, String> {
-    let source = SourceDocument::from_file(file).map_err(|e| e.to_string())?;
+    let (file, base) = (item.file.as_path(), item.base.as_path());
+    let label = item.label();
+    let source = match &item.entry {
+        None => SourceDocument::from_file(file).map_err(|e| e.to_string())?,
+        Some((zip, index)) => archives.read(zip, *index)?,
+    };
     // Announce the document up front — with its page count for PDFs, so long
     // conversions are attributable while the dots tick.
     let pages = (source.format == InputFormat::Pdf)
@@ -1690,9 +1840,9 @@ fn batch_convert_one(
             None => n,
         });
     match pages {
-        Some(1) => eprintln!("start: {} (1 page)", file.display()),
-        Some(n) => eprintln!("start: {} ({n} pages)", file.display()),
-        None => eprintln!("start: {}", file.display()),
+        Some(1) => eprintln!("start: {label} (1 page)"),
+        Some(n) => eprintln!("start: {label} ({n} pages)"),
+        None => eprintln!("start: {label}"),
     }
     let started = std::time::Instant::now();
     let mut written: Vec<std::path::PathBuf> = Vec::new();
@@ -1703,8 +1853,7 @@ fn batch_convert_one(
     if cfg.to.iter().any(|t| t == "images") {
         if source.format != InputFormat::Pdf {
             return Err(format!(
-                "--to images rasterizes PDF inputs only ({} is not a PDF)",
-                file.display()
+                "--to images rasterizes PDF inputs only ({label} is not a PDF)"
             ));
         }
         let out = batch_out_path(file, base, output, "images");
@@ -1886,7 +2035,8 @@ struct BatchOutcome {
 /// failed file is reported and skipped — the batch keeps going, and the exit
 /// code is non-zero if anything failed.
 fn run_batch(
-    files: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    files: Vec<BatchItem>,
+    archive_report: ArchiveReport,
     output: &Path,
     jobs: usize,
     abort_on_error: bool,
@@ -1910,14 +2060,17 @@ fn run_batch(
                 // Converter construction is cheap configuration; one per
                 // worker keeps the loop borrow-free.
                 let converter = batch_converter(cfg);
+                // Archives this worker has opened, kept for their next entry.
+                let mut archives = ArchiveCache::default();
                 loop {
                     if abort.load(Ordering::Relaxed) {
                         break;
                     }
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((file, base)) = files.get(i) else {
+                    let Some(item) = files.get(i) else {
                         break;
                     };
+                    let file = item.label();
                     // A backend that panics on one file must not take the
                     // batch down with it (#395/#396): the documented contract
                     // here is "a failed file is reported and skipped". The
@@ -1927,7 +2080,7 @@ fn run_batch(
                     // poisoned by such a panic, and the per-worker converter
                     // is plain configuration, so the next file starts clean.
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        batch_convert_one(file, base, output, cfg, &converter, &pipe)
+                        batch_convert_one(item, output, cfg, &converter, &pipe, &mut archives)
                     }))
                     .unwrap_or_else(|_| {
                         Err("the conversion panicked (its message and backtrace are above)".into())
@@ -1952,14 +2105,13 @@ fn run_batch(
                             let tag = if problems.is_empty() { "ok" } else { "partial" };
                             match pages {
                                 Some(n) if n > 0 => eprintln!(
-                                    "{tag}: {} -> {shown} ({secs:.1}s, {:.0} ms/page)",
-                                    file.display(),
+                                    "{tag}: {file} -> {shown} ({secs:.1}s, {:.0} ms/page)",
                                     secs * 1000.0 / n as f64
                                 ),
-                                _ => eprintln!("{tag}: {} -> {shown} ({secs:.1}s)", file.display()),
+                                _ => eprintln!("{tag}: {file} -> {shown} ({secs:.1}s)"),
                             }
                             for problem in &problems {
-                                eprintln!("warning: {}: {problem}", file.display());
+                                eprintln!("warning: {file}: {problem}");
                             }
                             for out in &outs {
                                 println!("{}", out.display());
@@ -1979,7 +2131,7 @@ fn run_batch(
                         }
                         Err(e) => {
                             failed.fetch_add(1, Ordering::Relaxed);
-                            eprintln!("error: {}: {e}", file.display());
+                            eprintln!("error: {file}: {e}");
                             // Python's `--abort-on-error` (#489): the first
                             // failure ends the batch; the default keeps
                             // going and reports the failure in the exit code.
@@ -2014,16 +2166,24 @@ fn run_batch(
             });
         }
     });
-    let nf = failed.load(Ordering::Relaxed);
+    let ran = failed.load(Ordering::Relaxed);
     let ok = succeeded.load(Ordering::Relaxed);
     let np = partial.load(Ordering::Relaxed);
-    let skipped = files.len() - ok - nf - np;
+    let skipped = files.len() - ok - ran - np;
+    // An archive that would not open counts as a failed source.
+    let nf = ran + archive_report.failed;
     let mut summary = format!("batch: {ok} converted, {nf} failed");
     if np > 0 {
         summary.push_str(&format!(", {np} partial"));
     }
     if skipped > 0 {
         summary.push_str(&format!(", {skipped} skipped"));
+    }
+    if archive_report.skipped > 0 {
+        summary.push_str(&format!(
+            ", {} archive entries not converted",
+            archive_report.skipped
+        ));
     }
     eprintln!("{summary}");
     if nf > 0 {
