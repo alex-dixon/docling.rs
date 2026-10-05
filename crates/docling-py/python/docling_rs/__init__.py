@@ -69,6 +69,7 @@ from ._native import DocumentConverter as _NativeDocumentConverter
 __all__ = [
     "DocumentConverter",
     "ConversionResult",
+    "ArchiveItem",
     "ConversionStatus",
     "ErrorItem",
     "ConversionError",
@@ -103,6 +104,21 @@ class ConversionStatus(str, enum.Enum):
     SUCCESS = "success"
     PARTIAL_SUCCESS = "partial_success"
     FAILURE = "failure"
+
+
+@dataclass(frozen=True)
+class ArchiveItem:
+    """One entry of a ZIP archive converted with
+    :meth:`DocumentConverter.convert_archive` (#557). ``outcome`` is
+    ``"converted"`` (``result`` holds the :class:`ConversionResult`),
+    ``"skipped"`` (``error`` says why: unsupported type, nested archive,
+    unsafe path, over a ``DOCLING_RS_ZIP_MAX_*`` limit) or ``"failed"``
+    (``error`` is the conversion error — the other entries are unaffected)."""
+
+    path: str
+    outcome: str
+    result: Optional["ConversionResult"] = None
+    error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -506,6 +522,30 @@ class DocumentConverter:
         :meth:`convert`."""
         native = self._inner.convert_bytes(name, data, page_range=_page_range(page_range))
         return self._finish(_wrap(native))
+
+    def convert_archive(
+        self, source: Union[str, os.PathLike, bytes, DocumentStream]
+    ) -> Iterator[ArchiveItem]:
+        """Convert every document inside a ZIP archive (#557) — a path,
+        the archive's ``bytes`` or a :class:`DocumentStream` — yielding an
+        :class:`ArchiveItem` per entry in archive order. A broken document
+        fails only its own item; raises only when ``source`` is not a
+        readable ZIP archive. Nothing is extracted to disk, and the
+        ``DOCLING_RS_ZIP_MAX_*`` limits bound what is inflated."""
+        if isinstance(source, DocumentStream):
+            items = self._inner.convert_archive_bytes(source.stream.read())
+        elif isinstance(source, (bytes, bytearray)):
+            items = self._inner.convert_archive_bytes(bytes(source))
+        elif isinstance(source, str) and _is_url(source):
+            _, data = _fetch_url(source)
+            items = self._inner.convert_archive_bytes(data)
+        else:
+            items = self._inner.convert_archive(source)
+        for item in items:
+            result = None
+            if item.result is not None:
+                result = self._finish(_wrap(item.result))
+            yield ArchiveItem(item.path, item.outcome, result, item.error)
 
     def _convert_native(self, source, page_range=None):
         page_range = _page_range(page_range)

@@ -395,6 +395,9 @@ models, #388), and `pages: 'A-B'` converts only that
 | `convert(input, options?)` | `ConvertResult` | In-memory bytes (`{ name, data, format? }`). |
 | `convertFileAsync(path, options?)` | `Promise<ConvertResult>` | Off the event loop. |
 | `convertAsync(input, options?)` | `Promise<ConvertResult>` | Off the event loop. |
+| `convertArchiveFile(path, options?)` | `ArchiveItem[]` | Every document inside a ZIP (#557): per entry `outcome` `converted` (`result`) / `skipped` (`error` = the reason) / `failed` (`error`); one broken document fails only itself. |
+| `convertArchive(input, options?)` | `ArchiveItem[]` | Same, over in-memory bytes (`format` ignored). |
+| `convertArchiveFileAsync` / `convertArchiveAsync` | `Promise<ArchiveItem[]>` | Off the event loop. |
 | `streamFileMarkdown(path, options?)` | `AsyncGenerator<string>` | Markdown chunks in document order. |
 | `chunkFile(path, options?)` | `Chunk[]` | Convert + run docling's hierarchical/hybrid chunker. |
 | `chunk(input, options?)` | `Chunk[]` | Same, over in-memory bytes. |
@@ -415,7 +418,8 @@ enrichment switches and every PDF/image option (`ocrEngine`, `ocrLang`,
 
 `DocumentConverter` is the reusable form: `new DocumentConverter(converterOptions)`
 then `convert` / `convertFile` / `convertFileAsync` / `convertAsync` /
-`convertFileStreaming`. Converter config (`strict`, `fetchImages`,
+`convertFileStreaming` / `convertArchiveFile` / `convertArchive` (+ `*Async`).
+Converter config (`strict`, `fetchImages`,
 `allowedFormats`, `pipeline` + the `vlm*` options) is set once on the
 constructor; output options (`to`, `imageMode`, `artifactsDir`) are per call.
 

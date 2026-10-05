@@ -1350,7 +1350,8 @@ sweep (`--input DIR`) does not open archives it finds — only explicitly named
 ones expand — and a lone `.zip` without `--output` is a usage error (it holds
 many documents). From Rust, `DocumentConverter::convert_archive(reader)` is
 the same as a lazy iterator of per-entry `Converted` / `Skipped` / `Failed`
-outcomes (`docling::archive`).
+outcomes (`docling::archive`); the Python (`convert_archive`) and Node
+(`convertArchiveFile` / `convertArchive`) bindings expose the same.
 
 The PDF/image ML pipeline loads its models **once** and every matched file
 reuses the warm sessions — the same amortization `docling-rs serve` does
@@ -1405,6 +1406,12 @@ const { content } = convertFile('report.docx')
 const json = await convertFileAsync('report.docx', { to: 'json' })
 ```
 
+A ZIP archive converts as a batch of the documents inside it (#557):
+`convertArchiveFile('bundle.zip')` (and `convertArchive`, the `*Async`
+variants and the `DocumentConverter` methods) returns one `ArchiveItem` per
+entry — `converted` with its `result`, `skipped` with the reason, `failed`
+with the error — so one broken document never fails the rest.
+
 Declarative formats (Markdown, HTML, DOCX, XLSX, …) work out of the box. The
 PDF/image pipeline needs the ONNX models (none bundled) — so it throws
 until you fetch them with `scripts/install/download_dependencies.sh` — see
@@ -1437,6 +1444,11 @@ result = DocumentConverter().convert("report.docx")
 print(result.document.export_to_markdown())
 data = result.document.export_to_dict()   # docling JSON wire format (schema 1.10.0)
 ```
+
+`DocumentConverter().convert_archive("bundle.zip")` (#557) converts every
+document inside a ZIP — a path, the archive's `bytes` or a `DocumentStream` —
+yielding an `ArchiveItem` per entry (`outcome` `converted` / `skipped` /
+`failed`, with the `result` or the `error`).
 
 Declarative formats (Markdown, HTML, DOCX, XLSX, …) work with no models; the
 PDF/image pipeline downloads the ONNX models on first use via
