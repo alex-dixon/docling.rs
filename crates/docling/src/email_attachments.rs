@@ -24,13 +24,20 @@
 //! The [`ArchiveLimits`] bound what is kept, as they do for an archive; the
 //! compression ratio does not apply (MIME has no compression to bomb with).
 //! File names are reduced to a safe base name — a path in a `filename=`
-//! parameter never climbs anywhere — so a caller can write `name` to a
-//! directory as it is.
+//! parameter never climbs anywhere, bidirectional controls that disguise an
+//! extension are dropped — and made unique within the message (a second
+//! `report.pdf` is `report-2.pdf`), so a caller can write every `name` to one
+//! directory as it is. Payloads are the bytes as sent, with only the
+//! transfer encoding (base64, quoted-printable) undone: a text attachment
+//! keeps its own charset, which is what its `<meta charset>` or the caller's
+//! decoder expects (#564).
 //!
 //! [`DocumentConverter::convert_archive`]: crate::DocumentConverter::convert_archive
 //! [`DocumentConverter::convert_email_attachments`]: crate::DocumentConverter::convert_email_attachments
 
-use mail_parser::{MessageParser, MimeHeaders, PartType};
+use std::borrow::Cow;
+
+use mail_parser::{Encoding, MessageParser, MimeHeaders, PartType};
 
 use crate::archive::{is_archive, ArchiveLimits, ArchiveOutcome};
 use crate::error::ConversionError;
@@ -44,10 +51,12 @@ pub struct EmailAttachmentInfo {
     /// Position among the message's attachments (for
     /// [`EmailAttachments::read`] / [`EmailAttachments::data`]).
     pub index: usize,
-    /// A safe file name: the declared name reduced to its base name with
-    /// path separators and control characters removed, `attachment-N` (plus
-    /// the extension its media type implies) when the message declares none,
-    /// `<subject>.eml` for a forwarded message.
+    /// A safe file name, unique within the message: the declared name
+    /// reduced to its base name with path separators, control and
+    /// bidirectional-format characters removed, `attachment-N` (plus the
+    /// extension its media type implies) when the message declares none,
+    /// `<subject>.eml` for a forwarded message; a repeated name gets `-2`,
+    /// `-3`, … before its extension.
     pub name: String,
     /// The declared media type (`type/subtype`, lower-case), when there is one.
     pub content_type: Option<String>,
@@ -56,9 +65,10 @@ pub struct EmailAttachmentInfo {
     pub format: Option<InputFormat>,
     /// Payload size in bytes (0 for a payload-less attachment).
     pub size: u64,
-    /// Whether the message shows it inline (an image of the HTML body:
-    /// `Content-Disposition: inline`, a `Content-ID`, Outlook's hidden flag)
-    /// rather than as a file to open.
+    /// Whether it is an image the message shows inline — part of the HTML
+    /// body (`Content-Disposition: inline` or a `Content-ID` on an image
+    /// part, Outlook's hidden flag) rather than a file to open. Only images:
+    /// a PDF some mailers dispose `inline` is still an attachment here.
     pub inline: bool,
     /// Why the attachment is not converted, when it is not: no payload
     /// (reference, OLE object), over a limit, an archive, or an unsupported
@@ -75,11 +85,13 @@ pub struct EmailAttachments {
 }
 
 /// An attachment as the message format stores it, before classification.
-struct RawAttachment {
+struct RawAttachment<'a> {
     name: Option<String>,
     content_type: Option<String>,
-    /// `None` for an attachment without bytes (by reference, OLE).
-    payload: Option<Vec<u8>>,
+    /// `None` for an attachment without bytes (by reference, OLE). Borrowed
+    /// from the message where it can be, so a payload the limits drop is
+    /// never copied.
+    payload: Option<Cow<'a, [u8]>>,
     inline: bool,
     /// A forwarded message (`message/rfc822`, an embedded `.msg`).
     message: bool,
@@ -97,7 +109,7 @@ impl EmailAttachments {
         } else {
             eml_attachments(bytes)?
         };
-        let mut entries = Vec::with_capacity(raw.len());
+        let mut entries: Vec<EmailAttachmentInfo> = Vec::with_capacity(raw.len());
         let mut payloads = Vec::with_capacity(raw.len());
         let mut total: u64 = 0;
         for (index, att) in raw.into_iter().enumerate() {
@@ -107,11 +119,14 @@ impl EmailAttachments {
                 .as_deref()
                 .map(|ct| ct.trim().to_ascii_lowercase())
                 .filter(|ct| !ct.is_empty());
-            let name = safe_name(
-                att.name.as_deref(),
-                content_type.as_deref(),
-                index,
-                att.message,
+            let name = unique_name(
+                safe_name(
+                    att.name.as_deref(),
+                    content_type.as_deref(),
+                    index,
+                    att.message,
+                ),
+                &entries,
             );
             let skip = |why: &str| Some(why.to_string());
             let mut format = None;
@@ -145,16 +160,27 @@ impl EmailAttachments {
                     }
                 }
             };
+            // Inline means "an image of the body": Apple Mail and others
+            // dispose a PDF `inline` to preview it, and a caller skipping
+            // inline parts to drop logos must not lose it (#564).
+            let is_image = content_type
+                .as_deref()
+                .is_some_and(|ct| ct.starts_with("image/"))
+                || matches!(format, Some(InputFormat::Image | InputFormat::Svg));
             entries.push(EmailAttachmentInfo {
                 index,
                 name,
                 content_type,
                 format,
                 size,
-                inline: att.inline,
+                inline: att.inline && is_image,
                 skipped,
             });
-            payloads.push(if keep { att.payload } else { None });
+            payloads.push(if keep {
+                att.payload.map(Cow::into_owned)
+            } else {
+                None
+            });
         }
         Ok(Self { entries, payloads })
     }
@@ -203,13 +229,24 @@ impl EmailAttachments {
 /// The attachments of an RFC 822 message: mail-parser's `attachments()` —
 /// every leaf part that is not the text or HTML body — including the inline
 /// images of `multipart/related` and nested `message/rfc822` parts.
-fn eml_attachments(bytes: &[u8]) -> Result<Vec<RawAttachment>, ConversionError> {
+fn eml_attachments<'a>(bytes: &'a [u8]) -> Result<Vec<RawAttachment<'a>>, ConversionError> {
     let msg = MessageParser::default()
         .parse(bytes)
         .ok_or_else(|| ConversionError::Parse("email: could not parse message".into()))?;
     Ok(msg
         .attachments()
         .map(|part| {
+            // mail-parser decodes a text part's body into a UTF-8 string —
+            // its own charset gone, undecodable bytes U+FFFD — which is the
+            // wrong payload for an attachment (#564): an HTML file declaring
+            // `windows-1252` would come back mojibake. Take the bytes as
+            // sent off the message and undo only the transfer encoding (for
+            // a binary part that is what `contents()` holds too, and an
+            // unencoded one is then borrowed, not copied, until the limits
+            // have kept it); `contents()` is the fallback for a span the
+            // parser could not place.
+            let payload: Cow<'a, [u8]> = transfer_decoded(bytes, part)
+                .unwrap_or_else(|| Cow::Owned(part.contents().to_vec()));
             let content_type = part.content_type().map(|ct| match ct.subtype() {
                 Some(sub) => format!("{}/{sub}", ct.ctype()),
                 None => ct.ctype().to_string(),
@@ -225,7 +262,7 @@ fn eml_attachments(bytes: &[u8]) -> Result<Vec<RawAttachment>, ConversionError> 
             let name = part.attachment_name().map(str::to_string).or_else(|| {
                 part.message()
                     .and_then(|m| m.subject())
-                    .map(|s| format!("{s}.eml"))
+                    .map(|s| format!("{}.eml", subject_stem(s)))
             });
             RawAttachment {
                 name,
@@ -234,7 +271,7 @@ fn eml_attachments(bytes: &[u8]) -> Result<Vec<RawAttachment>, ConversionError> 
                 } else {
                     content_type
                 },
-                payload: Some(part.contents().to_vec()),
+                payload: Some(payload),
                 inline,
                 message,
                 missing: None,
@@ -243,8 +280,33 @@ fn eml_attachments(bytes: &[u8]) -> Result<Vec<RawAttachment>, ConversionError> 
         .collect())
 }
 
+/// A part's body bytes as sent, with the `Content-Transfer-Encoding`
+/// undone and nothing else: mail-parser's own base64 / quoted-printable
+/// decoders over the raw body span. `None` when the span or the decode is
+/// off (the caller then falls back to mail-parser's decoded contents).
+fn transfer_decoded<'a>(
+    message: &'a [u8],
+    part: &mail_parser::MessagePart<'_>,
+) -> Option<Cow<'a, [u8]>> {
+    let raw = message.get(part.offset_body as usize..part.offset_end as usize)?;
+    match part.encoding {
+        Encoding::None => Some(Cow::Borrowed(raw)),
+        Encoding::Base64 => mail_parser::decoders::base64::base64_decode(raw).map(Cow::Owned),
+        Encoding::QuotedPrintable => {
+            mail_parser::decoders::quoted_printable::quoted_printable_decode(raw).map(Cow::Owned)
+        }
+    }
+}
+
+/// A forwarded message's subject as a file stem: `Re: Q3/Q4 plan` is one
+/// name, not a path — the separators [`safe_name`] would split on become
+/// dashes.
+fn subject_stem(subject: &str) -> String {
+    subject.replace(['/', '\\'], "-")
+}
+
 /// The attachments of an Outlook `.msg` (see [`crate::backend::msg`]).
-fn msg_attachments(bytes: &[u8]) -> Result<Vec<RawAttachment>, ConversionError> {
+fn msg_attachments(bytes: &[u8]) -> Result<Vec<RawAttachment<'static>>, ConversionError> {
     let atts = crate::backend::msg::attachments(bytes)
         .ok_or_else(|| ConversionError::Parse("email: could not parse .msg container".into()))?;
     Ok(atts
@@ -260,7 +322,7 @@ fn msg_attachments(bytes: &[u8]) -> Result<Vec<RawAttachment>, ConversionError> 
                 name: a.name,
                 content_type: a.mime,
                 missing: a.payload.is_none().then_some(missing).flatten(),
-                payload: a.payload,
+                payload: a.payload.map(Cow::Owned),
                 inline: a.inline,
                 message: a.method == 5,
             }
@@ -282,10 +344,27 @@ fn detect_format(
         .or_else(|| payload.and_then(crate::sniff::detect))
 }
 
+/// Unicode format characters that change how a name *reads* without being
+/// part of it: the bidi overrides and embeddings (`U+202E` turns
+/// `invoice\u{202E}fdp.exe` into "invoice exe.pdf" on screen), the
+/// zero-width joiners / spaces, the BOM. Dropped from file names (#564).
+fn is_disguise(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{061C}'
+            | '\u{180E}'
+    )
+}
+
 /// A file name safe to write into a directory: the base name of whatever the
-/// message declared (`/`, `\` and `..` segments dropped), control characters
-/// removed, one line; `attachment-N` with the media type's extension when
-/// nothing usable remains.
+/// message declared (`/`, `\` and `..` segments dropped), control and
+/// bidirectional-format characters removed, one line; `attachment-N` with
+/// the media type's extension when nothing usable remains.
 fn safe_name(
     declared: Option<&str>,
     content_type: Option<&str>,
@@ -298,7 +377,7 @@ fn safe_name(
                 .next()
                 .unwrap_or("")
                 .chars()
-                .filter(|c| !c.is_control())
+                .filter(|c| !c.is_control() && !is_disguise(*c))
                 .collect::<String>()
         })
         .map(|n| n.trim().trim_matches('.').to_string())
@@ -314,6 +393,25 @@ fn safe_name(
             format!("attachment-{}{ext}", index + 1)
         }
     }
+}
+
+/// `name` made unique among `taken`: `report.pdf` already listed →
+/// `report-2.pdf`, then `report-3.pdf`, … (the counter before the
+/// extension), so writing every attachment to one directory overwrites
+/// nothing (#564).
+fn unique_name(name: String, taken: &[EmailAttachmentInfo]) -> String {
+    let used = |n: &str| taken.iter().any(|e| e.name == n);
+    if !used(&name) {
+        return name;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
+        _ => (name.clone(), String::new()),
+    };
+    (2..)
+        .map(|n| format!("{stem}-{n}{ext}"))
+        .find(|candidate| !used(candidate))
+        .expect("an unbounded counter finds a free name")
 }
 
 /// The extension a nameless attachment of this format gets, so its
@@ -642,6 +740,106 @@ mod tests {
         assert_eq!(atts.data(6).unwrap(), b"MZ");
         // …but `read` refuses what will not convert.
         assert!(atts.read(4).is_err());
+    }
+
+    /// #564: a text attachment's bytes are the bytes as sent, only the
+    /// transfer encoding undone — a windows-1252 HTML file keeps its
+    /// `\xe9`, in every transfer encoding, instead of the UTF-8
+    /// re-encoding (or the U+FFFD) mail-parser's decoded body would give.
+    #[test]
+    fn text_payloads_keep_their_bytes() {
+        let latin1_html =
+            b"<html><head><meta charset=\"windows-1252\"></head><body>caf\xe9</body></html>";
+        let mut m = String::from(
+            "From: A <a@x.com>\r\nSubject: S\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"bb\"\r\n\r\n\
+             --bb\r\nContent-Type: text/plain\r\n\r\nBody.\r\n",
+        );
+        // 8bit: raw bytes on the wire.
+        m.push_str(
+            "--bb\r\nContent-Type: text/html; charset=windows-1252\r\n\
+             Content-Disposition: attachment; filename=\"page.html\"\r\n\
+             Content-Transfer-Encoding: 8bit\r\n\r\n",
+        );
+        let mut bytes = m.into_bytes();
+        bytes.extend_from_slice(latin1_html);
+        bytes.extend_from_slice(b"\r\n");
+        // quoted-printable, no charset parameter at all.
+        bytes.extend_from_slice(
+            b"--bb\r\nContent-Type: text/plain\r\n\
+              Content-Disposition: attachment; filename=\"note.txt\"\r\n\
+              Content-Transfer-Encoding: quoted-printable\r\n\r\ncaf=E9 au lait=\r\n done\r\n",
+        );
+        // base64 of the same Latin-1 text.
+        bytes.extend_from_slice(
+            b"--bb\r\nContent-Type: text/plain; charset=iso-8859-1\r\n\
+              Content-Disposition: attachment; filename=\"b64.txt\"\r\n\
+              Content-Transfer-Encoding: base64\r\n\r\n",
+        );
+        bytes.extend_from_slice(base64(b"caf\xe9").as_bytes());
+        bytes.extend_from_slice(b"\r\n--bb--\r\n");
+        let atts = open(&bytes);
+        assert_eq!(atts.data(0).unwrap(), latin1_html);
+        assert_eq!(atts.data(1).unwrap(), b"caf\xe9 au lait done");
+        assert_eq!(atts.data(2).unwrap(), b"caf\xe9");
+        assert_eq!(atts.entries()[0].size, latin1_html.len() as u64);
+    }
+
+    /// #564: `inline` is an image of the body, not any part disposed
+    /// `inline`; duplicate names get a counter; a forwarded subject with a
+    /// slash is one name; bidi overrides are dropped from names.
+    #[test]
+    fn inline_images_only_unique_safe_names() {
+        let nested = "From: C <c@z.com>\r\nSubject: Re: Q3/Q4 plan\r\n\r\nInner.\r\n";
+        let m = eml(&[
+            (
+                "Content-Type: application/pdf\r\n\
+                 Content-Disposition: inline; filename=\"report.pdf\"\r\n",
+                b"%PDF-1.4 one",
+            ),
+            (
+                "Content-Type: application/pdf\r\n\
+                 Content-Disposition: attachment; filename=\"report.pdf\"\r\n",
+                b"%PDF-1.4 two",
+            ),
+            (
+                "Content-Type: application/pdf\r\n\
+                 Content-Disposition: attachment; filename=\"report.pdf\"\r\n",
+                b"%PDF-1.4 three",
+            ),
+            (
+                "Content-Type: image/png\r\nContent-ID: <logo@x>\r\n\
+                 Content-Disposition: inline; filename=\"logo.png\"\r\n",
+                b"\x89PNG\r\n\x1a\n",
+            ),
+            (
+                "Content-Type: message/rfc822\r\nContent-Disposition: attachment\r\n",
+                nested.as_bytes(),
+            ),
+            (
+                "Content-Type: application/pdf\r\n\
+                 Content-Disposition: attachment; filename=\"invoice\u{202E}fdp.exe\"\r\n",
+                b"%PDF-1.4 rlo",
+            ),
+        ]);
+        let atts = open(&m);
+        let names: Vec<(&str, bool)> = atts
+            .entries()
+            .iter()
+            .map(|e| (e.name.as_str(), e.inline))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("report.pdf", false),
+                ("report-2.pdf", false),
+                ("report-3.pdf", false),
+                ("logo.png", true),
+                ("Re: Q3-Q4 plan.eml", false),
+                ("invoicefdp.exe", false),
+            ]
+        );
+        assert_eq!(atts.data(1).unwrap(), b"%PDF-1.4 two");
     }
 
     #[test]

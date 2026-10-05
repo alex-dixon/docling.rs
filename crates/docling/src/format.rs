@@ -167,6 +167,62 @@ impl InputFormat {
         }
     }
 
+    /// The inverse of [`as_str`](Self::as_str): the format for one of its
+    /// stable identifiers (`"pdf"`, `"xml_jats"`, …; case-insensitive), as the
+    /// bindings receive it. `None` for anything else.
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id.trim().to_ascii_lowercase().as_str() {
+            "docx" => InputFormat::Docx,
+            "pptx" => InputFormat::Pptx,
+            "html" => InputFormat::Html,
+            "image" => InputFormat::Image,
+            "pdf" => InputFormat::Pdf,
+            "asciidoc" => InputFormat::Asciidoc,
+            "md" => InputFormat::Md,
+            "csv" => InputFormat::Csv,
+            "xlsx" => InputFormat::Xlsx,
+            "doc" => InputFormat::Doc,
+            "xls" => InputFormat::Xls,
+            "ppt" => InputFormat::Ppt,
+            "odt" => InputFormat::Odt,
+            "ods" => InputFormat::Ods,
+            "odp" => InputFormat::Odp,
+            "xml_uspto" => InputFormat::XmlUspto,
+            "xml_jats" => InputFormat::XmlJats,
+            "xml_xbrl" => InputFormat::XmlXbrl,
+            "xml_doclang" => InputFormat::XmlDoclang,
+            "doctags" => InputFormat::DocTags,
+            "dclx" => InputFormat::Dclx,
+            "mets_gbs" => InputFormat::MetsGbs,
+            "json_docling" => InputFormat::JsonDocling,
+            "audio" => InputFormat::Audio,
+            "video" => InputFormat::Video,
+            "vtt" => InputFormat::Vtt,
+            "ebc" => InputFormat::Ebcdic,
+            "latex" => InputFormat::Latex,
+            "email" => InputFormat::Email,
+            "epub" => InputFormat::Epub,
+            "mhtml" => InputFormat::Mhtml,
+            "rtf" => InputFormat::Rtf,
+            "visio" => InputFormat::Visio,
+            "svg" => InputFormat::Svg,
+            "pages" => InputFormat::Pages,
+            "numbers" => InputFormat::Numbers,
+            "key" => InputFormat::Keynote,
+            "abiword" => InputFormat::Abiword,
+            "wordperfect" => InputFormat::WordPerfect,
+            "works" => InputFormat::Works,
+            "dbf" => InputFormat::Dbf,
+            "dif" => InputFormat::Dif,
+            "sylk" => InputFormat::Sylk,
+            "lotus" => InputFormat::Lotus,
+            "quattro" => InputFormat::QuattroPro,
+            "staroffice5" => InputFormat::StarOffice5,
+            "djvu" => InputFormat::Djvu,
+            _ => return None,
+        })
+    }
+
     /// Best-effort format detection from a media type (`type/subtype`,
     /// parameters and case ignored) — what an email attachment or an HTTP
     /// response declares when its name has no usable extension (#561). The
@@ -211,7 +267,8 @@ impl InputFormat {
             | "image/gif" | "image/heic" | "image/heif" => InputFormat::Image,
             "image/svg+xml" => InputFormat::Svg,
             "audio/mpeg" | "audio/mp3" | "audio/wav" | "audio/x-wav" | "audio/wave"
-            | "audio/mp4" | "audio/aac" | "audio/ogg" | "audio/flac" => InputFormat::Audio,
+            | "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac" | "audio/ogg"
+            | "audio/flac" => InputFormat::Audio,
             "video/mp4" | "video/quicktime" | "video/x-msvideo" | "video/x-matroska"
             | "video/webm" | "video/mpeg" => InputFormat::Video,
             _ => return None,

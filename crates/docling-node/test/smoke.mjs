@@ -23,6 +23,7 @@ import {
   DocumentConverter,
   emailAttachments,
   emailAttachmentsFile,
+  emailAttachmentsFileAsync,
   formatFromName,
   Pipeline,
   streamChunks,
@@ -124,12 +125,45 @@ async function main() {
     // In-memory bytes give the same listing, and the payload converts.
     const fromBytes = emailAttachments({ name: 'm.eml', data: readFileSync(eml) })
     assert.deepEqual(fromBytes, atts)
-    const res = convert({ name: att.name, data: att.data })
+    // `format` carries what the extension cannot (#564).
+    const res = convert({ name: att.name, data: att.data, format: att.format })
     assert.match(res.content, /This is a test attachment file/)
     // A limit skips an attachment and drops its payload.
     const limited = emailAttachmentsFile(eml, { maxEntrySize: 10 })
     assert.equal(limited[0].skipped, 'larger than the per-entry size limit')
     assert.equal(limited[0].data, undefined)
+  })
+
+  await check('emailAttachments: payload bytes as sent, inline images only, unique names (#564)', async () => {
+    const b64 = (b) => Buffer.from(b).toString('base64')
+    const latin1 = Buffer.from('caf\xe9', 'latin1')
+    const msg = [
+      'From: a@x.com', 'Subject: S', 'MIME-Version: 1.0',
+      'Content-Type: multipart/mixed; boundary="bb"', '', '--bb',
+      'Content-Type: text/plain', '', 'Body.',
+      '--bb', 'Content-Type: text/plain; charset=iso-8859-1',
+      'Content-Disposition: attachment; filename="note.txt"',
+      'Content-Transfer-Encoding: base64', '', b64(latin1),
+      '--bb', 'Content-Type: application/pdf',
+      'Content-Disposition: inline; filename="report.pdf"',
+      'Content-Transfer-Encoding: base64', '', b64('%PDF-1.4 one'),
+      '--bb', 'Content-Type: application/pdf',
+      'Content-Disposition: attachment; filename="report.pdf"',
+      'Content-Transfer-Encoding: base64', '', b64('%PDF-1.4 two'),
+      '--bb--', '',
+    ].join('\r\n')
+    const atts = emailAttachments({ name: 'm.eml', data: Buffer.from(msg) })
+    // The async form lists the same, off the event loop.
+    const eml = new URL('../../../tests/data/email/sources/eml_with_attachment.eml', import.meta.url)
+      .pathname
+    assert.deepEqual(await emailAttachmentsFileAsync(eml), emailAttachmentsFile(eml))
+    assert.deepEqual(
+      atts.map((a) => [a.name, a.inline]),
+      [['note.txt', false], ['report.pdf', false], ['report-2.pdf', false]],
+    )
+    // Latin-1 stays Latin-1: no UTF-8 re-encoding of a text attachment.
+    assert.deepEqual([...atts[0].data], [...latin1])
+    assert.equal(atts[2].data.toString(), '%PDF-1.4 two')
   })
 
   await check('convert (bytes) → Markdown round-trips', () => {

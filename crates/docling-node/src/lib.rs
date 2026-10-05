@@ -2272,9 +2272,10 @@ impl Task for ChunkBytesTask {
 pub struct EmailAttachment {
     /// Position among the message's attachments.
     pub index: u32,
-    /// A safe file name (base name only, control characters removed;
-    /// `attachment-N` when the message declares none, `<subject>.eml` for a
-    /// forwarded message) — safe to write into a directory as it is.
+    /// A safe file name, unique within the message (base name only, control
+    /// and bidi-format characters removed; `attachment-N` when the message
+    /// declares none, `<subject>.eml` for a forwarded message; a repeated
+    /// name gets `-2`, `-3`, …) — safe to write into one directory as it is.
     pub name: String,
     /// The declared media type (`type/subtype`), if any.
     pub content_type: Option<String>,
@@ -2284,8 +2285,8 @@ pub struct EmailAttachment {
     pub format: Option<String>,
     /// Payload size in bytes (0 without a payload).
     pub size: i64,
-    /// Shown inline by the message (an image of the HTML body) rather than as
-    /// a file to open.
+    /// An image the message shows inline (part of the HTML body) rather than
+    /// a file to open; a PDF disposed `inline` is still `false` (#564).
     pub inline: bool,
     /// Why it is not converted, when it is not: no payload (a reference, an
     /// OLE object), over a limit, a nested archive, an unsupported type.
@@ -2308,7 +2309,9 @@ pub struct EmailAttachmentOptions {
 
 /// The attachments of an in-memory `.eml` / `.msg` with their payloads. A
 /// forwarded message is an `.eml` entry whose `data` is the nested message.
-/// Convert one with `convert({ name: att.name, data: att.data })`.
+/// Convert one with `convert({ name: att.name, data: att.data, format: att.format })`
+/// — `format` carries what the extension cannot (a `scan.bin` sent as
+/// `application/pdf`, a nameless sniffed part; #564).
 #[napi]
 pub fn email_attachments(
     input: ConvertInput,
@@ -2327,8 +2330,105 @@ pub fn email_attachments_file(
     attachments_of(&bytes, options.unwrap_or_default())
 }
 
+/// Async (Promise-returning) [`email_attachments`]: a large `.msg` parses off
+/// the event loop (#564).
+#[napi(ts_return_type = "Promise<Array<EmailAttachment>>")]
+pub fn email_attachments_async(
+    input: ConvertInput,
+    options: Option<EmailAttachmentOptions>,
+) -> Result<AsyncTask<EmailAttachmentsTask>> {
+    Ok(AsyncTask::new(EmailAttachmentsTask {
+        source: ArchiveSource::Bytes(input.data.to_vec()),
+        options: options.unwrap_or_default(),
+    }))
+}
+
+/// Async (Promise-returning) [`email_attachments_file`].
+#[napi(ts_return_type = "Promise<Array<EmailAttachment>>")]
+pub fn email_attachments_file_async(
+    path: String,
+    options: Option<EmailAttachmentOptions>,
+) -> Result<AsyncTask<EmailAttachmentsTask>> {
+    Ok(AsyncTask::new(EmailAttachmentsTask {
+        source: ArchiveSource::Path(path),
+        options: options.unwrap_or_default(),
+    }))
+}
+
+pub struct EmailAttachmentsTask {
+    source: ArchiveSource,
+    options: EmailAttachmentOptions,
+}
+
+/// A Send-safe [`EmailAttachment`] (raw bytes, no `Buffer`). Public only as
+/// the task's output.
+#[doc(hidden)]
+pub struct RawEmailAttachment {
+    index: u32,
+    name: String,
+    content_type: Option<String>,
+    format: Option<String>,
+    size: i64,
+    inline: bool,
+    skipped: Option<String>,
+    data: Option<Vec<u8>>,
+}
+
+impl Task for EmailAttachmentsTask {
+    type Output = Vec<RawEmailAttachment>;
+    type JsValue = Vec<EmailAttachment>;
+
+    fn compute(&mut self) -> Result<Vec<RawEmailAttachment>> {
+        let bytes = match std::mem::replace(&mut self.source, ArchiveSource::Taken) {
+            ArchiveSource::Path(path) => std::fs::read(&path)
+                .map_err(|e| Error::new(Status::GenericFailure, format!("{path}: {e}")))?,
+            ArchiveSource::Bytes(bytes) => bytes,
+            ArchiveSource::Taken => {
+                return Err(Error::new(Status::GenericFailure, "attachment task reused"))
+            }
+        };
+        let options = std::mem::take(&mut self.options);
+        raw_attachments_of(&bytes, options)
+    }
+
+    fn resolve(
+        &mut self,
+        _env: Env,
+        output: Vec<RawEmailAttachment>,
+    ) -> Result<Vec<EmailAttachment>> {
+        Ok(output
+            .into_iter()
+            .map(RawEmailAttachment::into_js)
+            .collect())
+    }
+}
+
+impl RawEmailAttachment {
+    fn into_js(self) -> EmailAttachment {
+        EmailAttachment {
+            index: self.index,
+            name: self.name,
+            content_type: self.content_type,
+            format: self.format,
+            size: self.size,
+            inline: self.inline,
+            skipped: self.skipped,
+            data: self.data.map(Buffer::from),
+        }
+    }
+}
+
 fn attachments_of(bytes: &[u8], o: EmailAttachmentOptions) -> Result<Vec<EmailAttachment>> {
-    let defaults = docling::ArchiveLimits::default();
+    Ok(raw_attachments_of(bytes, o)?
+        .into_iter()
+        .map(RawEmailAttachment::into_js)
+        .collect())
+}
+
+fn raw_attachments_of(bytes: &[u8], o: EmailAttachmentOptions) -> Result<Vec<RawEmailAttachment>> {
+    // The same `DOCLING_RS_ZIP_MAX_*` defaults the converter, CLI and serve
+    // apply (#564); an explicit option overrides its field.
+    let defaults = docling::ArchiveLimits::from_env();
     let non_negative = |v: Option<i64>, default: u64| match v {
         Some(v) if v < 0 => Err(Error::new(
             Status::InvalidArg,
@@ -2347,7 +2447,7 @@ fn attachments_of(bytes: &[u8], o: EmailAttachmentOptions) -> Result<Vec<EmailAt
     Ok(atts
         .entries()
         .iter()
-        .map(|e| EmailAttachment {
+        .map(|e| RawEmailAttachment {
             index: e.index as u32,
             name: e.name.clone(),
             content_type: e.content_type.clone(),
@@ -2355,7 +2455,7 @@ fn attachments_of(bytes: &[u8], o: EmailAttachmentOptions) -> Result<Vec<EmailAt
             size: e.size as i64,
             inline: e.inline,
             skipped: e.skipped.clone(),
-            data: atts.data(e.index).map(|d| Buffer::from(d.to_vec())),
+            data: atts.data(e.index).map(<[u8]>::to_vec),
         })
         .collect())
 }

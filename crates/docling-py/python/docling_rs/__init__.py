@@ -538,7 +538,7 @@ class DocumentConverter:
         readable ZIP archive. Nothing is extracted to disk, and the
         ``DOCLING_RS_ZIP_MAX_*`` limits bound what is inflated."""
         if isinstance(source, DocumentStream):
-            items = self._inner.convert_archive_bytes(source.stream.read())
+            items = self._inner.convert_archive_bytes(_stream_bytes(source.stream))
         elif isinstance(source, (bytes, bytearray)):
             items = self._inner.convert_archive_bytes(bytes(source))
         elif isinstance(source, str) and _is_url(source):
@@ -555,8 +555,12 @@ class DocumentConverter:
     def _convert_native(self, source, page_range=None):
         page_range = _page_range(page_range)
         if isinstance(source, DocumentStream):
+            fmt = getattr(source, "format", None)
             return self._inner.convert_bytes(
-                source.name, source.stream.read(), page_range=page_range
+                source.name,
+                _stream_bytes(source.stream),
+                page_range=page_range,
+                format=InputFormat(fmt).value if fmt is not None else None,
             )
         if isinstance(source, str) and _is_url(source):
             name, data = _fetch_url(source)
@@ -591,12 +595,15 @@ class EmailAttachment:
     data: Optional[bytes]
 
     def as_stream(self) -> DocumentStream:
-        """The payload as a :class:`DocumentStream` named after the attachment,
-        ready for :meth:`DocumentConverter.convert`. Raises ``ValueError``
-        for an attachment without a payload."""
+        """The payload as a :class:`DocumentStream` named after the attachment
+        and carrying its detected ``format`` (#564: a ``scan.bin`` sent as
+        ``application/pdf``, or a nameless sniffed part, converts as what it
+        is, not what its extension says), ready for
+        :meth:`DocumentConverter.convert`. Raises ``ValueError`` for an
+        attachment without a payload."""
         if self.data is None:
             raise ValueError(f"attachment {self.name!r} has no payload ({self.skipped})")
-        return DocumentStream(name=self.name, stream=io.BytesIO(self.data))
+        return DocumentStream(name=self.name, stream=io.BytesIO(self.data), format=self.format)
 
 
 def email_attachments(
@@ -613,7 +620,7 @@ def email_attachments(
     can be written to a directory as it is. Convert one with
     ``converter.convert(attachment.as_stream())``."""
     if isinstance(source, DocumentStream):
-        data = source.stream.read()
+        data = _stream_bytes(source.stream)
     elif isinstance(source, (bytes, bytearray, memoryview)):
         data = bytes(source)
     else:
@@ -641,6 +648,15 @@ def _pdf_pipeline_options(
         if fo is not None and getattr(fo, "pipeline_options", None) is not None:
             return fo.pipeline_options
     return None
+
+
+def _stream_bytes(stream) -> bytes:
+    """A :class:`DocumentStream`'s whole content: rewound first when it can
+    be, as docling's backends do (``path_or_stream.seek(0)``), so a stream
+    already read once — or handed over after a peek — still converts (#564)."""
+    if hasattr(stream, "seekable") and stream.seekable():
+        stream.seek(0)
+    return stream.read()
 
 
 def _page_range(page_range) -> Optional[Tuple[int, int]]:

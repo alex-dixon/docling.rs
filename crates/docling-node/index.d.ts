@@ -31,8 +31,15 @@ export type {
 // Format helpers pass straight through from the native binding.
 export { supportedFormats, formatFromName } from './native'
 // Email attachment payloads of an .eml / .msg (#561): list them with their
-// bytes, then `convert({ name: att.name, data: att.data })` the ones you want.
-export { emailAttachments, emailAttachmentsFile } from './native'
+// bytes, then `convert({ name: att.name, data: att.data, format: att.format })`
+// the ones you want — `format` carries what the extension cannot (#564). The
+// `*Async` forms parse off the event loop.
+export {
+  emailAttachments,
+  emailAttachmentsFile,
+  emailAttachmentsAsync,
+  emailAttachmentsFileAsync,
+} from './native'
 
 /** Callback form used by the native streaming API (prefer {@link streamFileMarkdown}). */
 export type StreamCallback = (err: Error | null, chunk: string | undefined | null) => void
