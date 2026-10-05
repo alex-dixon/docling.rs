@@ -504,6 +504,17 @@ These are deliberate or unavoidable divergences, not bugs.
 7. **XML format detection sniffs content.** JATS, USPTO and XBRL all use `.xml`;
    the converter routes by content markers (`us-patent` → USPTO, `us-gaap`/`dei`
    → XBRL, else JATS) rather than the extension alone.
+   A file whose extension lies gets a second chance (#556): only when the
+   conversion as its extension's format *fails* is the content checked —
+   RTF's `{\rtf`, the PDF header, a ZIP package's parts (OOXML main part,
+   ODF / EPUB `mimetype`), an OLE file's root streams (Word / Excel /
+   PowerPoint / Outlook), HTML markup — and the file converted once more as
+   that format, with a `docling: warning:` line naming both and the result's
+   `format` the one used. A file that converts as named is never inspected,
+   so nothing changes for it; when nothing is recognised or the retry fails
+   too, the first error stands. docling decides by extension and MIME guess
+   up front and fails such files (RTF / HTML / DOCX saved as `.doc`, the
+   common case in legacy archives).
 
 8. **Headless-browser pass is opt-in.** Form key-value regions, inline
    visibility, and nested-table cell flattening (docling's exact spacing) are

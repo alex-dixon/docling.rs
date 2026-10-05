@@ -59,7 +59,11 @@ The public API works end to end across **Markdown, CSV, HTML, AsciiDoc, DOCX,
 PPTX, XLSX, legacy DOC/XLS/PPT, Apple iWork, EPUB, ODF, RTF, WebVTT, Email, MHTML, JATS, USPTO,
 XBRL, LaTeX, JSON, PDF, images, METS, audio and video** — with Markdown, docling-JSON,
 DocLang `.dclx`, LaTeX, HTML, Pandoc AST and chunk output, plus image extraction. The full extension map (`InputFormat::from_extension`, mirroring
-docling's `FormatToExtensions`):
+docling's `FormatToExtensions`) picks the backend; a file whose conversion
+fails under its extension is checked by content and, when it is evidently
+another format (an RTF, DOCX or HTML file saved as `.doc`, …), converted once
+more as that format with a warning (#556) — files that convert as named are
+never inspected:
 
 | Category | Extensions |
 |---|---|
