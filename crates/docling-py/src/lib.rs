@@ -1038,6 +1038,61 @@ fn pandoc_from_json<'py>(
     Ok((json, images))
 }
 
+/// The attachments of an `.eml` / Outlook `.msg` (#561) as
+/// `(index, name, content_type, format, size, inline, skipped, data)` tuples
+/// — `data` the payload when it was kept (`None` for an attachment over a
+/// limit, or one without a payload). The limits are byte counts and default
+/// to the archive limits (10 000 attachments, 256 MiB each, 1 GiB in all).
+#[pyfunction]
+#[pyo3(signature = (data, max_entries = None, max_entry_size = None, max_total_size = None))]
+#[allow(clippy::type_complexity)]
+fn email_attachments<'py>(
+    py: Python<'py>,
+    data: Bound<'py, PyBytes>,
+    max_entries: Option<usize>,
+    max_entry_size: Option<u64>,
+    max_total_size: Option<u64>,
+) -> PyResult<
+    Vec<(
+        usize,
+        String,
+        Option<String>,
+        Option<String>,
+        u64,
+        bool,
+        Option<String>,
+        Option<Bound<'py, PyBytes>>,
+    )>,
+> {
+    let defaults = docling::ArchiveLimits::default();
+    let limits = docling::ArchiveLimits {
+        max_entries: max_entries.unwrap_or(defaults.max_entries),
+        max_entry_size: max_entry_size.unwrap_or(defaults.max_entry_size),
+        max_total_size: max_total_size.unwrap_or(defaults.max_total_size),
+        ..defaults
+    };
+    let bytes = data.as_bytes().to_vec();
+    let atts = py
+        .detach(|| docling::EmailAttachments::open(&bytes, &limits))
+        .map_err(|e| ConversionError::new_err(e.to_string()))?;
+    Ok(atts
+        .entries()
+        .iter()
+        .map(|e| {
+            (
+                e.index,
+                e.name.clone(),
+                e.content_type.clone(),
+                e.format.map(|f| f.as_str().to_string()),
+                e.size,
+                e.inline,
+                e.skipped.clone(),
+                atts.data(e.index).map(|d| PyBytes::new(py, d)),
+            )
+        })
+        .collect())
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDocumentConverter>()?;
@@ -1045,6 +1100,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyChunkStream>()?;
     m.add_function(pyo3::wrap_pyfunction!(chunk_document, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(pandoc_from_json, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(email_attachments, m)?)?;
     m.add("ConversionError", m.py().get_type::<ConversionError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

@@ -28,9 +28,15 @@ pub(crate) struct ProjectedMsg {
 /// headers rather than failing (a bare subject-less note still converts).
 pub(crate) fn project(data: &[u8]) -> Option<ProjectedMsg> {
     let cfb = CompoundFile::open(data)?;
-    let root = cfb.children_of(None);
+    Some(project_entries(&cfb, &cfb.children_of(None)))
+}
 
-    let prop = |id: &str| -> Option<String> { read_string(&cfb, &root, id) };
+/// Project the message whose property streams are `root` — the file's root
+/// storage, or an embedded message's `__substg1.0_3701000D` storage (#561:
+/// a forwarded `.msg` inside a `.msg`, whose RFC 822 projection is then its
+/// attachment payload).
+pub(crate) fn project_entries(cfb: &CompoundFile, root: &[usize]) -> ProjectedMsg {
+    let prop = |id: &str| -> Option<String> { read_string(cfb, root, id) };
 
     let subject = prop("0037");
     // Sender: PR_SENDER_* first, PR_SENT_REPRESENTING_* as the fallback
@@ -51,11 +57,11 @@ pub(crate) fn project(data: &[u8]) -> Option<ProjectedMsg> {
         }
         let kids = cfb.children_of(Some(idx));
         let addr = address(
-            read_string(&cfb, &kids, "3001"),
-            read_string(&cfb, &kids, "39FE").or_else(|| read_string(&cfb, &kids, "3003")),
+            read_string(cfb, &kids, "3001"),
+            read_string(cfb, &kids, "39FE").or_else(|| read_string(cfb, &kids, "3003")),
         );
         let Some(addr) = addr else { continue };
-        match fixed_u32(&cfb, &kids, 0x0C15).unwrap_or(1) {
+        match fixed_u32(cfb, &kids, 0x0C15).unwrap_or(1) {
             2 => cc.push(addr),
             3 => {} // Bcc is not a header docling surfaces
             _ => to.push(addr),
@@ -64,32 +70,23 @@ pub(crate) fn project(data: &[u8]) -> Option<ProjectedMsg> {
 
     // PR_CLIENT_SUBMIT_TIME (0039), falling back to the delivery time (0E06):
     // a FILETIME in the root fixed-property stream.
-    let date = fixed_filetime(&cfb, &root, 0x0039)
-        .or_else(|| fixed_filetime(&cfb, &root, 0x0E06))
+    let date = fixed_filetime(cfb, root, 0x0039)
+        .or_else(|| fixed_filetime(cfb, root, 0x0E06))
         .map(rfc2822_utc);
 
     // Plain-text body (1000). An RTF-only message (compressed 10090102, no
     // plain body) degrades to an empty body rather than failing — the
     // headers still convert. (LZFu decompression can come on demand.)
-    let body = read_string(&cfb, &root, "1000").unwrap_or_default();
+    let body = read_string(cfb, root, "1000").unwrap_or_default();
 
     let mut labels: Vec<String> = Vec::new();
-    for idx in root.iter().copied() {
-        if !cfb.is_storage(idx) || !cfb.entry_name(idx).starts_with("__attach_version1.0_#") {
-            continue;
-        }
+    for idx in attachment_storages(cfb, root) {
         let kids = cfb.children_of(Some(idx));
         // Long filename (3707) over the 8.3 one (3704); the MIME tag (370E)
         // parenthesizes when present — docling's attachment label format.
-        let name = read_string(&cfb, &kids, "3707")
-            .or_else(|| read_string(&cfb, &kids, "3704"))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        let name = attachment_name(cfb, &kids)
             .unwrap_or_else(|| format!("attachment-{}", labels.len() + 1));
-        let label = match read_string(&cfb, &kids, "370E")
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        {
+        let label = match attachment_mime(cfb, &kids) {
             Some(mime) => format!("{name} ({mime})"),
             None => name,
         };
@@ -115,10 +112,111 @@ pub(crate) fn project(data: &[u8]) -> Option<ProjectedMsg> {
     out.push_str("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n\r\n");
     out.push_str(&body);
 
-    Some(ProjectedMsg {
+    ProjectedMsg {
         rfc822: out.into_bytes(),
         attachment_labels: labels,
-    })
+    }
+}
+
+/// The `__attach_version1.0_#N` storages under `root`, in directory order.
+fn attachment_storages(cfb: &CompoundFile, root: &[usize]) -> Vec<usize> {
+    root.iter()
+        .copied()
+        .filter(|&idx| {
+            cfb.is_storage(idx) && cfb.entry_name(idx).starts_with("__attach_version1.0_#")
+        })
+        .collect()
+}
+
+/// An attachment's file name: the long name (3707) over the 8.3 one (3704),
+/// then the display name (3001) an embedded message carries instead.
+fn attachment_name(cfb: &CompoundFile, kids: &[usize]) -> Option<String> {
+    ["3707", "3704", "3001"]
+        .iter()
+        .find_map(|id| read_string(cfb, kids, id))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// PR_ATTACH_MIME_TAG (370E), trimmed; `None` when absent or blank.
+fn attachment_mime(cfb: &CompoundFile, kids: &[usize]) -> Option<String> {
+    read_string(cfb, kids, "370E")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// One `.msg` attachment with its payload (#561), as MAPI stores it.
+pub(crate) struct MsgAttachment {
+    pub(crate) name: Option<String>,
+    pub(crate) mime: Option<String>,
+    /// PR_ATTACH_METHOD (3705): 1 by value, 2–4 and 7 by reference, 5 an
+    /// embedded message, 6 an OLE object. Missing reads as by value, which
+    /// is what writers that omit it mean.
+    pub(crate) method: u32,
+    /// The bytes: PR_ATTACH_DATA_BIN (37010102) for a by-value attachment,
+    /// the RFC 822 projection of the `__substg1.0_3701000D` storage for an
+    /// embedded message; `None` for a reference, an OLE object or a
+    /// by-value attachment whose data stream is missing.
+    pub(crate) payload: Option<Vec<u8>>,
+    /// PR_ATTACHMENT_HIDDEN (7FFE) — an inline image of the HTML body — or
+    /// `ATT_MHTML_REF` in PR_ATTACH_FLAGS (3714), or a content id (3712).
+    pub(crate) inline: bool,
+}
+
+/// The attachments of `.msg` bytes with their payloads. `None` when the
+/// container doesn't parse as CFB.
+pub(crate) fn attachments(data: &[u8]) -> Option<Vec<MsgAttachment>> {
+    let cfb = CompoundFile::open(data)?;
+    let root = cfb.children_of(None);
+    let mut out = Vec::new();
+    for idx in attachment_storages(&cfb, &root) {
+        let kids = cfb.children_of(Some(idx));
+        let method = fixed_u32(&cfb, &kids, 0x3705).unwrap_or(1);
+        let (payload, mime, name) = match method {
+            // An embedded message is a storage of property streams, not a
+            // byte string: project it like the outer message, one level —
+            // its own attachments stay inside its RFC 822 as labels only.
+            5 => {
+                let storage = kids
+                    .iter()
+                    .copied()
+                    .find(|&k| cfb.is_storage(k) && cfb.entry_name(k) == "__substg1.0_3701000D");
+                let projected = storage.map(|s| project_entries(&cfb, &cfb.children_of(Some(s))));
+                (
+                    projected.map(|p| p.rfc822),
+                    Some("message/rfc822".to_string()),
+                    attachment_name(&cfb, &kids).map(|n| format!("{n}.eml")),
+                )
+            }
+            1 => {
+                let data = kids
+                    .iter()
+                    .find(|&&k| cfb.entry_name(k) == "__substg1.0_37010102")
+                    .and_then(|&k| cfb.stream_by_index(k));
+                (
+                    data,
+                    attachment_mime(&cfb, &kids),
+                    attachment_name(&cfb, &kids),
+                )
+            }
+            _ => (
+                None,
+                attachment_mime(&cfb, &kids),
+                attachment_name(&cfb, &kids),
+            ),
+        };
+        let hidden = fixed_u32(&cfb, &kids, 0x7FFE).is_some_and(|v| v & 0xFF != 0);
+        let mhtml_ref = fixed_u32(&cfb, &kids, 0x3714).is_some_and(|f| f & 4 != 0);
+        let content_id = read_string(&cfb, &kids, "3712").is_some_and(|s| !s.trim().is_empty());
+        out.push(MsgAttachment {
+            name,
+            mime,
+            method,
+            payload,
+            inline: hidden || mhtml_ref || content_id,
+        });
+    }
+    Some(out)
 }
 
 /// `"Name <email>"`, bare email, or bare name — whatever the properties give.
@@ -162,9 +260,9 @@ fn read_string(cfb: &CompoundFile, entries: &[usize], id: &str) -> Option<String
 }
 
 /// A fixed-size property's raw 8-byte value from `__properties_version1.0`.
-/// The stream is a header (32 bytes at the root storage, 8 in recipient/
-/// attachment storages) followed by 16-byte records: u16 type, u16 id,
-/// u32 flags, 8-byte value.
+/// The stream is a header (32 bytes at the root storage, 24 in an embedded
+/// message's, 8 in recipient/attachment storages) followed by 16-byte
+/// records: u16 type, u16 id, u32 flags, 8-byte value.
 fn fixed_raw(cfb: &CompoundFile, entries: &[usize], id: u16) -> Option<[u8; 8]> {
     let stream = entries
         .iter()
@@ -173,7 +271,7 @@ fn fixed_raw(cfb: &CompoundFile, entries: &[usize], id: u16) -> Option<[u8; 8]> 
     // The header length differs by storage kind; scanning from both offsets
     // is simpler than tracking which storage we're in, and a misaligned scan
     // can't match a real (type, id) pair by accident.
-    for head in [32usize, 8] {
+    for head in [32usize, 24, 8] {
         let Some(body) = stream.get(head..) else {
             continue;
         };

@@ -77,7 +77,7 @@ never inspected:
 | PDF & images | `.pdf` · `.png` `.jpg` `.jpeg` `.tif` `.tiff` `.bmp` `.webp` `.gif` · HEIC/HEIF `.heic` `.heif` (opt-in `--features heif`, links the system libheif — #211) · METS/GBS scan packages `.tar.gz` · DjVu `.djvu` `.djv` — pure-Rust decode (`djvu-rs`, MIT), the hidden per-page OCR text layer by default (deterministic, no models, works in wasm) with page provenance in the JSON (`pages` + per-paragraph `prov` from the text-layer zone boxes); a scan-only DjVu falls back to rasterize + OCR in the ML build (#434, a docling.rs extension — docling has no DjVu reader); a PDF's JSON carries its page headers and footers as `furniture`-layer items, and keeps the text inside a picture as that picture's children, as docling's does |
 | docling native | docling JSON `.json` · DocTags `.doctags` `.dt` · DCLX `.dclx` |
 | Mainframe data | EBCDIC `.ebc` `.ebcdic` — fixed-width record files decoded through a COBOL copybook layout (docling's `EbcdicLayout` JSON: cp037/cp500/cp1140 text, COMP/COMP-3/zoned numerics with implied decimal scale, multi-schema record-type prefixes); pass the layout via `ebcdic_layout` (inline JSON or path) or drop a `<stem>.layout.json` sidecar next to the file |
-| Email & subtitles | `.eml` · Outlook `.msg` (CFB/MAPI, projected onto RFC 822 — same output as the equivalent `.eml`; optional `list_attachments` appends attachment names + content types) · WebVTT `.vtt` |
+| Email & subtitles | `.eml` · Outlook `.msg` (CFB/MAPI, projected onto RFC 822 — same output as the equivalent `.eml`; optional `list_attachments` appends attachment names + content types; the payloads themselves through `EmailAttachments` / `convert_email_attachments`, py `email_attachments()`, Node `emailAttachments()` — #561, see "Email attachments" below) · WebVTT `.vtt` |
 | Audio | `.wav` `.mp3` `.mpga` `.m4a` `.aac` `.ogg` `.flac` |
 | Video | `.mp4` `.avi` `.mov` `.mkv` `.webm` `.mpeg` `.mpg` |
 
@@ -1351,6 +1351,24 @@ ones expand — and a lone `.zip` without `--output` is a usage error (it holds
 many documents). From Rust, `DocumentConverter::convert_archive(reader)` is
 the same as a lazy iterator of per-entry `Converted` / `Skipped` / `Failed`
 outcomes (`docling::archive`).
+
+**Email attachments** (#561) are reachable the same way: an `.eml` or
+Outlook `.msg` renders as headers + body (plus the attachment *names* with
+`--list-attachments`), and `docling::EmailAttachments::open(bytes, &limits)`
+lists the payloads behind it — each with a safe file name, media type, size,
+whether the message shows it inline, and the format it converts as (from its
+extension, else its media type, else the bytes), or why it will not
+(no payload: an attachment by reference or an OLE object; over a limit; a
+nested archive or an unsupported type — those bytes stay available through
+`data(i)`, a `.zip` for `convert_archive`). A forwarded message —
+`message/rfc822` in an `.eml`, an embedded message in a `.msg` — is an `.eml`
+entry carrying the nested message. `DocumentConverter::convert_email_attachments(bytes)`
+converts them one at a time with the archive outcomes above; the `ArchiveLimits`
+apply (no compression ratio: MIME cannot bomb). Python:
+`docling_rs.email_attachments(path | bytes | DocumentStream)` →
+`EmailAttachment(…, data)` with `.as_stream()` for `convert`; Node:
+`emailAttachments({ name, data })` / `emailAttachmentsFile(path)`. The CLI and
+serve do not expand attachments (a message converts as one document).
 
 The PDF/image ML pipeline loads its models **once** and every matched file
 reuses the warm sessions — the same amortization `docling-rs serve` does

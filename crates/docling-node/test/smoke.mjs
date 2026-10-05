@@ -5,6 +5,7 @@
 // Exits non-zero on the first failed assertion, so it doubles as a CI check.
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   checkDependencies,
   chunk,
@@ -17,6 +18,8 @@ import {
   convertFile,
   convertFileAsync,
   DocumentConverter,
+  emailAttachments,
+  emailAttachmentsFile,
   formatFromName,
   Pipeline,
   streamChunks,
@@ -58,6 +61,31 @@ async function main() {
     assert.equal(formatFromName('report.pdf'), 'pdf')
     assert.equal(formatFromName('page.html'), 'html')
     assert.equal(formatFromName('mystery.zzz'), null)
+  })
+
+  await check('emailAttachments lists an .eml attachment with its payload', () => {
+    const eml = new URL('../../../tests/data/email/sources/eml_with_attachment.eml', import.meta.url)
+      .pathname
+    const atts = emailAttachmentsFile(eml)
+    assert.equal(atts.length, 1)
+    const [att] = atts
+    assert.equal(att.name, 'test.txt')
+    assert.equal(att.contentType, 'text/plain')
+    assert.equal(att.format, 'md')
+    assert.equal(att.inline, false)
+    assert.equal(att.skipped, null)
+    assert.ok(Buffer.isBuffer(att.data))
+    assert.equal(att.size, att.data.length)
+    assert.match(att.data.toString(), /^This is a test attachment file\./)
+    // In-memory bytes give the same listing, and the payload converts.
+    const fromBytes = emailAttachments({ name: 'm.eml', data: readFileSync(eml) })
+    assert.deepEqual(fromBytes, atts)
+    const res = convert({ name: att.name, data: att.data })
+    assert.match(res.content, /This is a test attachment file/)
+    // A limit skips an attachment and drops its payload.
+    const limited = emailAttachmentsFile(eml, { maxEntrySize: 10 })
+    assert.equal(limited[0].skipped, 'larger than the per-entry size limit')
+    assert.equal(limited[0].data, null)
   })
 
   await check('convert (bytes) → Markdown round-trips', () => {

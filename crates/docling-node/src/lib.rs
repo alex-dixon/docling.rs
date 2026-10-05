@@ -2043,6 +2043,103 @@ impl Task for ChunkBytesTask {
 }
 
 // ---------------------------------------------------------------------------
+// Email attachments (#561).
+// ---------------------------------------------------------------------------
+
+/// One attachment of an `.eml` / Outlook `.msg`, from [`email_attachments`].
+#[napi(object)]
+pub struct EmailAttachment {
+    /// Position among the message's attachments.
+    pub index: u32,
+    /// A safe file name (base name only, control characters removed;
+    /// `attachment-N` when the message declares none, `<subject>.eml` for a
+    /// forwarded message) — safe to write into a directory as it is.
+    pub name: String,
+    /// The declared media type (`type/subtype`), if any.
+    pub content_type: Option<String>,
+    /// The format id it converts as (`"pdf"`, `"docx"`, `"email"`, …), from
+    /// its extension, else its media type, else the bytes; `null` when
+    /// `skipped` says why it will not convert.
+    pub format: Option<String>,
+    /// Payload size in bytes (0 without a payload).
+    pub size: i64,
+    /// Shown inline by the message (an image of the HTML body) rather than as
+    /// a file to open.
+    pub inline: bool,
+    /// Why it is not converted, when it is not: no payload (a reference, an
+    /// OLE object), over a limit, a nested archive, an unsupported type.
+    pub skipped: Option<String>,
+    /// The payload, when kept: every attachment with a payload within the
+    /// limits — also an unsupported type or an archive (hand a `.zip` to
+    /// your own extractor). `null` over a limit or without a payload.
+    pub data: Option<Buffer>,
+}
+
+/// Bounds on what [`email_attachments`] keeps, in bytes. Unset = the archive
+/// defaults: 10 000 attachments, 256 MiB each, 1 GiB in all.
+#[napi(object)]
+#[derive(Default)]
+pub struct EmailAttachmentOptions {
+    pub max_entries: Option<u32>,
+    pub max_entry_size: Option<i64>,
+    pub max_total_size: Option<i64>,
+}
+
+/// The attachments of an in-memory `.eml` / `.msg` with their payloads. A
+/// forwarded message is an `.eml` entry whose `data` is the nested message.
+/// Convert one with `convert({ name: att.name, data: att.data })`.
+#[napi]
+pub fn email_attachments(
+    input: ConvertInput,
+    options: Option<EmailAttachmentOptions>,
+) -> Result<Vec<EmailAttachment>> {
+    attachments_of(&input.data, options.unwrap_or_default())
+}
+
+/// [`email_attachments`] for a message file on disk.
+#[napi]
+pub fn email_attachments_file(
+    path: String,
+    options: Option<EmailAttachmentOptions>,
+) -> Result<Vec<EmailAttachment>> {
+    let bytes = std::fs::read(&path).map_err(convert_err)?;
+    attachments_of(&bytes, options.unwrap_or_default())
+}
+
+fn attachments_of(bytes: &[u8], o: EmailAttachmentOptions) -> Result<Vec<EmailAttachment>> {
+    let defaults = docling::ArchiveLimits::default();
+    let non_negative = |v: Option<i64>, default: u64| match v {
+        Some(v) if v < 0 => Err(Error::new(
+            Status::InvalidArg,
+            "email attachment limits must be non-negative byte counts",
+        )),
+        Some(v) => Ok(v as u64),
+        None => Ok(default),
+    };
+    let limits = docling::ArchiveLimits {
+        max_entries: o.max_entries.map_or(defaults.max_entries, |n| n as usize),
+        max_entry_size: non_negative(o.max_entry_size, defaults.max_entry_size)?,
+        max_total_size: non_negative(o.max_total_size, defaults.max_total_size)?,
+        ..defaults
+    };
+    let atts = docling::EmailAttachments::open(bytes, &limits).map_err(convert_err)?;
+    Ok(atts
+        .entries()
+        .iter()
+        .map(|e| EmailAttachment {
+            index: e.index as u32,
+            name: e.name.clone(),
+            content_type: e.content_type.clone(),
+            format: e.format.map(|f| f.as_str().to_string()),
+            size: e.size as i64,
+            inline: e.inline,
+            skipped: e.skipped.clone(),
+            data: atts.data(e.index).map(|d| Buffer::from(d.to_vec())),
+        })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
 // Format helpers exposed to JS.
 // ---------------------------------------------------------------------------
 

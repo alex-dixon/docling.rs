@@ -33,11 +33,12 @@ Declarative formats (DOCX/HTML/XLSX/…) need no models at all.
 from __future__ import annotations
 
 import enum
+import io
 import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, Optional, Tuple, Union
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 from docling_core.types.doc import DoclingDocument, ImageRefMode
 
@@ -65,6 +66,7 @@ from . import chunking
 # ORT symbols process-wide and segfaulted at session creation in testing.)
 from ._native import ConversionError, __version__
 from ._native import DocumentConverter as _NativeDocumentConverter
+from ._native import email_attachments as _email_attachments
 
 __all__ = [
     "DocumentConverter",
@@ -75,6 +77,9 @@ __all__ = [
     "InputDocument",
     "DoclingDocument",
     "ImageRefMode",
+    # email attachment payloads (.eml / .msg)
+    "EmailAttachment",
+    "email_attachments",
     # docling-shaped configuration
     "InputFormat",
     "DocumentStream",
@@ -524,6 +529,64 @@ class DocumentConverter:
 
             describe_pictures(result.document, self._picture_description)
         return result
+
+
+@dataclass
+class EmailAttachment:
+    """One attachment of an ``.eml`` / Outlook ``.msg``, from
+    :func:`email_attachments`. ``data`` is the payload when it was kept
+    (``None`` for an attachment over a limit, or one without a payload — a
+    reference, an OLE object); ``format`` is the :class:`InputFormat` it
+    converts as, ``None`` with ``skipped`` saying why it will not. A
+    forwarded message is an ``.eml`` entry whose ``data`` is the nested
+    message."""
+
+    index: int
+    name: str
+    content_type: Optional[str]
+    format: Optional[InputFormat]
+    size: int
+    inline: bool
+    skipped: Optional[str]
+    data: Optional[bytes]
+
+    def as_stream(self) -> DocumentStream:
+        """The payload as a :class:`DocumentStream` named after the attachment,
+        ready for :meth:`DocumentConverter.convert`. Raises ``ValueError``
+        for an attachment without a payload."""
+        if self.data is None:
+            raise ValueError(f"attachment {self.name!r} has no payload ({self.skipped})")
+        return DocumentStream(name=self.name, stream=io.BytesIO(self.data))
+
+
+def email_attachments(
+    source: Union[str, os.PathLike, bytes, DocumentStream],
+    *,
+    max_entries: Optional[int] = None,
+    max_entry_size: Optional[int] = None,
+    max_total_size: Optional[int] = None,
+) -> List[EmailAttachment]:
+    """List the attachments of an ``.eml`` / ``.msg`` with their payloads — a
+    path, the message bytes, or a :class:`DocumentStream`. The limits are byte
+    counts bounding what is kept (defaults: 10 000 attachments, 256 MiB each,
+    1 GiB in all); file names are reduced to a safe base name, so ``name``
+    can be written to a directory as it is. Convert one with
+    ``converter.convert(attachment.as_stream())``."""
+    if isinstance(source, DocumentStream):
+        data = source.stream.read()
+    elif isinstance(source, (bytes, bytearray, memoryview)):
+        data = bytes(source)
+    else:
+        data = Path(source).read_bytes()
+    rows = _email_attachments(data, max_entries, max_entry_size, max_total_size)
+    out = []
+    for index, name, content_type, fmt, size, inline, skipped, payload in rows:
+        try:
+            fmt = InputFormat(fmt) if fmt is not None else None
+        except ValueError:
+            pass
+        out.append(EmailAttachment(index, name, content_type, fmt, size, inline, skipped, payload))
+    return out
 
 
 def _pdf_pipeline_options(
