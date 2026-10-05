@@ -2058,7 +2058,7 @@ pub struct EmailAttachment {
     /// The declared media type (`type/subtype`), if any.
     pub content_type: Option<String>,
     /// The format id it converts as (`"pdf"`, `"docx"`, `"email"`, …), from
-    /// its extension, else its media type, else the bytes; `null` when
+    /// its extension, else its media type, else the bytes; absent when
     /// `skipped` says why it will not convert.
     pub format: Option<String>,
     /// Payload size in bytes (0 without a payload).
@@ -2071,7 +2071,7 @@ pub struct EmailAttachment {
     pub skipped: Option<String>,
     /// The payload, when kept: every attachment with a payload within the
     /// limits — also an unsupported type or an archive (hand a `.zip` to
-    /// your own extractor). `null` over a limit or without a payload.
+    /// your own extractor). Absent over a limit or without a payload.
     pub data: Option<Buffer>,
 }
 

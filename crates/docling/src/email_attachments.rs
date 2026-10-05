@@ -462,6 +462,30 @@ mod tests {
         EmailAttachments::open(bytes, &ArchiveLimits::default()).unwrap()
     }
 
+    /// `(name, content_type, format, inline, skipped)` of one entry.
+    type Row<'a> = (
+        &'a str,
+        Option<&'a str>,
+        Option<InputFormat>,
+        bool,
+        Option<&'a str>,
+    );
+
+    fn rows(atts: &EmailAttachments) -> Vec<Row<'_>> {
+        atts.entries()
+            .iter()
+            .map(|e| {
+                (
+                    e.name.as_str(),
+                    e.content_type.as_deref(),
+                    e.format,
+                    e.inline,
+                    e.skipped.as_deref(),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn eml_fixture_exposes_the_text_attachment() {
         let atts = open(&fixture("eml_with_attachment.eml"));
@@ -551,19 +575,7 @@ mod tests {
             ),
         ]);
         let atts = open(&m);
-        let got: Vec<(&str, Option<&str>, Option<InputFormat>, bool, Option<&str>)> = atts
-            .entries()
-            .iter()
-            .map(|e| {
-                (
-                    e.name.as_str(),
-                    e.content_type.as_deref(),
-                    e.format,
-                    e.inline,
-                    e.skipped.as_deref(),
-                )
-            })
-            .collect();
+        let got = rows(&atts);
         assert_eq!(
             got,
             [
@@ -786,19 +798,7 @@ mod tests {
         let bytes = cfb::write_msg(&outer);
         assert!(crate::backend::cfb::CompoundFile::detect(&bytes));
         let atts = open(&bytes);
-        let got: Vec<(&str, Option<&str>, Option<InputFormat>, bool, Option<&str>)> = atts
-            .entries()
-            .iter()
-            .map(|e| {
-                (
-                    e.name.as_str(),
-                    e.content_type.as_deref(),
-                    e.format,
-                    e.inline,
-                    e.skipped.as_deref(),
-                )
-            })
-            .collect();
+        let got = rows(&atts);
         assert_eq!(
             got,
             [

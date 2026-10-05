@@ -73,7 +73,9 @@ async function main() {
     assert.equal(att.contentType, 'text/plain')
     assert.equal(att.format, 'md')
     assert.equal(att.inline, false)
-    assert.equal(att.skipped, null)
+    // Optional fields are absent (undefined) when unset, like every other
+    // napi object.
+    assert.equal(att.skipped, undefined)
     assert.ok(Buffer.isBuffer(att.data))
     assert.equal(att.size, att.data.length)
     assert.match(att.data.toString(), /^This is a test attachment file\./)
@@ -85,7 +87,7 @@ async function main() {
     // A limit skips an attachment and drops its payload.
     const limited = emailAttachmentsFile(eml, { maxEntrySize: 10 })
     assert.equal(limited[0].skipped, 'larger than the per-entry size limit')
-    assert.equal(limited[0].data, null)
+    assert.equal(limited[0].data, undefined)
   })
 
   await check('convert (bytes) → Markdown round-trips', () => {
