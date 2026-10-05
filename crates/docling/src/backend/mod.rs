@@ -56,7 +56,7 @@ mod markdown;
 mod md_tree;
 mod metafile;
 mod mhtml;
-mod msg;
+pub(crate) mod msg;
 mod odf;
 mod odf_tree;
 mod officeart;

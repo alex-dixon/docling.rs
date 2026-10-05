@@ -167,6 +167,57 @@ impl InputFormat {
         }
     }
 
+    /// Best-effort format detection from a media type (`type/subtype`,
+    /// parameters and case ignored) — what an email attachment or an HTTP
+    /// response declares when its name has no usable extension (#561). The
+    /// generic `application/octet-stream` is `None`: it says nothing.
+    pub fn from_mime(mime: &str) -> Option<Self> {
+        let essence = mime
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        Some(match essence.as_str() {
+            "application/pdf" | "application/x-pdf" => InputFormat::Pdf,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
+            | "application/vnd.ms-word.document.macroenabled.12" => InputFormat::Docx,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
+            | "application/vnd.openxmlformats-officedocument.presentationml.template"
+            | "application/vnd.ms-powerpoint.presentation.macroenabled.12" => InputFormat::Pptx,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
+            | "application/vnd.ms-excel.sheet.macroenabled.12"
+            | "application/vnd.ms-excel.sheet.binary.macroenabled.12" => InputFormat::Xlsx,
+            "application/msword" => InputFormat::Doc,
+            "application/vnd.ms-excel" => InputFormat::Xls,
+            "application/vnd.ms-powerpoint" => InputFormat::Ppt,
+            "application/vnd.oasis.opendocument.text" => InputFormat::Odt,
+            "application/vnd.oasis.opendocument.spreadsheet" => InputFormat::Ods,
+            "application/vnd.oasis.opendocument.presentation" => InputFormat::Odp,
+            "application/rtf" | "text/rtf" => InputFormat::Rtf,
+            "application/epub+zip" => InputFormat::Epub,
+            "text/html" | "application/xhtml+xml" => InputFormat::Html,
+            "text/markdown" | "text/x-markdown" | "text/plain" => InputFormat::Md,
+            "text/csv" | "text/tab-separated-values" => InputFormat::Csv,
+            "text/x-tex" | "application/x-tex" | "application/x-latex" => InputFormat::Latex,
+            "text/vtt" => InputFormat::Vtt,
+            "application/json" => InputFormat::JsonDocling,
+            "message/rfc822" | "application/vnd.ms-outlook" => InputFormat::Email,
+            "multipart/related" | "message/rfc822-headers" => return None,
+            "image/png" | "image/jpeg" | "image/tiff" | "image/bmp" | "image/webp"
+            | "image/gif" | "image/heic" | "image/heif" => InputFormat::Image,
+            "image/svg+xml" => InputFormat::Svg,
+            "audio/mpeg" | "audio/mp3" | "audio/wav" | "audio/x-wav" | "audio/wave"
+            | "audio/mp4" | "audio/aac" | "audio/ogg" | "audio/flac" => InputFormat::Audio,
+            "video/mp4" | "video/quicktime" | "video/x-msvideo" | "video/x-matroska"
+            | "video/webm" | "video/mpeg" => InputFormat::Video,
+            _ => return None,
+        })
+    }
+
     /// Best-effort format detection from a file extension (case-insensitive).
     ///
     /// Ambiguous extensions (notably bare `xml`) resolve to a single default
