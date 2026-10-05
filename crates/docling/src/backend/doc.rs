@@ -62,6 +62,7 @@
 use docling_core::{DoclingDocument, Node, PictureImage, Table};
 
 use crate::backend::cfb::CompoundFile;
+use crate::backend::markdown::escape_text;
 use crate::backend::officeart;
 use crate::backend::DeclarativeBackend;
 use crate::error::ConversionError;
@@ -217,7 +218,7 @@ impl DeclarativeBackend for DocBackend {
         ) {
             doc.push(Node::FurnitureText {
                 label: if footer { "page_footer" } else { "page_header" }.into(),
-                text,
+                text: escape_text(&text),
             });
         }
         for (refs, txt, base, len) in [
@@ -234,7 +235,7 @@ impl DeclarativeBackend for DocBackend {
             ) {
                 doc.push(Node::FurnitureText {
                     label: "footnote".into(),
-                    text,
+                    text: escape_text(&text),
                 });
             }
         }
@@ -1536,7 +1537,9 @@ impl ParaAccum {
     }
 
     /// Markdown text with `**bold**` / `*italic*` markers per run, whitespace
-    /// kept outside the markers (matching the DOCX backend's rendering).
+    /// kept outside the markers (matching the DOCX backend's rendering). Not
+    /// yet escaped: [`NodeBuilder::paragraph`] escapes prose and keeps table
+    /// cells raw.
     fn markdown(&self) -> String {
         let mut out = String::new();
         for (text, fmt) in &self.segments {
@@ -1680,7 +1683,14 @@ impl NodeBuilder {
             caption_parent: Default::default(),
         };
         let plain = plain.trim().to_string();
-        let text = markdown.trim().to_string();
+        // Prose is Markdown-escaped like every other backend's text nodes
+        // (docling-core's `serialize_run`: `_` → `\_`, then `& < >`), #567 —
+        // `OBJ_DIR` otherwise reads as the start of an emphasis span and the
+        // JSON export's `unescape_text` restores the raw text. Table cells
+        // stay raw: docling's table serializer prints the cell text as is
+        // (the DOCX backend's cells are unescaped too, so the mirrored
+        // `docx_rich_tables_01` fixtures keep matching).
+        let text = escape_text(markdown.trim());
         if plain.is_empty() {
             // Pictures anchored in an otherwise-empty paragraph are blocks of
             // their own. A blank paragraph does not break a list run
@@ -1724,7 +1734,10 @@ impl NodeBuilder {
                 sti as u8 + 1
             };
             // Headings render without run markers (the style carries the look).
-            doc.push(Node::Heading { level, text: plain });
+            doc.push(Node::Heading {
+                level,
+                text: escape_text(&plain),
+            });
             self.last_ilfo = None;
             self.run_base = None;
         } else if props.ilfo != 0 {
@@ -2152,6 +2165,27 @@ mod tests {
             .collect();
         assert!(!tables.is_empty(), "expected tables: {:?}", doc.nodes);
         assert!(tables[0].rows.len() > 1 && tables[0].rows[0].len() > 1);
+    }
+
+    /// #567: prose is Markdown-escaped like the DOCX backend's — `OBJ_DIR`
+    /// becomes `OBJ\_DIR` in the Markdown (the reporter's Word 2.133 and
+    /// DOCX outputs), and the JSON export restores the raw text.
+    #[test]
+    fn underscores_are_escaped_in_prose() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/doc/sources/doc_underscores.doc");
+        let bytes = std::fs::read(path).expect("fixture");
+        let src = SourceDocument::from_bytes("u", InputFormat::Doc, bytes);
+        let doc = DocBackend.convert(&src).expect("converts");
+        assert_eq!(
+            doc.export_to_markdown(),
+            "Identifiers: OBJ\\_DIR, MER\\_BAX, LO\\_SNO02, plain text.\n"
+        );
+        let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        assert_eq!(
+            json["texts"][0]["text"],
+            "Identifiers: OBJ_DIR, MER_BAX, LO_SNO02, plain text."
+        );
     }
 
     #[test]
