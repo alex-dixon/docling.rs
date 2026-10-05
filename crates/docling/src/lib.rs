@@ -28,6 +28,7 @@ pub mod dclx;
 mod error;
 mod format;
 mod result;
+mod sniff;
 mod source;
 #[cfg(feature = "pdf")]
 mod stream;

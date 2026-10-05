@@ -126,7 +126,14 @@ pub(crate) fn spawn(
         // Exception: the heading-hierarchy stage (#302) rewrites levels across
         // the *whole* assembled document, so those conversions run buffered
         // (one chunk) — streamed output stays byte-identical to buffered.
-        InputFormat::Pdf if !converter.heading_hierarchy_enabled() => {
+        // A `.pdf` without the PDF header is something else saved under that
+        // name: the buffered path converts it, retrying as its content's
+        // format (#556). The header check reads the first KiB the PDF parser
+        // reads anyway.
+        InputFormat::Pdf
+            if !converter.heading_hierarchy_enabled()
+                && crate::sniff::looks_like_pdf(&source.bytes) =>
+        {
             run_pdf(converter.stream_settings(), &source, image_mode, &tx)
         }
         // Every other backend builds the whole `DoclingDocument` synchronously, so

@@ -26,7 +26,7 @@ mod abw;
 mod asciidoc;
 #[cfg(feature = "web-browser")]
 pub(crate) mod browser;
-mod cfb;
+pub(crate) mod cfb;
 mod chandra;
 mod csv;
 mod deepseek;

@@ -941,6 +941,15 @@ impl DocumentConverter {
     }
 
     /// Convert a single source document.
+    ///
+    /// The source converts as its declared format (the extension's). Only if
+    /// that fails is the content inspected: when it is evidently another
+    /// format — RTF, an OOXML / ODF / EPUB package, an OLE Word / Excel /
+    /// PowerPoint / Outlook file, PDF or HTML saved under the wrong extension
+    /// (#556) — the conversion is retried once as that format, and the result
+    /// reports the format it was converted as. A document that converts as
+    /// declared is never inspected; when the retry fails too, or nothing is
+    /// recognised, the first attempt's error stands.
     pub fn convert(&self, source: SourceDocument) -> Result<ConversionResult, ConversionError> {
         if let Some(allowed) = &self.allowed_formats {
             if !allowed.contains(&source.format) {
@@ -948,7 +957,35 @@ impl DocumentConverter {
             }
         }
         let source = self.with_encoding(source);
+        let err = match self.convert_as(&source) {
+            Ok(result) => return Ok(result),
+            Err(err) => err,
+        };
+        let Some(format) = crate::sniff::detect(&source.bytes).filter(|f| {
+            *f != source.format
+                && self
+                    .allowed_formats
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(f))
+        }) else {
+            return Err(err);
+        };
+        let declared = source.format;
+        let retry = SourceDocument { format, ..source };
+        let result = self.convert_as(&retry).map_err(|_| err)?;
+        // Converted, but not as the name said: worth a line, since the
+        // mislabelled file is otherwise invisible.
+        eprintln!(
+            "docling: warning: {}: not a valid {} file; converted as {} (its content)",
+            retry.name,
+            declared.as_str(),
+            format.as_str()
+        );
+        Ok(result)
+    }
 
+    /// Convert `source` as its declared format, no retry.
+    fn convert_as(&self, source: &SourceDocument) -> Result<ConversionResult, ConversionError> {
         // Problems a conversion survives (docling's `ConversionResult.errors`):
         // today the PDF pipeline's spent document budget (#497).
         #[cfg_attr(not(feature = "pdf"), allow(unused_mut))]
@@ -957,15 +994,15 @@ impl DocumentConverter {
             // A legacy APS (Automated Patent System) plain-text patent (`PATN`
             // first record) is reconstructed verbatim, mirroring docling.
             InputFormat::Md if crate::backend::uspto::looks_like_aps(&source.text()?) => {
-                crate::backend::uspto::convert_aps(&source)?
+                crate::backend::uspto::convert_aps(source)?
             }
             // A text/Markdown-typed file that is actually an XML document (e.g. a
             // JATS article saved with a `.txt` extension) routes to the XML
             // backends by content, mirroring docling's content-based detection.
             InputFormat::Md if looks_like_xml(&source.text()?) => match sniff_xml(&source.bytes) {
-                InputFormat::XmlUspto => UsptoBackend.convert(&source)?,
+                InputFormat::XmlUspto => UsptoBackend.convert(source)?,
                 InputFormat::XmlXbrl => {
-                    crate::backend::xbrl::convert_xbrl(&source, self.xbrl_taxonomy.as_deref())?
+                    crate::backend::xbrl::convert_xbrl(source, self.xbrl_taxonomy.as_deref())?
                 }
                 // docling's format detection reads an XML-looking `.txt` as
                 // `application/xml` and, when its DOCTYPE names a JATS DTD
@@ -976,19 +1013,19 @@ impl DocumentConverter {
                 _ if has_jats_doctype(&source.text()?) => JatsBackend {
                     fetch_images: self.fetch_images,
                 }
-                .convert(&source)?,
-                _ => crate::backend::jats::convert_generic(&source)?,
+                .convert(source)?,
+                _ => crate::backend::jats::convert_generic(source)?,
             },
             // DeepSeek-OCR annotated Markdown (VLM token format) is detected by
             // its `<|ref|>…[[bbox]]` annotations and parsed separately.
             InputFormat::Md if is_deepseek_markdown(&source.text()?) => {
-                DeepSeekBackend.convert(&source)?
+                DeepSeekBackend.convert(source)?
             }
             InputFormat::Md => MarkdownBackend {
                 strict: self.strict,
             }
-            .convert(&source)?,
-            InputFormat::Csv => CsvBackend.convert(&source)?,
+            .convert(source)?,
+            InputFormat::Csv => CsvBackend.convert(source)?,
             InputFormat::Html => {
                 // Optionally resolve the CSS cascade in a headless browser first
                 // (strips computed-hidden elements); everything else stays in the
@@ -1012,93 +1049,93 @@ impl DocumentConverter {
             InputFormat::Asciidoc => AsciiDocBackend {
                 fetch_images: self.fetch_images,
             }
-            .convert(&source)?,
+            .convert(source)?,
             InputFormat::Xlsx => XlsxBackend {
                 skip_empty: self.skip_empty_cells,
             }
-            .convert(&source)?,
-            InputFormat::Pptx => PptxBackend.convert(&source)?,
+            .convert(source)?,
+            InputFormat::Pptx => PptxBackend.convert(source)?,
             // RTF (#209): a docling.rs extension — docling reaches RTF only via
             // LibreOffice; here it parses natively (hand-rolled tokenizer).
-            InputFormat::Rtf => RtfBackend.convert(&source)?,
-            InputFormat::Visio => VisioBackend.convert(&source)?,
+            InputFormat::Rtf => RtfBackend.convert(source)?,
+            InputFormat::Visio => VisioBackend.convert(source)?,
             // AbiWord (#216): docling.rs extension, native AWML parse.
-            InputFormat::Abiword => AbwBackend.convert(&source)?,
+            InputFormat::Abiword => AbwBackend.convert(source)?,
             // WordPerfect 5.x/6.x+ (#216): docling.rs extension, native parse
             // of the ÿWPC function-code stream.
-            InputFormat::WordPerfect => WpdBackend.convert(&source)?,
+            InputFormat::WordPerfect => WpdBackend.convert(source)?,
             // Microsoft Works word processor (#216): docling.rs extension,
             // native parse after libwps.
-            InputFormat::Works => WpsBackend.convert(&source)?,
+            InputFormat::Works => WpsBackend.convert(source)?,
             // StarOffice 5 binaries (#215): docling.rs extension, native CFB
             // parse (docling would go through LibreOffice).
-            InputFormat::StarOffice5 => StarOffice5Backend.convert(&source)?,
+            InputFormat::StarOffice5 => StarOffice5Backend.convert(source)?,
             // DjVu (#434): docling.rs extension, pure-Rust decode (`djvu-rs`).
             // The hidden text layer is the default; a scan-only DjVu falls back
             // to rasterize + OCR when the ML pipeline is built.
-            InputFormat::Djvu => self.convert_djvu(&source)?,
+            InputFormat::Djvu => self.convert_djvu(source)?,
             // DIF/SYLK/dBase (#216): docling.rs extensions, one content-sniffing
             // backend for the three table relics.
             InputFormat::Dbf | InputFormat::Dif | InputFormat::Sylk => {
-                InterchangeBackend.convert(&source)?
+                InterchangeBackend.convert(source)?
             }
             // Lotus/Quattro/Works record streams (#216): one BOF-sniffing
             // backend for the whole DOS-era family.
-            InputFormat::Lotus => LotusBackend.convert(&source)?,
+            InputFormat::Lotus => LotusBackend.convert(source)?,
             // Quattro Pro (#216): docling.rs extension, native parse after
             // libwps (DOS/Windows record streams, QPW OLE zones).
-            InputFormat::QuattroPro => QuattroBackend.convert(&source)?,
-            InputFormat::Docx => DocxBackend.convert(&source)?,
+            InputFormat::QuattroPro => QuattroBackend.convert(source)?,
+            InputFormat::Docx => DocxBackend.convert(source)?,
             // Legacy binary Office (issue #127): parsed natively — docling
             // proper converts these through LibreOffice first (PR #3804).
             InputFormat::Xls => XlsBackend {
                 skip_empty: self.skip_empty_cells,
             }
-            .convert(&source)?,
-            InputFormat::Ppt => PptBackend.convert(&source)?,
-            InputFormat::Doc => DocBackend.convert(&source)?,
-            InputFormat::Vtt => WebVttBackend.convert(&source)?,
+            .convert(source)?,
+            InputFormat::Ppt => PptBackend.convert(source)?,
+            InputFormat::Doc => DocBackend.convert(source)?,
+            InputFormat::Vtt => WebVttBackend.convert(source)?,
             InputFormat::Ebcdic => EbcdicBackend {
                 layout: self.ebcdic_layout.clone(),
             }
-            .convert(&source)?,
+            .convert(source)?,
             InputFormat::Email => EmailBackend {
                 list_attachments: self.list_attachments,
             }
-            .convert(&source)?,
+            .convert(source)?,
             InputFormat::Mhtml => MhtmlBackend {
                 fetch_images: self.fetch_images,
                 use_web_browser: self.use_web_browser,
             }
-            .convert(&source)?,
+            .convert(source)?,
             InputFormat::Epub => EpubBackend {
                 fetch_images: self.fetch_images,
                 use_web_browser: self.use_web_browser,
             }
-            .convert(&source)?,
-            InputFormat::JsonDocling => DoclingJsonBackend.convert(&source)?,
-            InputFormat::Latex => LatexBackend.convert(&source)?,
+            .convert(source)?,
+            InputFormat::JsonDocling => DoclingJsonBackend.convert(source)?,
+            InputFormat::Latex => LatexBackend.convert(source)?,
             // A bare `.xml` defaults to XmlJats; sniff the content to route to the
             // right XML backend (docling distinguishes by DOCTYPE / root element).
             InputFormat::XmlJats | InputFormat::XmlUspto | InputFormat::XmlXbrl => {
                 match sniff_xml(&source.bytes) {
-                    InputFormat::XmlUspto => UsptoBackend.convert(&source)?,
+                    InputFormat::XmlUspto => UsptoBackend.convert(source)?,
                     InputFormat::XmlXbrl => {
-                        crate::backend::xbrl::convert_xbrl(&source, self.xbrl_taxonomy.as_deref())?
+                        crate::backend::xbrl::convert_xbrl(source, self.xbrl_taxonomy.as_deref())?
                     }
                     _ => JatsBackend {
                         fetch_images: self.fetch_images,
                     }
-                    .convert(&source)?,
+                    .convert(source)?,
                 }
             }
             InputFormat::Odt | InputFormat::Ods | InputFormat::Odp => {
-                crate::backend::convert_odf(&source, self.fetch_images)?
+                crate::backend::convert_odf(source, self.fetch_images)?
             }
             // DocLang back in: bare XML (`.dclg`/`.dclg.xml`) or the OPC
             // archive `--to dclx` writes.
             InputFormat::XmlDoclang | InputFormat::Dclx => {
-                crate::backend::DoclangBackend.convert(&source)?
+                crate::backend::DoclangBackend.convert(source)?
             }
             // Raw DocTags (VLM token markup, #152): the tolerant docling-core
             // parser — never fails, best-effort document out.
@@ -1138,10 +1175,10 @@ impl DocumentConverter {
             // paragraphs in reading order (the pdf / pdf-text split, applied
             // to SVG) — the SVG carries its text natively, so skipping OCR
             // must not mean losing it.
-            InputFormat::Svg => crate::backend::SvgBackend.convert(&source)?,
+            InputFormat::Svg => crate::backend::SvgBackend.convert(source)?,
             // Apple iWork (#213): pure-Rust IWA text extraction, all builds.
             InputFormat::Pages | InputFormat::Numbers | InputFormat::Keynote => {
-                crate::backend::IworkBackend.convert(&source)?
+                crate::backend::IworkBackend.convert(source)?
             }
             #[cfg(feature = "pdf")]
             InputFormat::Image => self
@@ -1235,7 +1272,7 @@ impl DocumentConverter {
         Ok(ConversionResult {
             document,
             status,
-            input_name: source.name,
+            input_name: source.name.clone(),
             format: source.format,
             errors,
         })
@@ -1245,6 +1282,48 @@ impl DocumentConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file whose extension lies converts as its content after the
+    /// declared format fails (#556); junk keeps its original error, and a
+    /// format the converter does not allow is not retried into.
+    #[test]
+    fn mislabelled_sources_retry_as_their_content() {
+        let conv = DocumentConverter::new();
+        let as_doc =
+            |bytes: &[u8]| SourceDocument::from_bytes("x", InputFormat::Doc, bytes.to_vec());
+
+        let rtf = conv
+            .convert(as_doc(b"{\\rtf1\\ansi Hello RTF\\par}"))
+            .unwrap();
+        assert_eq!(rtf.format, InputFormat::Rtf);
+        assert_eq!(rtf.document.export_to_markdown().trim(), "Hello RTF");
+
+        let html = conv
+            .convert(as_doc(
+                b"<!DOCTYPE html><html><body><p>Hello HTML</p></body></html>",
+            ))
+            .unwrap();
+        assert_eq!(html.format, InputFormat::Html);
+        assert_eq!(html.document.export_to_markdown().trim(), "Hello HTML");
+
+        let docx = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data/docx/sources/docx_moveto_body.docx"),
+        )
+        .unwrap();
+        let docx = conv.convert(as_doc(&docx)).unwrap();
+        assert_eq!(docx.format, InputFormat::Docx);
+        assert!(docx
+            .document
+            .export_to_markdown()
+            .contains("avantMARK11apres"));
+
+        let err = conv.convert(as_doc(b"neither of them")).unwrap_err();
+        assert!(err.to_string().contains("doc"), "{err}");
+
+        let only_doc = DocumentConverter::with_allowed_formats([InputFormat::Doc]);
+        assert!(only_doc.convert(as_doc(b"{\\rtf1 Hello\\par}")).is_err());
+    }
 
     /// docling reads an XML-looking `.txt` as `application/xml` and converts
     /// it with the JATS backend when its DOCTYPE names a JATS DTD; other XML
