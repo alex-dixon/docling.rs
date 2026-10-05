@@ -41,7 +41,12 @@ paths:
         **Batch**: several `file` parts in one multipart request convert as a
         batch — the response is then `{"results": [...]}` with per-item
         status (one bad file fails its item, not the batch), regardless of
-        `to`; binary dclx output is base64 in `dclx_base64`.
+        `to`; binary dclx output is base64 in `dclx_base64`. A `.zip` file
+        (upload, `sources[]` file item or cloud object) is such a batch of
+        the documents inside it (#557); entries that do not convert —
+        unsupported types, nested archives, unsafe paths, over the
+        `DOCLING_RS_ZIP_MAX_*` limits — are left out (and logged), and an
+        archive with nothing convertible is a 400.
 
         **Confidence** (PDF/image ML conversions): every response carries an
         `X-Docling-Confidence` header with the document-level summary, and

@@ -287,6 +287,7 @@ curl -H 'content-type: application/json' \
      localhost:5001/v1/convert     # fetch a URL (needs --allow-url-fetch)
 
 curl -F file=@a.pdf -F file=@b.docx localhost:5001/v1/convert    # batch → JSON results array
+curl -F file=@bundle.zip localhost:5001/v1/convert                # every document inside, as a batch (#557)
 
 id=$(curl -F file=@big.pdf localhost:5001/v1/convert/async | jq -r .task_id)
 curl localhost:5001/v1/status/$id                                # pending|started|success|failure
@@ -1333,6 +1334,23 @@ stops the batch at the first failed file (Python's flag of the same name);
 by default the file is reported and skipped. `--to` is repeatable like Python's: each document converts once and
 is written in every format named — several formats need `--output`, since
 stdout carries one document.
+
+A **ZIP archive** named as a source (a file or a glob match) converts every
+document inside it (#557): `docling-rs bundle.zip --output out/` writes
+`out/bundle/<entry path>.md`, each entry its own item of the batch — one
+broken document fails only itself. Entries are listed from the archive's
+directory before anything is inflated; those that do not convert are
+reported (`skip: bundle.zip:tool.exe: unsupported file type`) and counted in
+the summary: unsupported types, nested archives (one level only), `__MACOSX`
+metadata, encrypted entries, paths that climb out with `..`, and entries over
+the limits — 10 000 entries, 256 MiB per entry, 1 GiB in all, a 200:1
+compression ratio (`DOCLING_RS_ZIP_MAX_ENTRIES` / `_MAX_ENTRY_MB` /
+`_MAX_TOTAL_MB` / `_MAX_RATIO`). Nothing is extracted to disk. A directory
+sweep (`--input DIR`) does not open archives it finds — only explicitly named
+ones expand — and a lone `.zip` without `--output` is a usage error (it holds
+many documents). From Rust, `DocumentConverter::convert_archive(reader)` is
+the same as a lazy iterator of per-entry `Converted` / `Skipped` / `Failed`
+outcomes (`docling::archive`).
 
 The PDF/image ML pipeline loads its models **once** and every matched file
 reuses the warm sessions — the same amortization `docling-rs serve` does

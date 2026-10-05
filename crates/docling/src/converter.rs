@@ -159,6 +159,9 @@ pub struct DocumentConverter {
     /// Per-document wall-clock budget for the PDF/image pipeline (docling's
     /// `document_timeout`, #497). See [`Self::document_timeout`].
     document_timeout: Option<std::time::Duration>,
+    /// Bounds on what a ZIP input may decompress (#557,
+    /// [`DocumentConverter::convert_archive`]).
+    archive_limits: crate::archive::ArchiveLimits,
 }
 
 /// Default cap on sampled frames per video. Scene changes rarely exceed this
@@ -226,6 +229,7 @@ impl Default for DocumentConverter {
             encoding: None,
             artifacts_dir: "artifacts".to_string(),
             document_timeout: None,
+            archive_limits: crate::archive::ArchiveLimits::default(),
         }
     }
 }
@@ -468,6 +472,19 @@ impl DocumentConverter {
 
     /// The converter's [`encoding`](Self::encoding) applied to a source that
     /// did not set its own.
+    /// Bounds on what a ZIP input may make the converter decompress (#557):
+    /// entries considered, per-entry and total uncompressed size, compression
+    /// ratio. [`ArchiveLimits::default`](crate::archive::ArchiveLimits) when
+    /// not set. Only [`DocumentConverter::convert_archive`] reads them.
+    pub fn archive_limits(mut self, limits: crate::archive::ArchiveLimits) -> Self {
+        self.archive_limits = limits;
+        self
+    }
+
+    pub(crate) fn archive_limits_ref(&self) -> crate::archive::ArchiveLimits {
+        self.archive_limits
+    }
+
     fn with_encoding(&self, mut source: SourceDocument) -> SourceDocument {
         if source.encoding.is_none() {
             source.encoding = self.encoding.clone();

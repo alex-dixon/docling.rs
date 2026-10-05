@@ -864,18 +864,13 @@ async fn parse_source_specs(
             passthrough::SourceSpec::File {
                 base64_string,
                 filename,
-            } => {
-                let item = match docling::base64::decode(base64_string.trim()) {
-                    Some(bytes) => {
-                        source_from_named_bytes(&filename, bytes).map_err(|e| (filename.clone(), e))
-                    }
-                    None => Err((
-                        filename.clone(),
-                        ApiError::Bad(format!("file source {filename:?}: bad base64")),
-                    )),
-                };
-                items.push(item);
-            }
+            } => match docling::base64::decode(base64_string.trim()) {
+                Some(bytes) => items.extend(sources_from_named_bytes(&filename, bytes)),
+                None => items.push(Err((
+                    filename.clone(),
+                    ApiError::Bad(format!("file source {filename:?}: bad base64")),
+                ))),
+            },
             passthrough::SourceSpec::Http { url, headers } => {
                 require_outbound(state, "URL inputs")?;
                 let header_vec: Vec<(String, String)> = headers.into_iter().collect();
@@ -901,7 +896,7 @@ async fn parse_source_specs(
                     .await
                     .map_err(ApiError::Bad)?;
                 for (name, bytes) in fetched {
-                    items.push(source_from_named_bytes(&name, bytes).map_err(|e| (name, e)));
+                    items.extend(sources_from_named_bytes(&name, bytes));
                 }
             }
         }
@@ -2157,9 +2152,7 @@ async fn read_multipart(
     // propagates them as its response, a batch fails only that item.
     let sources = files
         .into_iter()
-        .map(|(file_name, bytes)| {
-            source_from_named_bytes(&file_name, bytes).map_err(|e| (file_name, e))
-        })
+        .flat_map(|(file_name, bytes)| sources_from_named_bytes(&file_name, bytes))
         .collect();
     Ok((sources, body_opts.merge_over(query)))
 }
@@ -2169,6 +2162,55 @@ async fn text_field(field: axum::extract::multipart::Field<'_>) -> Result<String
         .text()
         .await
         .map_err(|e| ApiError::Bad(format!("reading field: {e}")))
+}
+
+/// The sources one named file contributes: itself, or — for a `.zip` — every
+/// document inside it (#557), each its own item, so the request converts them
+/// as a batch. Entries that do not convert (unsupported type, nested archive,
+/// unsafe path, over an [`ArchiveLimits`](docling::ArchiveLimits) bound —
+/// `DOCLING_RS_ZIP_MAX_*`) are logged and left out; an archive that cannot be
+/// read, or holds nothing convertible, is one failed item.
+fn sources_from_named_bytes(file_name: &str, bytes: Vec<u8>) -> Vec<SourceItem> {
+    let is_zip = std::path::Path::new(file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    if !is_zip {
+        return vec![source_from_named_bytes(file_name, bytes).map_err(|e| (file_name.into(), e))];
+    }
+    let limits = docling::ArchiveLimits::from_env();
+    let mut archive = match docling::archive::Archive::open(std::io::Cursor::new(bytes), &limits) {
+        Ok(a) => a,
+        Err(e) => {
+            return vec![Err((
+                file_name.into(),
+                ApiError::Bad(format!("{file_name}: {e}")),
+            ))]
+        }
+    };
+    let entries = archive.entries().to_vec();
+    let mut items: Vec<SourceItem> = Vec::new();
+    for entry in entries {
+        let label = format!("{file_name}:{}", entry.path);
+        if let Some(reason) = &entry.skipped {
+            eprintln!("docling-serve: skipping {label}: {reason}");
+            continue;
+        }
+        items.push(
+            archive
+                .read(entry.index)
+                .map_err(|e| (label, ApiError::Bad(e.to_string()))),
+        );
+    }
+    if items.is_empty() {
+        items.push(Err((
+            file_name.into(),
+            ApiError::Bad(format!(
+                "{file_name}: the archive holds no document to convert"
+            )),
+        )));
+    }
+    items
 }
 
 /// Build a [`SourceDocument`] from a filename (extension → format) and bytes.
