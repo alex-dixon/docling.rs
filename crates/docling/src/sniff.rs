@@ -28,6 +28,11 @@ pub(crate) fn detect(bytes: &[u8]) -> Option<InputFormat> {
     if text.starts_with(b"{\\rtf") {
         return Some(InputFormat::Rtf);
     }
+    // A flat Word for Windows 1.x / 2.0 file (#566): no container to look
+    // into, its FIB is the first bytes.
+    if crate::backend::doc::is_word2(bytes) {
+        return Some(InputFormat::Doc);
+    }
     if bytes.starts_with(b"PK\x03\x04") {
         return zip_kind(bytes);
     }

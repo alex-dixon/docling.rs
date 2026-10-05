@@ -30,7 +30,7 @@ pub(crate) mod cfb;
 mod chandra;
 mod csv;
 mod deepseek;
-mod doc;
+pub(crate) mod doc;
 pub(crate) mod doclang;
 mod doclang_tree;
 mod docling_json;
