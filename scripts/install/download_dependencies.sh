@@ -20,9 +20,13 @@
 # Downloads (from https://github.com/docling-project/docling.rs/releases, tag
 # models-v1 by default — override the base with $DOCLING_RS_MODELS_URL):
 #   .models/layout_heron.onnx
+#   .models/ocr_rec_v6.onnx + .models/ocr_rec_v6_dict.txt (PP-OCRv6 recognition,
+#     multilingual — RapidOCR's / docling's recognizer and the runtime default
+#     when present, #570; from the release when the tag mirrors it, else from
+#     RapidOCR's model hub)
 #   .models/ocr_rec_en.onnx + .models/en_dict.txt   (English PP-OCRv3
-#     recognition — the runtime default; from the release when the tag mirrors
-#     it, else straight from upstream PP-OCRv3 hosting)
+#     recognition — the fallback without the v6 pair; from the release when the
+#     tag mirrors it, else straight from upstream PP-OCRv3 hosting)
 #   .models/ocr_rec.onnx + .models/ppocr_keys_v1.txt (multilingual ch_ pair —
 #     what docling conformance is measured with; DOCLING_RS_OCR_LANG=ch)
 #   .models/ocr_det.onnx (PP-OCRv6 text detector, #429 — reads lines the
@@ -351,10 +355,22 @@ fetch_mirrored .models/en_dict.txt \
 # PP-OCRv6 text detector (#429) — the model docling's RapidOCR default runs
 # in front of its recognizer, re-hosted unmodified; RapidOCR's own hub is the
 # fallback for release tags that predate the mirror. Optional: without it OCR
-# stays region-scoped (text outside layout regions on bitmap pages is lost).
+# reads the layout regions' projection strips only (text outside layout
+# regions on bitmap pages is lost, and forms read far worse — #570).
 fetch_mirrored .models/ocr_det.onnx \
   "$BASE_URL/ocr_det.onnx" \
   "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx"
+# PP-OCRv6 recognizer + dictionary (#570) — RapidOCR's `PP-OCRv6_rec_small`,
+# the multilingual model docling recognizes with for every language; preferred
+# over the PP-OCRv3 pairs when present (SHA256 pinned in RapidOCR's hub:
+# 6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884). Optional:
+# without it the v3 pairs below run.
+fetch_mirrored .models/ocr_rec_v6.onnx \
+  "$BASE_URL/ocr_rec_v6.onnx" \
+  "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx"
+fetch_mirrored .models/ocr_rec_v6_dict.txt \
+  "$BASE_URL/ocr_rec_v6_dict.txt" \
+  "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt"
 fetch "$BASE_URL/encoder.onnx" .models/tableformer/encoder.onnx
 fetch_optional "$BASE_URL/encoder.onnx.data" .models/tableformer/encoder.onnx.data
 fetch "$BASE_URL/decoder.onnx" .models/tableformer/decoder.onnx

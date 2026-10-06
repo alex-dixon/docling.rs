@@ -182,6 +182,15 @@ jobs:
           # 090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f).
           curl -fsSL $RETRY -o third-party/ocr_det.onnx \
             "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx"
+          # PP-OCRv6 recognizer + dictionary (#570, Apache-2.0): RapidOCR's
+          # multilingual `PP-OCRv6_rec_small`, the recognizer docling runs for
+          # every language and the Rust default when present; re-hosted
+          # unmodified (hub SHA256:
+          # 6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884).
+          curl -fsSL $RETRY -o third-party/ocr_rec_v6.onnx \
+            "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx"
+          curl -fsSL $RETRY -o third-party/ocr_rec_v6_dict.txt \
+            "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt"
           # Whisper tiny (the ASR default, ~150 MB): same reasoning — a
           # default install fetches it, so mirror it here and leave Hugging
           # Face as download_dependencies.sh's fallback host.
@@ -227,6 +236,8 @@ jobs:
           stage third-party/ocr_rec_en.onnx ocr_rec_en.onnx
           stage third-party/en_dict.txt en_dict.txt
           stage third-party/ocr_det.onnx ocr_det.onnx
+          stage third-party/ocr_rec_v6.onnx ocr_rec_v6.onnx
+          stage third-party/ocr_rec_v6_dict.txt ocr_rec_v6_dict.txt
           # Whisper tiny flattens with an asr_ prefix (release assets are one
           # flat namespace; download_dependencies.sh maps them back into
           # .models/asr/).

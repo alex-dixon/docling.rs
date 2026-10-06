@@ -254,6 +254,64 @@ pub fn prep_region_lines(
     (bboxes, lines)
 }
 
+/// [`prep_region_lines`] with the text detector's boxes as the line source
+/// (#570): inside each text region, the detected lines whose center falls in
+/// the region are the crops (whole, in the detector's reading order — see
+/// `det_boxes_inside`); a region the detector found nothing in falls back to
+/// the projection segmentation. `detected` is in image pixels (the detector ran
+/// on `img`).
+///
+/// Why: the projection profile cuts a region into full-width strips, so on a
+/// form — several fields on one baseline, separated by gaps the strip spans —
+/// one crop carries `FROM: J.Smith   DATE: 3/4/92   REF: 1138` and the
+/// recognizer glues or drops words (`OLDCOLDMENTHOLUIGHTS&ULTRA`). RapidOCR,
+/// docling's engine, recognizes the detector's own boxes, each a single text
+/// run with the detector's margin around it. On FUNSD this is the difference
+/// between 0.61 and 0.85 word recall (see the issue's measurements).
+pub fn prep_region_lines_det(
+    img: &RgbImage,
+    regions: &[crate::layout::Region],
+    scale: f32,
+    detected: &[crate::ocr_det::DetBox],
+) -> (Vec<LineBox>, Vec<PrepLine>) {
+    let (iw, ih) = img.dimensions();
+    let mut bboxes = Vec::new();
+    let mut lines = Vec::new();
+    for region in regions {
+        if !is_text_label(region.label) {
+            continue;
+        }
+        let l = (region.l * scale).max(0.0) as u32;
+        let t = (region.t * scale).max(0.0) as u32;
+        let r = ((region.r * scale).max(0.0) as u32).min(iw);
+        let b = ((region.b * scale).max(0.0) as u32).min(ih);
+        if r <= l || b <= t {
+            continue;
+        }
+        let inside = det_boxes_inside(detected, l, t, r, b, iw, ih);
+        if inside.is_empty() {
+            let (bb, pl) = prep_region_lines(img, std::slice::from_ref(region), scale);
+            bboxes.extend(bb);
+            lines.extend(pl);
+            continue;
+        }
+        for (dl, dt, dr, db) in inside {
+            let line = imageops::crop_imm(img, dl, dt, dr - dl, db - dt).to_image();
+            let Some(pl) = prep_line(&line) else {
+                continue;
+            };
+            bboxes.push((
+                dl as f32 / scale,
+                dt as f32 / scale,
+                dr as f32 / scale,
+                db as f32 / scale,
+            ));
+            lines.push(pl);
+        }
+    }
+    (bboxes, lines)
+}
+
 /// Split a text line into word tokens by a vertical ink-projection profile:
 /// runs of ink columns separated by whitespace wider than ~0.6× the line
 /// height (an inter-word/-column gap, not an inter-character one). Returns tight
@@ -348,6 +406,88 @@ pub fn prep_table_words(
     (bboxes, lines)
 }
 
+/// [`prep_table_words`] with the text detector's boxes as the word source
+/// (#570): inside each table region the detected boxes whose center falls in
+/// it are the crops (whole) — RapidOCR's cells, which is what
+/// docling's TableFormer matcher receives on a scanned table; a table the
+/// detector found nothing in falls back to the projection line/word split.
+pub fn prep_table_words_det(
+    img: &RgbImage,
+    regions: &[crate::layout::Region],
+    scale: f32,
+    detected: &[crate::ocr_det::DetBox],
+) -> (Vec<LineBox>, Vec<PrepLine>) {
+    let (iw, ih) = img.dimensions();
+    let mut bboxes = Vec::new();
+    let mut lines = Vec::new();
+    for region in regions {
+        if !crate::assemble::is_table_like(region.label) {
+            continue;
+        }
+        let l = (region.l * scale).max(0.0) as u32;
+        let t = (region.t * scale).max(0.0) as u32;
+        let r = ((region.r * scale).max(0.0) as u32).min(iw);
+        let b = ((region.b * scale).max(0.0) as u32).min(ih);
+        if r <= l || b <= t {
+            continue;
+        }
+        let inside = det_boxes_inside(detected, l, t, r, b, iw, ih);
+        if inside.is_empty() {
+            let (bb, pl) = prep_table_words(img, std::slice::from_ref(region), scale);
+            bboxes.extend(bb);
+            lines.extend(pl);
+            continue;
+        }
+        for (dl, dt, dr, db) in inside {
+            let word = imageops::crop_imm(img, dl, dt, dr - dl, db - dt).to_image();
+            let Some(pl) = prep_line(&word) else {
+                continue;
+            };
+            bboxes.push((
+                dl as f32 / scale,
+                dt as f32 / scale,
+                dr as f32 / scale,
+                db as f32 / scale,
+            ));
+            lines.push(pl);
+        }
+    }
+    (bboxes, lines)
+}
+
+/// The detected boxes whose center lies in the `l..r × t..b` image-pixel
+/// rectangle, in the detector's reading order. A box is taken whole (clipped
+/// to the image, not to the region): the layout box is often tight on the
+/// ink while the detector's unclip margin reaches past it, and cutting that
+/// margin off clips the first and last glyphs — RapidOCR recognizes the
+/// detector's box as drawn. The crop may thus poke a little outside the
+/// region; the cell keeps the box geometry and assembly assigns it by
+/// overlap, as for any cell.
+fn det_boxes_inside(
+    detected: &[crate::ocr_det::DetBox],
+    l: u32,
+    t: u32,
+    r: u32,
+    b: u32,
+    iw: u32,
+    ih: u32,
+) -> Vec<(u32, u32, u32, u32)> {
+    detected
+        .iter()
+        .filter(|d| {
+            let (cx, cy) = ((d.l + d.r) / 2.0, (d.t + d.b) / 2.0);
+            cx >= l as f32 && cx < r as f32 && cy >= t as f32 && cy < b as f32
+        })
+        .filter_map(|d| {
+            let dl = d.l.max(0.0) as u32;
+            let dt = d.t.max(0.0) as u32;
+            let dr = (d.r.max(0.0) as u32).min(iw);
+            let db = (d.b.max(0.0) as u32).min(ih);
+            (dr > dl && db > dt).then_some((dl, dt, dr, db))
+        })
+        .collect()
+}
+
 /// Normalize an image to the scan polarity every stage assumes — dark ink
 /// on light paper (the segmentation threshold and the recognition model's
 /// training data both bake it in): a predominantly dark page (mean luma
@@ -379,6 +519,21 @@ pub fn prep_page_lines(img: &RgbImage) -> Vec<PrepLine> {
             prep_line(&line)
         })
         .collect()
+}
+
+/// RapidOCR's `text_score` (docling's `RapidOcrOptions.text_score`, 0.5): a
+/// recognized line whose mean emitted-character confidence falls below it is
+/// dropped — a shaded bar, a halftone, a rule read as a run of letters
+/// (`TUANEURHENSTGOFUPHYCLTOSHSWOYT` for a form's grey `GEOGRAPHY` band)
+/// would otherwise land in the document as a heading. `DOCLING_RS_OCR_TEXT_SCORE`
+/// overrides it (`0` keeps every line, the pre-#570 behavior). Cached.
+pub fn text_score() -> f32 {
+    static SCORE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SCORE.get_or_init(|| {
+        docling_core::env::parse::<f32>("DOCLING_RS_OCR_TEXT_SCORE")
+            .filter(|s| s.is_finite() && (0.0..=1.0).contains(s))
+            .unwrap_or(0.5)
+    })
 }
 
 /// Deterministic recognition batching: page-order line indices grouped by
@@ -444,6 +599,84 @@ mod tests {
             batch_input(*w0, chunk0, &lines).len(),
             3 * REC_HEIGHT as usize * w0
         );
+    }
+
+    /// #570: inside a text region the detector's boxes are the crops — one
+    /// per box, clipped to the region, in the detector's order — and a region
+    /// the detector saw nothing in falls back to the projection strips. The
+    /// two-bar page as one region: two detected boxes → two det-shaped lines;
+    /// the region's second bar split by the detector into two words → three
+    /// lines where the projection found two; no boxes → the projection's two.
+    #[test]
+    fn detector_boxes_are_the_region_lines_with_projection_fallback() {
+        let img = page();
+        let region = crate::layout::Region {
+            label: "text",
+            score: 0.9,
+            l: 0.0,
+            t: 0.0,
+            r: 200.0,
+            b: 100.0,
+        };
+        let bx = |l: f32, t: f32, r: f32, b: f32| crate::ocr_det::DetBox {
+            l,
+            t,
+            r,
+            b,
+            score: 0.9,
+        };
+        let det = [bx(8.0, 18.0, 192.0, 32.0), bx(8.0, 58.0, 122.0, 74.0)];
+        let (boxes, lines) = prep_region_lines_det(&img, std::slice::from_ref(&region), 1.0, &det);
+        assert_eq!(
+            boxes,
+            vec![(8.0, 18.0, 192.0, 32.0), (8.0, 58.0, 122.0, 74.0)]
+        );
+        assert_eq!(lines.len(), 2);
+        // A box reaching past the region is taken whole (clipped only to the
+        // image); one centered outside the region is not its line.
+        let narrow = crate::layout::Region {
+            r: 150.0,
+            ..region.clone()
+        };
+        let det = [bx(-10.0, 18.0, 250.0, 32.0), bx(300.0, 60.0, 400.0, 70.0)];
+        let (boxes, _) = prep_region_lines_det(&img, std::slice::from_ref(&narrow), 1.0, &det);
+        assert_eq!(boxes, vec![(0.0, 18.0, 200.0, 32.0)]);
+        // The detector split the second bar into two words.
+        let det = [
+            bx(8.0, 18.0, 192.0, 32.0),
+            bx(8.0, 58.0, 60.0, 74.0),
+            bx(70.0, 58.0, 122.0, 74.0),
+        ];
+        let (boxes, _) = prep_region_lines_det(&img, std::slice::from_ref(&region), 1.0, &det);
+        assert_eq!(boxes.len(), 3);
+        // No detected box in the region → the projection segmentation.
+        let (fallback, _) = prep_region_lines_det(&img, std::slice::from_ref(&region), 1.0, &[]);
+        let (projection, _) = prep_region_lines(&img, std::slice::from_ref(&region), 1.0);
+        assert_eq!(fallback, projection);
+        assert_eq!(projection.len(), 2);
+        // Table regions take the same boxes as their word crops.
+        let table = crate::layout::Region {
+            label: "table",
+            ..region.clone()
+        };
+        let det = [bx(8.0, 18.0, 92.0, 32.0), bx(108.0, 18.0, 192.0, 32.0)];
+        let (words, _) = prep_table_words_det(&img, std::slice::from_ref(&table), 1.0, &det);
+        assert_eq!(
+            words,
+            vec![(8.0, 18.0, 92.0, 32.0), (108.0, 18.0, 192.0, 32.0)]
+        );
+        let (fallback, _) = prep_table_words_det(&img, std::slice::from_ref(&table), 1.0, &[]);
+        assert_eq!(
+            fallback,
+            prep_table_words(&img, std::slice::from_ref(&table), 1.0).0
+        );
+    }
+
+    /// RapidOCR's `text_score` default, the pre-#570 "keep everything" with
+    /// `0`, and garbage values ignored.
+    #[test]
+    fn text_score_default_is_rapidocrs() {
+        assert_eq!(text_score(), 0.5);
     }
 
     #[test]

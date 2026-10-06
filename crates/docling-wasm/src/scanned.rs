@@ -25,8 +25,9 @@
 use docling_pdf::assemble::{geometric_table_is_reliable, reconstruct_table};
 use docling_pdf::layout::{decode_layout, layout_input, SIDE};
 use docling_pdf::ocr_prep::{
-    batch_input, decode_row, dict_chars, normalize_polarity, prep_region_lines, prep_table_words,
-    width_batches, PrepLine, REC_HEIGHT,
+    batch_input, decode_row_scored, dict_chars, normalize_polarity, prep_region_lines,
+    prep_region_lines_det, prep_table_words, prep_table_words_det, text_score, width_batches,
+    PrepLine, REC_HEIGHT,
 };
 use docling_pdf::pdfium_backend::{PdfPage, TextCell};
 use docling_pdf::scanned::{assemble_page_with_tables, finish_document, refine_regions};
@@ -135,8 +136,10 @@ impl ScannedConverter {
 
 /// Recognize a set of prepared line/word crops: width-batch them and run
 /// each batch through the JS recognition session, greedy-CTC-decoding the
-/// probabilities. Returns one string per input crop, in order. Shared by the
-/// scanned path (every text region) and the digital path (embedded raster
+/// probabilities. Returns one string per input crop, in order — empty for a
+/// crop whose confidence falls under RapidOCR's `text_score` (#570, the same
+/// filter the native path applies), which callers already skip. Shared by
+/// the scanned path (every text region) and the digital path (embedded raster
 /// pictures with no text cells — see `digital.rs`).
 pub(crate) async fn ocr_lines(
     chars: &[String],
@@ -159,8 +162,11 @@ pub(crate) async fn ocr_lines(
         if probs.len() < chunk.len() * t_len * nc {
             return Err(JsError::new("rec session.run returned a short tensor"));
         }
+        let min_conf = text_score();
         for (i, &ix) in chunk.iter().enumerate() {
-            texts[ix] = decode_row(chars, &probs[i * t_len * nc..(i + 1) * t_len * nc], nc);
+            let (text, conf) =
+                decode_row_scored(chars, &probs[i * t_len * nc..(i + 1) * t_len * nc], nc);
+            texts[ix] = if conf < min_conf { String::new() } else { text };
         }
     }
     Ok(texts)
@@ -216,8 +222,32 @@ impl ScannedConverter {
         let regions = decode_layout(&logits, &boxes, q, c, page_w, page_h);
         let mut regions = refine_regions(regions, &[], page_w, page_h);
 
+        // Text detection (#429) first: with the detector on board its boxes
+        // are the recognizer's line source inside the regions too (#570,
+        // RapidOCR's own crops — the native worker does the same), and the
+        // lines no region covers are recognized below. (Taken out of `self`
+        // for the duration: the recognition borrows `self` mutably, and a JS
+        // session handle is not `Clone`.)
+        let det = self.det.take();
+        let mut boxes: Vec<docling_pdf::ocr_det::DetBox> = Vec::new();
+        if let Some(det) = det.as_ref() {
+            if let Some((input, dw, dh)) = docling_pdf::ocr_det::prep_det_input(&img) {
+                let out = det
+                    .run(dh, dw, js_sys::Float32Array::from(input.as_slice()))
+                    .await
+                    .map_err(|e| JsError::new(&format!("det session.run: {e:?}")))?;
+                let (prob, ph, pw) = tensor_parts(&out)?;
+                boxes = docling_pdf::ocr_det::db_boxes(&prob, pw, ph, img.width(), img.height());
+            }
+        }
+        self.det = det;
+
         // OCR the text regions (same gather/batch/decode as native ocr_page).
-        let (bboxes, lines) = prep_region_lines(&img, &regions, scale);
+        let (bboxes, lines) = if boxes.is_empty() {
+            prep_region_lines(&img, &regions, scale)
+        } else {
+            prep_region_lines_det(&img, &regions, scale, &boxes)
+        };
         let texts = self.ocr_lines(rec, &lines).await?;
         let mut cells = Vec::new();
         for ((l, t, r, b), text) in bboxes.into_iter().zip(texts) {
@@ -233,7 +263,11 @@ impl ScannedConverter {
         // word crops so the cell matcher — geometric or TableFormer — can fill
         // the grid; assemble routes these cells into the table region, not into
         // stray paragraphs.
-        let (tbboxes, tlines) = prep_table_words(&img, &regions, scale);
+        let (tbboxes, tlines) = if boxes.is_empty() {
+            prep_table_words(&img, &regions, scale)
+        } else {
+            prep_table_words_det(&img, &regions, scale, &boxes)
+        };
         let ttexts = self.ocr_lines(rec, &tlines).await?;
         for ((l, t, r, b), text) in tbboxes.into_iter().zip(ttexts) {
             let text = text.trim().to_string();
@@ -283,43 +317,29 @@ impl ScannedConverter {
             }
         }
 
-        // Text detection (#429): the same supplement the native worker runs —
-        // DB sweeps the whole bitmap, lines the region pass did not cover are
-        // recognized and placed by the orphan pass; those inside a kept
-        // picture or table become its silent children (docling parity).
-        // (Taken out of `self` for the duration: the recognition below borrows
-        // `self` mutably, and a JS session handle is not `Clone`.)
-        let det = self.det.take();
-        if let Some(det) = det.as_ref() {
-            if let Some((input, dw, dh)) = docling_pdf::ocr_det::prep_det_input(&img) {
-                let out = det
-                    .run(dh, dw, js_sys::Float32Array::from(input.as_slice()))
-                    .await
-                    .map_err(|e| JsError::new(&format!("det session.run: {e:?}")))?;
-                let (prob, ph, pw) = tensor_parts(&out)?;
-                let boxes =
-                    docling_pdf::ocr_det::db_boxes(&prob, pw, ph, img.width(), img.height());
-                let uncovered =
-                    docling_pdf::ocr_det::uncovered_lines(&boxes, scale, &regions, &cells);
-                if !uncovered.is_empty() {
-                    let (dbboxes, dlines) = prep_region_lines(&img, &uncovered, scale);
-                    let dtexts = self.ocr_lines(rec, &dlines).await?;
-                    let mut dcells = Vec::new();
-                    for ((l, t, r, b), text) in dbboxes.into_iter().zip(dtexts) {
-                        let text = text.trim().to_string();
-                        if !text.is_empty() {
-                            dcells.push(TextCell { text, l, t, r, b });
-                        }
+        // The detected lines the region pass did not cover (#429) — the same
+        // supplement the native worker runs: recognized and placed by the
+        // orphan pass; those inside a kept picture or table become its silent
+        // children (docling parity).
+        if !boxes.is_empty() {
+            let uncovered = docling_pdf::ocr_det::uncovered_lines(&boxes, scale, &regions, &cells);
+            if !uncovered.is_empty() {
+                let (dbboxes, dlines) = prep_region_lines(&img, &uncovered, scale);
+                let dtexts = self.ocr_lines(rec, &dlines).await?;
+                let mut dcells = Vec::new();
+                for ((l, t, r, b), text) in dbboxes.into_iter().zip(dtexts) {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        dcells.push(TextCell { text, l, t, r, b });
                     }
-                    if !dcells.is_empty() {
-                        cells.extend(dcells.iter().cloned());
-                        docling_pdf::assemble::add_orphan_regions(&mut regions, &dcells);
-                        docling_pdf::assemble::drop_contained_regulars(&mut regions);
-                    }
+                }
+                if !dcells.is_empty() {
+                    cells.extend(dcells.iter().cloned());
+                    docling_pdf::assemble::add_orphan_regions(&mut regions, &dcells);
+                    docling_pdf::assemble::drop_contained_regulars(&mut regions);
                 }
             }
         }
-        self.det = det;
 
         // TableFormer (opt-in): resolve each table region's structure through
         // the ONNX graphs + shared matcher; other regions stay `None` (geometric

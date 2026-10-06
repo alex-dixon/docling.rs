@@ -18,10 +18,4 @@ Time
 
 <!-- image -->
 
-△
-
-Forward chunk
-
-▲
-
-Backward chunk
+Forward chunk Backward chunk

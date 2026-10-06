@@ -692,6 +692,36 @@ pub fn layout_src(page: &PdfPage) -> layout::LayoutSrc<'_> {
 }
 
 #[cfg(feature = "ml")]
+/// RapidOCR's longest side (`Global.max_side_len`, 2000): docling renders the
+/// OCR input at `OcrOptions.scale` = 3 and RapidOCR then shrinks what exceeds
+/// this before detecting and recognizing, so that is the resolution its
+/// models actually see.
+const RAPIDOCR_MAX_SIDE: f32 = 2000.0;
+
+#[cfg(feature = "ml")]
+/// The px/pt the OCR reads a page at: the caller's `ocr_scale` when set; else,
+/// for a standalone bitmap input — its own scale-1.0 page, a resolution the
+/// pipeline did not choose — docling's rule (#570): three pixels per point
+/// (`OcrOptions.scale`), shrunk so the longer side stays within RapidOCR's
+/// 2000 px (a 754 × 1000 scanned form reads at 2.0; a 3000 px photo at 0.67,
+/// as RapidOCR would downsample it). `None` for a rendered page (PDF, hOCR),
+/// which keeps its own render — the 2.0 px/pt the conformance baselines are
+/// pinned to. Measured on FUNSD at 1.0 / 2.0 / 3.0 px/pt: 0.825 / 0.856 /
+/// 0.836 word recall — the recognizer likes its crops at the resolution
+/// RapidOCR hands it, no more.
+fn page_ocr_scale(ocr_scale: Option<f32>, page: &PdfPage) -> Option<f32> {
+    if ocr_scale.is_some() || page.scale != 1.0 {
+        return ocr_scale;
+    }
+    let longest = page.width.max(page.height);
+    if longest <= 0.0 {
+        return None;
+    }
+    let s = 3.0f32.min(RAPIDOCR_MAX_SIDE / longest);
+    ((s - 1.0).abs() > 1e-3).then_some(s)
+}
+
+#[cfg(feature = "ml")]
 /// The bitmap + px/pt scale the OCR reads (#254, docling#3877's
 /// `OcrOptions.scale`): the page's own render unless `ocr_scale` asks for a
 /// different resolution, where a PIL-bicubic resample of that render is built
@@ -794,15 +824,27 @@ pub(crate) enum Recognizer {
 
 #[cfg(feature = "ml")]
 impl Recognizer {
-    /// See [`ocr::OcrModel::ocr_page`].
+    /// See [`ocr::OcrModel::ocr_page_with`].
     fn ocr_page(
         &mut self,
         img: &image::RgbImage,
         regions: &[layout::Region],
         scale: f32,
     ) -> Result<Vec<(TextCell, f32)>, String> {
+        self.ocr_page_with(img, regions, scale, None)
+    }
+
+    /// [`Self::ocr_page`] with the detector's boxes (#570). Tesseract segments its
+    /// own lines and ignores the detector's boxes.
+    fn ocr_page_with(
+        &mut self,
+        img: &image::RgbImage,
+        regions: &[layout::Region],
+        scale: f32,
+        detected: Option<&[ocr_det::DetBox]>,
+    ) -> Result<Vec<(TextCell, f32)>, String> {
         match self {
-            Self::PpOcr(m) => m.ocr_page(img, regions, scale),
+            Self::PpOcr(m) => m.ocr_page_with(img, regions, scale, detected),
             Self::Tesseract(t) => t.ocr_page(img, regions, scale),
         }
     }
@@ -813,9 +855,10 @@ impl Recognizer {
         img: &image::RgbImage,
         regions: &[layout::Region],
         scale: f32,
+        detected: Option<&[ocr_det::DetBox]>,
     ) -> Result<Vec<(TextCell, f32)>, String> {
         match self {
-            Self::PpOcr(m) => m.ocr_table_words(img, regions, scale),
+            Self::PpOcr(m) => m.ocr_table_words(img, regions, scale, detected),
             Self::Tesseract(t) => t.ocr_table_words(img, regions, scale),
         }
     }
@@ -1015,9 +1058,13 @@ impl Worker {
         &mut self,
         pages: &[(usize, &'p PdfPage)],
     ) -> Result<Vec<(usize, &'p PdfPage)>, PdfError> {
+        // Pages the orientation pass already detected (#571) are skipped:
+        // their boxes wait in `pending_det`.
         let scanned: Vec<(usize, &PdfPage)> = pages
             .iter()
-            .filter(|(_, p)| p.cells.is_empty() && p.image.width() > 1)
+            .filter(|(n, p)| {
+                p.cells.is_empty() && p.image.width() > 1 && !self.pending_det.contains_key(n)
+            })
             .copied()
             .collect();
         if scanned.is_empty() || self.ocr_model()?.is_none() || self.det_model().is_none() {
@@ -1051,7 +1098,12 @@ impl Worker {
                     .iter()
                     .map(|&(n, page)| {
                         let mut view = None;
-                        let (img, _) = ocr_input(&mut view, &page.image, page.scale, ocr_scale);
+                        let (img, _) = ocr_input(
+                            &mut view,
+                            &page.image,
+                            page.scale,
+                            page_ocr_scale(ocr_scale, page),
+                        );
                         (n, timing::timed("ocr.det", || det.detect(img)))
                     })
                     .collect::<Vec<_>>()
@@ -1087,11 +1139,27 @@ impl Worker {
         }
         // The probe reads text through the OCR model; without one (missing —
         // #244 degradation) the page stays as rendered.
+        if self.ocr_model()?.is_none() {
+            return Ok(());
+        }
+        // The text detector's lines are the probe's crops (#571). Detected on
+        // the page image as rendered; an upright page keeps them for the OCR
+        // pass (`pending_det`) when that pass reads the same bitmap, so the
+        // detector runs once per page as before — a rotated page detects
+        // again on the un-rotated image, alongside layout.
+        let boxes: Vec<ocr_det::DetBox> = match self.det_model() {
+            Some(det) => timing::timed("orient.det", || det.detect(&page.image)).unwrap_or_else(|e| {
+                debug_log!("docling-pdf: page {}: text detection failed ({e}); probing projection strips", n + 1);
+                Vec::new()
+            }),
+            None => Vec::new(),
+        };
+        let ocr_scale = page_ocr_scale(self.ocr_scale, page);
         let Some(ocr) = self.ocr_model()? else {
             return Ok(());
         };
         let deg = timing::timed("orient.detect", || {
-            orient::detect(&page.image, ocr, page.scale)
+            orient::detect(&page.image, ocr, page.scale, &boxes)
         });
         if deg != 0 {
             debug_log!(
@@ -1100,6 +1168,8 @@ impl Worker {
                 n + 1
             );
             page.unrotate(deg);
+        } else if !boxes.is_empty() && ocr_scale.is_none_or(|s| (s - page.scale).abs() <= 1e-3) {
+            self.pending_det.insert(n, Ok(boxes));
         }
         Ok(())
     }
@@ -1430,7 +1500,7 @@ impl Worker {
         // the page render at the requested px/pt, built lazily on the first
         // OCR use so non-OCR pages never pay for it. Copied out of `self` up
         // front — the OCR sites hold `self.ocr_model()`'s mutable borrow.
-        let ocr_scale = self.ocr_scale;
+        let ocr_scale = page_ocr_scale(self.ocr_scale, page);
         let mut ocr_view: Option<image::RgbImage> = None;
         if self.force_full_page_ocr {
             page.cells.clear();
@@ -1526,13 +1596,61 @@ impl Worker {
             // page resolves the same overlap through cell ownership in
             // `fit_regions_to_cells` and needs nothing here.
             assemble::merge_overlapping_regulars(&mut regions);
+            // The text detector's lines (#429), fetched before the region
+            // pass: with `det` line mode (#570, the default) they are the
+            // recognizer's crops inside the regions too — RapidOCR's own line
+            // source — not only the supplement outside them. Usually computed
+            // already, alongside layout (see `detect_alongside`); a page that
+            // reached OCR another way detects here. Degradation over failure:
+            // a detector that loaded but cannot run (a damaged file, an
+            // allocation failure) costs the page its detected lines, not its
+            // conversion — the projection segmentation is complete on its own.
+            let detected: Vec<ocr_det::DetBox> = if self.ocr_model()?.is_some() {
+                let (img, _) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
+                match self.pending_det.remove(&n) {
+                    Some(result) => result,
+                    None => match self.det_model() {
+                        Some(det) => timing::timed("ocr.det", || det.detect(img)),
+                        None => Ok(Vec::new()),
+                    },
+                }
+                .unwrap_or_else(|e| {
+                    docling_core::debug_log!(
+                        "docling-pdf: page {}: text detection failed ({e}); keeping the \
+                         region-scoped OCR only",
+                        n + 1
+                    );
+                    Vec::new()
+                })
+            } else {
+                Vec::new()
+            };
+            docling_core::debug_log!(
+                "docling-pdf: page {}: text detector found {} line(s): {:?}",
+                n + 1,
+                detected.len(),
+                detected
+                    .iter()
+                    .map(|d| (
+                        d.l.round(),
+                        d.t.round(),
+                        d.r.round(),
+                        d.b.round(),
+                        (d.score * 100.0).round() / 100.0
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            let det_lines =
+                (ocr::det_lines() && !detected.is_empty()).then_some(detected.as_slice());
             // `None` = `skip_ocr` or a missing model (#244): the page keeps
             // its layout regions (and TableFormer structure below) with no
             // recognized text, instead of failing the conversion.
             if let Some(ocr) = self.ocr_model()? {
                 let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
-                let cells = timing::timed("ocr.page", || ocr.ocr_page(img, &regions, scl))
-                    .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
+                let cells = timing::timed("ocr.page", || {
+                    ocr.ocr_page_with(img, &regions, scl, det_lines)
+                })
+                .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
                 ocr_confs.extend(cells.iter().map(|(_, conf)| conf));
                 page.cells = cells.into_iter().map(|(cell, _)| cell).collect();
                 // Table interiors carry no words yet: region-scoped OCR skips
@@ -1545,7 +1663,7 @@ impl Worker {
                 if regions.iter().any(|r| assemble::is_table_like(r.label)) {
                     let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
                     let words = timing::timed("ocr.table_words", || {
-                        ocr.ocr_table_words(img, &regions, scl)
+                        ocr.ocr_table_words(img, &regions, scl, det_lines)
                     })
                     .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
                     ocr_confs.extend(words.iter().map(|(_, conf)| conf));
@@ -1564,43 +1682,6 @@ impl Worker {
             // that special's silent children, as upstream).
             if self.ocr_model()?.is_some() {
                 let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
-                // Usually computed already, alongside layout (see
-                // `detect_alongside`); a page that reached OCR another way
-                // detects here.
-                // Degradation over failure: a detector that loaded but cannot
-                // run (a damaged file, an allocation failure) costs the page
-                // its detected lines, not its conversion — the region-scoped
-                // pass above is complete on its own.
-                let detected = match self.pending_det.remove(&n) {
-                    Some(result) => result,
-                    None => match self.det_model() {
-                        Some(det) => timing::timed("ocr.det", || det.detect(img)),
-                        None => Ok(Vec::new()),
-                    },
-                }
-                .unwrap_or_else(|e| {
-                    docling_core::debug_log!(
-                        "docling-pdf: page {}: text detection failed ({e}); keeping the \
-                         region-scoped OCR only",
-                        n + 1
-                    );
-                    Vec::new()
-                });
-                docling_core::debug_log!(
-                    "docling-pdf: page {}: text detector found {} line(s): {:?}",
-                    n + 1,
-                    detected.len(),
-                    detected
-                        .iter()
-                        .map(|d| (
-                            d.l.round(),
-                            d.t.round(),
-                            d.r.round(),
-                            d.b.round(),
-                            (d.score * 100.0).round() / 100.0
-                        ))
-                        .collect::<Vec<_>>()
-                );
                 let uncovered = ocr_det::uncovered_lines(&detected, scl, &regions, &page.cells);
                 docling_core::debug_log!(
                     "docling-pdf: page {}: {} of {} detected line(s) not covered by the region pass",
@@ -1759,7 +1840,7 @@ impl Worker {
             if let (false, Some(ocr)) = (pic_tables.is_empty(), self.ocr_model()?) {
                 let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
                 let words = timing::timed("ocr.table_words", || {
-                    ocr.ocr_table_words(img, &pic_tables, scl)
+                    ocr.ocr_table_words(img, &pic_tables, scl, None)
                 })
                 .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
                 ocr_confs.extend(words.iter().map(|(_, conf)| conf));
@@ -2488,12 +2569,16 @@ impl Pipeline {
     /// OCR render scale in pixels per PDF point — docling's `OcrOptions.scale`
     /// (#254, upstream docling#3877; their default 3 = 216 dpi). `None`
     /// (default: `DOCLING_RS_OCR_SCALE`, else unset) feeds the recognizer the
-    /// pipeline's own page render (2.0 px/pt = 144 dpi); a different value
-    /// resamples that render for the OCR input only — layout and TableFormer
-    /// keep their pinned-resolution pixels, so the conformance baseline never
-    /// moves. Lower it when the source raster is already high-resolution and
-    /// upscaling degrades recognition; raise it toward docling's 216 dpi for
-    /// parity experiments. Non-positive values are ignored.
+    /// pipeline's own page render (2.0 px/pt = 144 dpi) for a rendered page,
+    /// and for a standalone image input docling's own resolution (#570): 3
+    /// px/pt shrunk so the longer side stays within RapidOCR's 2000 px — what
+    /// its models see after RapidOCR's `max_side_len` pass (a 754 × 1000 scan
+    /// reads at 2.0). A set value resamples the render / image for the OCR
+    /// input only — layout and TableFormer keep their pinned-resolution
+    /// pixels, so the conformance baseline never moves. Lower it when the
+    /// source raster is already high-resolution and upscaling degrades
+    /// recognition; raise it toward docling's 216 dpi for parity experiments.
+    /// Non-positive values are ignored.
     pub fn ocr_scale(mut self, scale: Option<f32>) -> Self {
         self.ocr_scale = scale
             .filter(|s| s.is_finite() && *s > 0.0)
@@ -3356,6 +3441,44 @@ mod image_limit_tests {
             r.is_err(),
             "decode must fail under the pixel cap, not abort"
         );
+    }
+}
+
+#[cfg(all(test, feature = "ml"))]
+mod ocr_scale_tests {
+    use super::*;
+
+    fn page(w: f32, h: f32, scale: f32) -> PdfPage {
+        PdfPage {
+            width: w,
+            height: h,
+            scale,
+            cells: Vec::new(),
+            code_cells: Vec::new(),
+            word_cells: Vec::new(),
+            image: image::RgbImage::new(1, 1),
+            image_layout: None,
+            links: Vec::new(),
+            rotation: 0,
+        }
+    }
+
+    /// #570: an explicit scale wins everywhere; a rendered page keeps its
+    /// render; a scale-1.0 image page reads at docling's 3 px/pt, shrunk to
+    /// RapidOCR's 2000 px longer side (a FUNSD scan at 2.0, a 3000 px photo
+    /// downsampled to 0.67), and an image that lands at 1.0 is not resampled.
+    #[test]
+    fn image_inputs_follow_rapidocrs_resolution() {
+        assert_eq!(
+            page_ocr_scale(Some(1.5), &page(754.0, 1000.0, 1.0)),
+            Some(1.5)
+        );
+        assert_eq!(page_ocr_scale(None, &page(612.0, 792.0, 2.0)), None);
+        assert_eq!(page_ocr_scale(None, &page(754.0, 1000.0, 1.0)), Some(2.0));
+        assert_eq!(page_ocr_scale(None, &page(400.0, 600.0, 1.0)), Some(3.0));
+        let s = page_ocr_scale(None, &page(3000.0, 2000.0, 1.0)).unwrap();
+        assert!((s - 2.0 / 3.0).abs() < 1e-6, "{s}");
+        assert_eq!(page_ocr_scale(None, &page(2000.0, 1500.0, 1.0)), None);
     }
 }
 

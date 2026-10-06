@@ -105,10 +105,16 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   paths (#285 — whole-dir override keeping the engine's own selection logic,
   e.g. the OCR en/ch pair; the py bindings point it at their cache), then
   exe-dir fallback; env overrides: `PDFIUM_DYNAMIC_LIB_PATH` (`pdfium` feature),
-  `DOCLING_OCR_DET_ONNX` (text detector; missing → recognition-only OCR),
-  `DOCLING_RS_OCR_DET_MAX_SIDE` (cap on the detector input's longer side;
-  default 960 = PaddleOCR's, ~⅓ the uncapped detection time; `0` = RapidOCR's
-  uncapped rule),
+  `DOCLING_OCR_DET_ONNX` (text detector; its boxes are the recognizer's line
+  crops inside layout regions since #570 — missing → the ink-projection strips
+  and no text outside the regions), `DOCLING_RS_OCR_DET_MAX_SIDE` (cap on the
+  detector input's longer side; default 2000 = RapidOCR's `max_side_len`,
+  #570; `0` = uncapped, 960 = the pre-#570 PaddleOCR budget),
+  `DOCLING_RS_OCR_LINES` (#570; `det` default | `projection` = the strips alone),
+  `DOCLING_RS_OCR_TEXT_SCORE` (#570; RapidOCR's `text_score`, 0.5 — lines under
+  it are dropped; `0` keeps all), `DOCLING_OCR_REC_ONNX` + `DOCLING_OCR_DICT`
+  (the recognizer pair; unset → `.models/ocr_rec_v6.onnx` + `ocr_rec_v6_dict.txt`
+  when present (#570, RapidOCR's PP-OCRv6), else the PP-OCRv3 en/ch pair),
   `DOCLING_ASR_{ENCODER,DECODER,VOCAB}` (Whisper), `DOCLING_RS_ASR_VAD`
   (Parakeet's Silero VAD, on when `.models/asr/vad/silero_vad.onnx` exists;
   `off` = the energy-based pause splitter) + `DOCLING_ASR_VAD_ONNX` (its path),
@@ -137,9 +143,12 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   BCP-47 tags), `DOCLING_RS_OCR_MODE` (#254; docling's `OcrMode` —
   `full_page`/`layout_regions` force-discard the text layer),
   `DOCLING_RS_OCR_SCALE` (#254; OCR input px/pt — resampled from the 2.0
-  render; docling's default is 3),
+  render; docling's default is 3; unset, an image input reads at docling's
+  effective resolution — 3 px/pt shrunk to RapidOCR's 2000 px longer side,
+  #570),
   `DOCLING_RS_OCR_ORIENTATION` (auto default; `off` disables content-based
-  un-rotation of raster-rotated scans, #225), `DOCLING_CHUNK_TOKENIZER`,
+  un-rotation of raster-rotated scans, #225 — probed on the detector's boxes
+  with a confidence margin since #571), `DOCLING_CHUNK_TOKENIZER`,
   `DOCLING_RS_DEBUG` (re-enables quiet pipeline diagnostics, e.g. the
   int8→fp32 layout-retry notice), `DOCLING_RS_MAX_XML_DEPTH` (512; XML
   element nesting any input/part may reach — roxmltree recurses per level),

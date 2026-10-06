@@ -1,9 +1,12 @@
 //! OCR for scanned pages, via the PP-OCRv3 recognition model (CRNN/SVTR) run
-//! with `ort`. The layout model already locates text regions on the page image
-//! (it works without a text layer), so OCR only needs *recognition*: each text
-//! region is cropped, split into lines by horizontal projection, and each line
-//! is recognised and decoded with CTC — producing [`TextCell`]s the normal
-//! layout assembly then consumes. This avoids a separate text-detection model.
+//! with `ort`. The layout model locates the text regions on the page image
+//! (it works without a text layer); inside them the recognizer reads the
+//! lines the PP-OCR text detector found (`ocr_det`, #429/#570 — RapidOCR's
+//! own crops, each one text run with the detector's margin), falling back to
+//! a horizontal-projection split of the region crop where the detector saw
+//! nothing or is not installed; each line is recognised and decoded with CTC
+//! — producing [`TextCell`]s the normal layout assembly then consumes. A line
+//! under RapidOCR's `text_score` confidence is dropped (`ocr_prep::text_score`).
 
 use image::RgbImage;
 use ort::session::Session;
@@ -13,8 +16,8 @@ use crate::layout::Region;
 // The ONNX-free half (line prep, batching, CTC decode) lives in `ocr_prep`
 // so the wasm build shares it verbatim (#79 phase 2).
 use crate::ocr_prep::{
-    batch_input, decode_row_scored, dict_chars, prep_region_lines, prep_table_words, width_batches,
-    PrepLine, REC_HEIGHT,
+    batch_input, decode_row_scored, dict_chars, prep_region_lines, prep_region_lines_det,
+    prep_table_words, prep_table_words_det, width_batches, PrepLine, REC_HEIGHT,
 };
 use crate::pdfium_backend::TextCell;
 
@@ -22,19 +25,26 @@ pub struct OcrModel {
     /// Single-threaded recognition sessions, one per parallel lane (see
     /// [`Self::load_with`]); lines are dealt across them by batch index.
     recs: Vec<Session>,
-    /// CTC classes: index 0 = blank, 1..=6623 = dictionary, 6624 = space.
+    /// CTC classes: index 0 = blank, then the dictionary, then space.
     chars: Vec<String>,
 }
 
-/// OCR recognition language: which PP-OCRv3 model + dictionary pair runs.
+/// OCR recognition language: which PP-OCRv3 model + dictionary pair runs
+/// when the PP-OCRv6 recognizer is not installed.
 ///
-/// The default is **English** (`.models/ocr_rec_en.onnx` + `.models/en_dict.txt`):
-/// the multilingual `ch_` model reads Latin scripts with badly degraded word
-/// spacing (glued words on ordinary English scans), which is the common
-/// real-world case. `Ch` selects the `ch_` pair (`.models/ocr_rec.onnx` +
-/// `.models/ppocr_keys_v1.txt`) — that is what upstream docling conformance is
-/// measured with, and `scripts/conformance/pdf_*.sh` pin it explicitly (by
-/// path, which wins over this selector).
+/// With `.models/ocr_rec_v6.onnx` + `.models/ocr_rec_v6_dict.txt` on disk
+/// (#570; `download_dependencies.sh` fetches them) both languages run that
+/// one multilingual model — RapidOCR's `PP-OCRv6_rec_small`, the recognizer
+/// docling runs for English and Chinese alike, and the single largest factor
+/// in the FUNSD word-recall gap once the detector's lines are the crops
+/// (0.70 → 0.77 on 30 forms). Without it, the PP-OCRv3 pairs: the default is
+/// **English** (`.models/ocr_rec_en.onnx` + `.models/en_dict.txt`) — the
+/// multilingual `ch_` v3 model reads Latin scripts with badly degraded word
+/// spacing (glued words on ordinary English scans) — and `Ch` selects the
+/// `ch_` pair (`.models/ocr_rec.onnx` + `.models/ppocr_keys_v1.txt`), what
+/// the PDF conformance baselines were pinned against;
+/// `scripts/conformance/pdf_*.sh` pin it explicitly by path, which wins over
+/// this selector and over the v6 preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OcrLang {
     /// en_PP-OCRv3 — English-only, proper Latin word spacing.
@@ -246,6 +256,26 @@ pub fn scale_from_env() -> Option<f32> {
     }
 }
 
+/// Whether the text detector's boxes are the recognizer's line source inside
+/// layout regions (#570; `DOCLING_RS_OCR_LINES`: `det` default, `projection`
+/// = the ink-projection strips alone, the pre-#570 behavior). Cached.
+pub fn det_lines() -> bool {
+    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let raw = docling_core::env::nonempty("DOCLING_RS_OCR_LINES").unwrap_or_default();
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "det" | "detector" | "auto" => true,
+            "projection" | "proj" | "off" => false,
+            _ => {
+                eprintln!(
+                    "docling-pdf: DOCLING_RS_OCR_LINES={raw:?} is not det|projection; using det"
+                );
+                true
+            }
+        }
+    })
+}
+
 /// Resolve the recognition model + dictionary pair for `lang`. An English
 /// default that isn't on disk (older model checkouts) degrades to the `ch_`
 /// pair with a warning rather than failing — the usual missing-optional-asset
@@ -254,10 +284,19 @@ pub fn scale_from_env() -> Option<f32> {
 pub(crate) fn resolve_rec_pair(lang: OcrLang) -> (String, String) {
     const CH: (&str, &str) = (".models/ocr_rec.onnx", ".models/ppocr_keys_v1.txt");
     const EN: (&str, &str) = (".models/ocr_rec_en.onnx", ".models/en_dict.txt");
+    const V6: (&str, &str) = (".models/ocr_rec_v6.onnx", ".models/ocr_rec_v6_dict.txt");
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    // The multilingual PP-OCRv6 recognizer, when installed, serves both
+    // languages (see `OcrLang`); explicit paths below still win.
+    let (v6_rec, v6_dict) = (crate::resolve_asset(V6.0), crate::resolve_asset(V6.1));
+    let (mut rec, mut dict) = if exists(&v6_rec) && exists(&v6_dict) {
+        (v6_rec, v6_dict)
+    } else {
+        let pick = if lang == OcrLang::Ch { CH } else { EN };
+        (crate::resolve_asset(pick.0), crate::resolve_asset(pick.1))
+    };
     let want_ch = lang == OcrLang::Ch;
-    let pick = if want_ch { CH } else { EN };
-    let (mut rec, mut dict) = (crate::resolve_asset(pick.0), crate::resolve_asset(pick.1));
-    if !want_ch && (!std::path::Path::new(&rec).exists() || !std::path::Path::new(&dict).exists()) {
+    if !want_ch && (!exists(&rec) || !exists(&dict)) {
         let (ch_rec, ch_dict) = (crate::resolve_asset(CH.0), crate::resolve_asset(CH.1));
         if std::path::Path::new(&ch_rec).exists() && std::path::Path::new(&ch_dict).exists() {
             eprintln!(
@@ -407,18 +446,24 @@ impl OcrModel {
     /// OCR a page: produce text cells (page points) for every line found inside
     /// the text regions, each paired with its recognition confidence (mean
     /// emitted-character probability — feeds the page `ocr_score`, #183).
-    /// `scale` is image-px per page-point.
-    pub fn ocr_page(
+    /// `scale` is image-px per page-point. `detected` — the text detector's
+    /// boxes, in image pixels of `img` — makes them the line source inside
+    /// the regions (#570, see [`prep_region_lines_det`]); `None` keeps the
+    /// projection segmentation.
+    pub fn ocr_page_with(
         &mut self,
         img: &RgbImage,
         regions: &[Region],
         scale: f32,
+        detected: Option<&[crate::ocr_det::DetBox]>,
     ) -> Result<Vec<(TextCell, f32)>, String> {
         // Gather every line crop on the page first (shared with the browser
         // path), so equal-width lines can share a recognition run regardless
         // of which region they came from.
-        let (bboxes, lines) =
-            crate::timing::timed("ocr.prep", || prep_region_lines(img, regions, scale));
+        let (bboxes, lines) = crate::timing::timed("ocr.prep", || match detected {
+            Some(det) => prep_region_lines_det(img, regions, scale, det),
+            None => prep_region_lines(img, regions, scale),
+        });
 
         // Deterministic width-batching (shared with the wasm path), dealt
         // across the recognition lanes.
@@ -431,15 +476,7 @@ impl OcrModel {
         })?;
 
         // Emit cells in page order, exactly as the sequential walk did.
-        let mut cells = Vec::new();
-        for ((l, t, r, b), (text, conf)) in bboxes.into_iter().zip(texts) {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            cells.push((TextCell { text, l, t, r, b }, conf));
-        }
-        Ok(cells)
+        Ok(collect_cells(bboxes, texts))
     }
 
     /// Recognize the *word* crops inside the page's table regions (mirroring
@@ -452,22 +489,36 @@ impl OcrModel {
         img: &RgbImage,
         regions: &[Region],
         scale: f32,
+        detected: Option<&[crate::ocr_det::DetBox]>,
     ) -> Result<Vec<(TextCell, f32)>, String> {
-        let (bboxes, lines) = prep_table_words(img, regions, scale);
+        let (bboxes, lines) = match detected {
+            Some(det) => prep_table_words_det(img, regions, scale, det),
+            None => prep_table_words(img, regions, scale),
+        };
         let mut texts = vec![(String::new(), 0.0f32); lines.len()];
         for (i, text) in self.recognize_all(&lines)? {
             texts[i] = text;
         }
-        let mut cells = Vec::new();
-        for ((l, t, r, b), (text, conf)) in bboxes.into_iter().zip(texts) {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            cells.push((TextCell { text, l, t, r, b }, conf));
-        }
-        Ok(cells)
+        Ok(collect_cells(bboxes, texts))
     }
+}
+
+/// Pair recognized texts with their line boxes into page-point cells, in page
+/// order, dropping empty lines and those under [`text_score`].
+fn collect_cells(
+    bboxes: Vec<crate::ocr_prep::LineBox>,
+    texts: Vec<Recognized>,
+) -> Vec<(TextCell, f32)> {
+    let min_conf = crate::ocr_prep::text_score();
+    let mut cells = Vec::new();
+    for ((l, t, r, b), (text, conf)) in bboxes.into_iter().zip(texts) {
+        let text = text.trim().to_string();
+        if text.is_empty() || conf < min_conf {
+            continue;
+        }
+        cells.push((TextCell { text, l, t, r, b }, conf));
+    }
+    cells
 }
 
 /// Recognise a batch of prepared *same-width* lines in one run of `rec`.

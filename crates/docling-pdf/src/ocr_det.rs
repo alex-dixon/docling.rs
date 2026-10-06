@@ -27,12 +27,15 @@
 //! box — the recognizer's line prep crops rectangles, and rotated lines are
 //! not what documents lose today.
 //!
-//! The detector is a *supplement*: region-scoped recognition stays the source
-//! for text inside layout regions (so every existing snapshot of a scanned
-//! page keeps its lines), and only detected boxes not already covered by a
-//! recognized cell are cropped and recognized. Missing model → no detection,
-//! quietly (`DOCLING_RS_DEBUG` reports it), so an install without it behaves
-//! exactly as before.
+//! Since #570 the detector is also the recognizer's *line source* inside the
+//! layout regions (`ocr_prep::prep_region_lines_det`), as it is for RapidOCR:
+//! the projection split that preceded it cut a region into full-width strips,
+//! which on forms — several fields per baseline — glued and dropped words
+//! (FUNSD word recall 0.57 → 0.68 on this change alone; `DOCLING_RS_OCR_LINES=
+//! projection` restores the strips). Detected boxes outside every region are
+//! still recognized and placed as orphan text (`uncovered_lines`). Missing
+//! model → no detection, quietly (`DOCLING_RS_DEBUG` reports it): regions
+//! fall back to the projection split, the margins go unread.
 
 use image::RgbImage;
 
@@ -68,14 +71,18 @@ pub fn det_input_size(w: u32, h: u32) -> Option<(u32, u32)> {
     det_input_size_capped(w, h, max_side_cap())
 }
 
-/// Default cap on the detector input's longer side: PaddleOCR's own
-/// `det_limit_side_len` (`limit_type: max`). RapidOCR — and so docling —
-/// runs the uncapped shorter-side rule instead; measured on the snapshot
-/// corpus the cap cuts detection to about a third of its time (a Letter page
-/// at the 2.0 px/pt render goes 1216 × 1600 → 736 × 960) and moves bitmap
-/// outputs only by noise-level amounts in both directions, so speed wins by
-/// default and `DOCLING_RS_OCR_DET_MAX_SIDE=0` restores RapidOCR's input.
-pub const DEFAULT_MAX_SIDE: u32 = 960;
+/// Default cap on the detector input's longer side: RapidOCR's
+/// `Global.max_side_len` (2000) — the longest side its whole OCR input is
+/// shrunk to before detection, and so what docling's detector sees. Until
+/// #570 this was PaddleOCR's 960 (`det_limit_side_len`, `limit_type: max`):
+/// while the detector only supplemented the region pass that cost about a
+/// third of the detection time and moved outputs by noise-level amounts;
+/// now that its boxes are the recognizer's crops the resolution is recall —
+/// 960 reads 0.834 of FUNSD's words where 2000 reads 0.856 (30 forms, same
+/// recognizer). A Letter page at the 2.0 px/pt render goes in at 1216 ×
+/// 1600; `DOCLING_RS_OCR_DET_MAX_SIDE=0` lifts the cap entirely, 960 restores
+/// the old budget.
+pub const DEFAULT_MAX_SIDE: u32 = 2000;
 
 /// `DOCLING_RS_OCR_DET_MAX_SIDE`: the cap on the detector input's longer
 /// side — [`DEFAULT_MAX_SIDE`] unless set, `0` = uncapped (RapidOCR's rule).
@@ -297,26 +304,35 @@ pub fn db_boxes(prob: &[f32], w: usize, h: usize, dest_w: u32, dest_h: u32) -> V
     boxes
 }
 
-/// `TextDetector.sorted_boxes`: by top edge, rows joined while consecutive
-/// tops are closer than [`BOX_SORT_Y_THRESHOLD`], then left to right in a row.
+/// `TextDetector.sorted_boxes`: by top edge, then a bubble pass that swaps
+/// *adjacent* boxes whose tops lie within [`BOX_SORT_Y_THRESHOLD`] when the
+/// lower one starts further left — RapidOCR's exact algorithm. The first
+/// port (#429) grouped boxes into rows transitively (consecutive tops within
+/// the threshold = one row) and sorted each row by `x`; on a two-column
+/// newspaper every line top is within 10 px of the next line's in the other
+/// column, the whole page chained into one "row", and the lines of a column
+/// came out ordered by their left edge — scrambled — once they became the
+/// recognizer's crops (#570). RapidOCR's local swaps only reorder boxes that
+/// genuinely share a baseline.
 pub fn sort_boxes(boxes: &mut [DetBox]) {
-    boxes.sort_by(|a, b| a.t.total_cmp(&b.t));
-    let mut row = 0usize;
-    let mut rows = Vec::with_capacity(boxes.len());
-    for i in 0..boxes.len() {
-        if i > 0 && boxes[i].t - boxes[i - 1].t >= BOX_SORT_Y_THRESHOLD {
-            row += 1;
+    boxes.sort_by(|a, b| a.t.total_cmp(&b.t).then(a.l.total_cmp(&b.l)));
+    for i in 0..boxes.len().saturating_sub(1) {
+        let mut j = i;
+        loop {
+            let (upper, lower) = (j, j + 1);
+            if (boxes[lower].t - boxes[upper].t).abs() < BOX_SORT_Y_THRESHOLD
+                && boxes[lower].l < boxes[upper].l
+            {
+                boxes.swap(upper, lower);
+            } else {
+                break;
+            }
+            if j == 0 {
+                break;
+            }
+            j -= 1;
         }
-        rows.push(row);
     }
-    let mut order: Vec<usize> = (0..boxes.len()).collect();
-    order.sort_by(|&a, &b| {
-        rows[a]
-            .cmp(&rows[b])
-            .then(boxes[a].l.total_cmp(&boxes[b].l))
-    });
-    let sorted: Vec<DetBox> = order.iter().map(|&i| boxes[i]).collect();
-    boxes.copy_from_slice(&sorted);
 }
 
 /// A candidate enclosing rectangle: its area, corners and shorter side.
@@ -646,8 +662,9 @@ mod tests {
         // Already ≥ 736 on the short side: unchanged bar the /32 rounding.
         assert_eq!(det_input_size_capped(1335, 2652, 0), Some((1344, 2656)));
         assert_eq!(det_input_size(0, 10), None);
-        // The default cap (960, PaddleOCR's) applies when the env knob is unset.
-        assert_eq!(det_input_size(1224, 1584), Some((736, 960)));
+        // The default cap (2000, RapidOCR's) applies when the env knob is
+        // unset — a Letter render stays at its shorter-side-rule size.
+        assert_eq!(det_input_size(1224, 1584), Some((1216, 1600)));
         // A longer-side cap scales a big page down (1224 × 1584 → 736 × 960
         // for 960) and leaves a small image's shorter-side upscale alone
         // (445 × 884 still goes to 736 × 1472 under a 1500 cap, 480 × 960
@@ -804,6 +821,31 @@ mod tests {
         assert_eq!(
             order,
             vec![(30.0, 20.0), (10.0, 105.0), (50.0, 100.0), (5.0, 200.0)]
+        );
+        // Two columns whose line tops interleave within the threshold (a
+        // newspaper): each column's lines must stay top-to-bottom, and a
+        // right-column line sorts after the left-column line it shares a
+        // baseline with — RapidOCR's result, not one page-wide "row".
+        let mut cols = vec![
+            bx(97.0, 154.0),
+            bx(96.0, 173.0),
+            bx(600.0, 160.0),
+            bx(97.0, 191.0),
+            bx(601.0, 178.0),
+            bx(600.0, 197.0),
+        ];
+        sort_boxes(&mut cols);
+        let order: Vec<(f32, f32)> = cols.iter().map(|b| (b.l, b.t)).collect();
+        assert_eq!(
+            order,
+            vec![
+                (97.0, 154.0),
+                (600.0, 160.0),
+                (96.0, 173.0),
+                (601.0, 178.0),
+                (97.0, 191.0),
+                (600.0, 197.0)
+            ]
         );
     }
 }

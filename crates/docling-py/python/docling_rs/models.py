@@ -64,6 +64,11 @@ _OPTIONAL = {
     # gives no region on bitmap pages (diagram labels, stamps). Optional —
     # without it OCR stays region-scoped; RapidOCR's hub is the fallback.
     "ocr_det.onnx": "models/ocr_det.onnx",
+    # The PP-OCRv6 recognizer + dictionary (#570): RapidOCR's multilingual
+    # model, docling's recognizer for every language; preferred over the v3
+    # pairs when present. RapidOCR's hub is the fallback.
+    "ocr_rec_v6.onnx": "models/ocr_rec_v6.onnx",
+    "ocr_rec_v6_dict.txt": "models/ocr_rec_v6_dict.txt",
     "layout_heron_int8.onnx": "models/layout_heron_int8.onnx",
     "decoder_int8.onnx": "models/tableformer/decoder_int8.onnx",
     # The #97 hoisted-KV TableFormer decoder — byte-exact vs the legacy graph
@@ -117,6 +122,12 @@ _FALLBACK_URLS = {
     ),
     "models/ocr_det.onnx": (
         "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx"
+    ),
+    "models/ocr_rec_v6.onnx": (
+        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx"
+    ),
+    "models/ocr_rec_v6_dict.txt": (
+        "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt"
     ),
     "models/chunk/tokenizer.json": (
         "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
