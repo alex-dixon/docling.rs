@@ -31,7 +31,9 @@
 //! section's header/footer stories (`PlcfHdd`, after the six separator
 //! stories) become `page_header` / `page_footer` furniture; footnote and
 //! endnote bodies (`PlcffndTxt` / `PlcfendTxt`) `footnote` furniture after
-//! the body. Comments and header text boxes are not read.
+//! the body; a header's or footer's text boxes (the `ccpHdrTxbx` story,
+//! `PlcftxbxHdrTxt` + `PlcSpaHdr`, #574) join that part's furniture ahead
+//! of its own paragraphs. Comments are not read.
 //!
 //! The FIB is read through [`Fib`], which locates `fibRgLw` and
 //! `fibRgFcLcb` from the counts the stream itself declares (`csw`, `cslw`,
@@ -210,13 +212,24 @@ impl DeclarativeBackend for DocBackend {
         }
 
         // The other stories (#535): headers/footers, then the note bodies —
-        // furniture, after the body, where the DOCX backend puts them.
+        // furniture, after the body, where the DOCX backend puts them. A
+        // header's text boxes (#574) are a story of their own after the body
+        // ones, each anchored by PlcSpaHdr at a CP of the header story.
+        let header_boxes = HeaderBoxes {
+            anchors: parse_plcf_spa(fib.part(&table, Fib::PLCSPA_HDR)),
+            stories: parse_textboxes(
+                fib.part(&table, Fib::PLCF_HDR_TXBX_TXT),
+                txbx_base + fib.ccp_txbx as u64,
+                fib.ccp_hdr_txbx as u64,
+            ),
+        };
         for (footer, text) in header_footer_texts(
             &story,
             &mut chpx_cache,
             fib.part(&table, Fib::PLCF_HDD),
             hdd_base,
             fib.ccp_hdd as u64,
+            &header_boxes,
         ) {
             doc.push(Node::FurnitureText {
                 label: if footer { "page_footer" } else { "page_header" }.into(),
@@ -382,23 +395,41 @@ fn parse_textboxes(plc: &[u8], base: u64, len: u64) -> std::collections::HashMap
     out
 }
 
+/// The text boxes of the headers and footers (#574): `anchors` (PlcSpaHdr)
+/// places each shape at a CP of the header story, `stories`
+/// (PlcftxbxHdrTxt over the `ccpHdrTxbx` story) gives its text, by shape id.
+struct HeaderBoxes {
+    anchors: Vec<(u64, u32)>,
+    stories: std::collections::HashMap<u32, (u64, u64)>,
+}
+
 /// Each section's header / footer text (#535): `PlcfHdd`'s CPs into the
 /// header story — six separator stories first, then per section even /
 /// odd (default) / first header and footer, as `(is_footer, paragraph)`
 /// in reading order (default, first, even — headers before footers), each
-/// distinct paragraph once.
+/// distinct paragraph once. The text boxes anchored in a header or footer
+/// story (#574) come first, as the DOCX backend's `textbox` group comes
+/// before the part's own paragraphs; a box no story anchors follows as
+/// header text, so it is never lost.
 fn header_footer_texts(
     story: &Story,
     cache: &mut ChpxCache,
     plc: &[u8],
     base: u64,
     len: u64,
+    boxes: &HeaderBoxes,
 ) -> Vec<(bool, String)> {
     let cps: Vec<u64> = plc
         .chunks_exact(4)
         .filter_map(|c| u32_at(c, 0).map(u64::from))
         .collect();
     let mut out: Vec<(bool, String)> = Vec::new();
+    let push = |out: &mut Vec<(bool, String)>, footer: bool, text: String| {
+        if !out.iter().any(|(f, t)| *f == footer && *t == text) {
+            out.push((footer, text));
+        }
+    };
+    let mut placed: std::collections::HashSet<u32> = Default::default();
     let mut section = 6;
     while section + 6 < cps.len() {
         // Story order within a section: even hdr, odd hdr, even ftr, odd
@@ -415,13 +446,33 @@ fn header_footer_texts(
             if a >= b {
                 continue;
             }
-            for text in story.paragraphs(cache, base + a, base + b) {
-                if !out.iter().any(|(f, t)| *f == footer && *t == text) {
-                    out.push((footer, text));
+            for &(cp, spid) in &boxes.anchors {
+                let Some(&(ta, tb)) = boxes.stories.get(&spid) else {
+                    continue;
+                };
+                if (a..b).contains(&cp) && placed.insert(spid) {
+                    for text in story.paragraphs(cache, ta, tb) {
+                        push(&mut out, footer, text);
+                    }
                 }
+            }
+            for text in story.paragraphs(cache, base + a, base + b) {
+                push(&mut out, footer, text);
             }
         }
         section += 6;
+    }
+    let mut rest: Vec<(u64, u64)> = boxes
+        .stories
+        .iter()
+        .filter(|(spid, _)| !placed.contains(spid))
+        .map(|(_, &range)| range)
+        .collect();
+    rest.sort_unstable();
+    for (ta, tb) in rest {
+        for text in story.paragraphs(cache, ta, tb) {
+            push(&mut out, false, text);
+        }
     }
     out
 }
@@ -468,6 +519,8 @@ struct Fib<'a> {
     ccp_atn: u32,
     ccp_edn: u32,
     ccp_txbx: u32,
+    /// The header text box story (`ccpHdrTxbx`, #574), after `ccp_txbx`.
+    ccp_hdr_txbx: u32,
     /// `fibRgFcLcbBlob`: `(fc, lcb)` u32 pairs.
     fc_lcb: &'a [u8],
 }
@@ -482,10 +535,12 @@ impl<'a> Fib<'a> {
     const PLCF_BTE_PAPX: usize = 13;
     const CLX: usize = 33;
     const PLCSPA_MOM: usize = 40;
+    const PLCSPA_HDR: usize = 41;
     const PLCF_END_REF: usize = 46;
     const PLCF_END_TXT: usize = 47;
     const DGG_INFO: usize = 50;
     const PLCF_TXBX_TXT: usize = 56;
+    const PLCF_HDR_TXBX_TXT: usize = 58;
     const PLF_LST: usize = 73;
     const PLF_LFO: usize = 74;
 
@@ -527,6 +582,7 @@ impl<'a> Fib<'a> {
             ccp_atn: lw(7),
             ccp_edn: lw(8),
             ccp_txbx: lw(9),
+            ccp_hdr_txbx: lw(10),
             fc_lcb,
         })
     }
@@ -2207,6 +2263,38 @@ mod tests {
         let groups = json["groups"].as_array().unwrap();
         assert_eq!(groups[0]["name"], "textbox");
         assert_eq!(json["body"]["children"][1]["$ref"], "#/groups/0");
+    }
+
+    /// #574: a text box in the page header — a story of its own after the
+    /// body text boxes (`ccpHdrTxbx`), anchored by PlcSpaHdr in the header
+    /// story — is header furniture, as the same file saved as `.docx` gives
+    /// (the reporter's repro: body paragraph, header text box
+    /// MARK_HEADER_TEXTBOX_TEXT, an otherwise empty header).
+    #[test]
+    fn header_text_boxes_are_header_furniture() {
+        let path = format!(
+            "{}/tests/data/doc/sources/doc_header_textbox.doc",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).expect("fixture exists");
+        let doc = DocBackend
+            .convert(&SourceDocument::from_bytes(
+                "h.doc",
+                InputFormat::Doc,
+                bytes,
+            ))
+            .expect("converts");
+        let md = doc.export_to_markdown();
+        assert_eq!(md.trim(), "Body paragraph before header test.");
+        let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let furniture: Vec<(&str, &str)> = json["texts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["content_layer"] == "furniture")
+            .map(|t| (t["label"].as_str().unwrap(), t["text"].as_str().unwrap()))
+            .collect();
+        assert_eq!(furniture, [("page_header", "MARK_HEADER_TEXTBOX_TEXT")]);
     }
 
     #[test]
