@@ -435,17 +435,6 @@ impl ItemTree {
         self.items[id].deleted = true;
     }
 
-    /// Mark `id` and its whole subtree deleted — `delete_items` drops an
-    /// item "and any children it has".
-    fn delete_subtree(&mut self, id: usize) {
-        self.delete(id);
-        let mut stack = self.items[id].children.clone();
-        while let Some(c) = stack.pop() {
-            self.items[c].deleted = true;
-            stack.extend(self.items[c].children.iter().copied());
-        }
-    }
-
     /// docling-core's `DoclingDocument.validate_misplaced_list_items` (a
     /// model validator, so it runs whenever docling-core serializes or loads
     /// a document): every `list_item` whose parent is not a `list` group is
@@ -453,10 +442,19 @@ impl ItemTree {
     /// included) collects them; consecutive misplaced items directly on the
     /// body share one group, any other misplaced item gets its own. Working
     /// from the last run back, each run gets a `ListGroup` (name `group`)
-    /// inserted where its first item stood, the items are deleted — with any
-    /// children — and re-added under the group as fresh items, so they move
-    /// to the end of the text numbering (#527: the DOCX backend leaves such
-    /// items in rich table cells). A no-op for a well-formed tree.
+    /// inserted where its first item stood, the items are deleted and
+    /// re-added under the group as fresh items, so they move to the end of
+    /// the text numbering (#527: the DOCX backend leaves such items in rich
+    /// table cells). A no-op for a well-formed tree.
+    ///
+    /// One deliberate divergence (#586): docling-core deletes each item *with
+    /// its children* and re-adds it from its text alone, so a mixed-format
+    /// item — an empty `list_item` over an `inline` group of text runs —
+    /// comes back empty and its text is gone from the JSON (and from the
+    /// Markdown/HTML docling serializes after that validator ran; the JSON
+    /// docling saves *before* exporting still has it). Here the children
+    /// follow the item into the group: the structure docling-core requires,
+    /// the content the document had.
     pub fn wrap_misplaced_list_items(&mut self) {
         let is_list_item = |t: &Self, id: usize| matches!(&t.items[id].kind, TreeKind::Text { label, .. } if label == "list_item");
         let in_list_group = |t: &Self, id: usize| {
@@ -504,14 +502,17 @@ impl ItemTree {
                 .unwrap_or(siblings.len());
             siblings.insert(at, group);
             for &li in &run {
-                self.delete_subtree(li);
+                // Not `delete_subtree`: the children move to the copy (#586).
+                self.delete(li);
             }
             // `add_list_item` keeps the text, marker, formatting, hyperlink
-            // and first provenance — not children, comments or a source.
+            // and first provenance — not comments or a source. The children
+            // (the inline group of a mixed-format item) are carried over.
             for &li in &run {
+                let children = std::mem::take(&mut self.items[li].children);
                 let copy = TreeItem {
                     parent: Some(group),
-                    children: Vec::new(),
+                    children: children.clone(),
                     comments: Vec::new(),
                     source: None,
                     deleted: false,
@@ -519,6 +520,9 @@ impl ItemTree {
                 };
                 let id = self.items.len();
                 self.items.push(copy);
+                for c in children {
+                    self.items[c].parent = Some(id);
+                }
                 self.items[group].children.push(id);
             }
         }
@@ -763,5 +767,74 @@ mod tests {
             matches!(&t.items[1].kind, TreeKind::Table { rich_cells, .. } if rich_cells == &[(0, 0, 2)])
         );
         let _ = (a, z);
+    }
+
+    /// #586: a misplaced `list_item` keeps its children when it is re-homed.
+    /// docling-core's `validate_misplaced_list_items` re-adds the item from
+    /// its text alone, so a mixed-format item (empty `list_item` over an
+    /// `inline` group of runs) lost every run — a DOCX table cell whose list
+    /// paragraph followed a `numId 0` spacer came out as an empty bullet in
+    /// the JSON and the HTML. The group goes where the item stood, the copy
+    /// is numbered last, the inline group and its texts move under it.
+    #[test]
+    fn wrapping_a_misplaced_list_item_keeps_its_runs() {
+        let mut t = ItemTree::default();
+        let cell = t.add(
+            None,
+            None,
+            TreeKind::Group {
+                label: "unspecified".into(),
+                name: "rich_cell_group_1_0_1".into(),
+            },
+        );
+        let before = t.add(Some(cell), None, text("before"));
+        let item = t.add(
+            Some(cell),
+            None,
+            TreeKind::Text {
+                label: "list_item".into(),
+                text: String::new(),
+                orig: None,
+                formatting: None,
+                hyperlink: None,
+                level: None,
+                list: Some(ListMeta {
+                    enumerated: false,
+                    marker: String::new(),
+                }),
+            },
+        );
+        let inline = t.add(
+            Some(item),
+            None,
+            TreeKind::Group {
+                label: "inline".into(),
+                name: "group".into(),
+            },
+        );
+        let run_a = t.add(Some(inline), None, text("Second item text"));
+        let run_b = t.add(Some(inline), None, text("[Optional]"));
+        let after = t.add(Some(cell), None, text("after"));
+
+        t.wrap_misplaced_list_items();
+
+        let group = t.items[cell].children[1];
+        assert_eq!(t.items[cell].children, vec![before, group, after]);
+        assert!(
+            matches!(&t.items[group].kind, TreeKind::Group { label, name } if label == "list" && name == "group")
+        );
+        assert!(t.items[item].deleted, "the original item is deleted");
+        let copy = t.items[group].children[0];
+        assert_ne!(copy, item);
+        assert!(
+            copy > after,
+            "the copy is numbered after every existing item"
+        );
+        assert_eq!(t.items[copy].children, vec![inline]);
+        assert_eq!(t.items[inline].parent, Some(copy));
+        assert_eq!(t.items[inline].children, vec![run_a, run_b]);
+        for id in [inline, run_a, run_b] {
+            assert!(!t.items[id].deleted, "item {id} must survive the re-homing");
+        }
     }
 }

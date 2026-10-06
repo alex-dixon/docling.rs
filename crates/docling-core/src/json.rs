@@ -282,7 +282,8 @@ fn build_json(doc: &DoclingDocument, note_keys: bool) -> Value {
                 }
             }
             // docling-core's `validate_misplaced_list_items` runs on every
-            // document it serializes; apply it the same way.
+            // document it serializes; apply it the same way (keeping the
+            // items' children, which docling-core drops — #586).
             let mut tree = tree.clone();
             tree.wrap_misplaced_list_items();
             b.write_tree(&tree)
