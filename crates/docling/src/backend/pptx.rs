@@ -237,6 +237,14 @@ fn convert_slide(
     }
 
     let xml = pkg.read(part)?;
+    // `mc:AlternateContent` settled before parsing, as the DOCX backends do
+    // (`mc.rs`): PowerPoint stores a text box holding an equation as an
+    // `a14` Choice with a picture Fallback (#575), and the Choice is read.
+    // python-pptx iterates only the known shape elements, so docling drops
+    // every such block — equations, and any other shape behind a Choice,
+    // whose Fallback is kept here; a deliberate divergence (the content is
+    // what PowerPoint and anydoc show).
+    let xml = super::mc::resolve_alternate_content(&xml);
     let slide = Document::parse(&xml).ok()?;
     let page_no = slide_ix + 1;
     let ctx = SlideCtx {
@@ -982,6 +990,23 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
                     layer: None,
                 });
             }
+            None if kind != Placeholder::Title && paragraph_math(para).is_some() => {
+                open_lists.clear();
+                for latex in paragraph_math(para).unwrap_or_default() {
+                    let prov = shape_prov(sp, ctx, latex.chars().count());
+                    out.tree.add_with_prov(
+                        Some(out.slide),
+                        None,
+                        text_kind("formula", &latex),
+                        prov,
+                    );
+                    out.doc.push(Node::Formula {
+                        orig: latex.clone(),
+                        latex,
+                        location: Some(location),
+                    });
+                }
+            }
             None => {
                 open_lists.clear();
                 // docling labels a title placeholder's text `title` and any
@@ -1104,21 +1129,81 @@ fn list_kind(para: XmlNode, tx_body: Option<XmlNode>, placeholder: Placeholder) 
     }
 }
 
-/// Concatenate a paragraph's run text; line breaks (`<a:br>`) become spaces.
+/// Concatenate a paragraph's run text; line breaks (`<a:br>`) become spaces
+/// and each equation (`<a14:m>`, see [`paragraph_math`]) an inline `$…$`,
+/// set off from the surrounding words by a space.
 fn paragraph_text(para: XmlNode) -> String {
     let mut out = String::new();
+    // Just after an equation: the next text gets a separating space unless
+    // it brings its own.
+    let mut after_math = false;
     for child in para.children().filter(XmlNode::is_element) {
         match child.tag_name().name() {
             "r" | "fld" => {
                 if let Some(t) = child.children().find(|n| n.has_tag_name("t")) {
-                    out.push_str(t.text().unwrap_or(""));
+                    let t = t.text().unwrap_or("");
+                    if after_math && !t.is_empty() && !t.starts_with(char::is_whitespace) {
+                        out.push(' ');
+                    }
+                    after_math &= t.is_empty();
+                    out.push_str(t);
                 }
             }
-            "br" => out.push(' '),
+            "br" => {
+                out.push(' ');
+                after_math = false;
+            }
+            "m" => {
+                for eq in math_latex(child) {
+                    if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+                        out.push(' ');
+                    }
+                    out.push('$');
+                    out.push_str(&eq);
+                    out.push('$');
+                    after_math = true;
+                }
+            }
             _ => {}
         }
     }
     out
+}
+
+/// The LaTeX of each `<m:oMath>` inside an `<a14:m>` paragraph child — the
+/// same OMML → LaTeX converter the DOCX backend uses (#575). python-pptx has
+/// no notion of `a14:m`, so docling drops PowerPoint equations entirely;
+/// emitting them is a deliberate divergence (the text is otherwise lost).
+fn math_latex(m: XmlNode) -> Vec<String> {
+    m.descendants()
+        .filter(|n| n.has_tag_name("oMath"))
+        .map(crate::backend::omml::to_latex)
+        .filter(|eq| !eq.is_empty())
+        .collect()
+}
+
+/// A paragraph made of equations alone (no run text): their LaTeX, which the
+/// caller emits as standalone `$$…$$` formulas the way the DOCX backend
+/// treats an OMML-only paragraph. `None` for any paragraph with words.
+fn paragraph_math(para: XmlNode) -> Option<Vec<String>> {
+    let mut eqs = Vec::new();
+    for child in para.children().filter(XmlNode::is_element) {
+        match child.tag_name().name() {
+            "r" | "fld" => {
+                let blank = child
+                    .children()
+                    .find(|n| n.has_tag_name("t"))
+                    .and_then(|t| t.text())
+                    .is_none_or(|t| t.trim().is_empty());
+                if !blank {
+                    return None;
+                }
+            }
+            "m" => eqs.extend(math_latex(child)),
+            _ => {}
+        }
+    }
+    (!eqs.is_empty()).then_some(eqs)
 }
 
 fn parse_table(tbl: XmlNode) -> Option<Table> {
@@ -1409,5 +1494,49 @@ mod json_tree_tests {
         );
         assert_eq!(pptx_dpi(&png(&[(b"IEND", vec![])])), 72, "no pHYs");
         assert_eq!(pptx_dpi(b"GIF89a"), 72);
+    }
+}
+
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+
+    /// #575: `<a14:m>` equations — inline `$…$` among words, a formula of
+    /// their own when the paragraph holds nothing else.
+    #[test]
+    fn paragraph_equations_are_latex() {
+        let xml = r#"<p:txBody xmlns:p="p" xmlns:a="a" xmlns:a14="a14" xmlns:m="m">
+            <a:p><a:r><a:t>Area</a:t></a:r><a14:m><m:oMath><m:r><m:t>A=</m:t></m:r>
+              <m:sSup><m:e><m:r><m:t>r</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup>
+            </m:oMath></a14:m><a:r><a:t> here</a:t></a:r></a:p>
+            <a:p><a14:m><m:oMathPara><m:oMath><m:r><m:t>E=mc^2</m:t></m:r></m:oMath></m:oMathPara></a14:m></a:p>
+        </p:txBody>"#;
+        let dom = roxmltree::Document::parse(xml).unwrap();
+        let paras: Vec<XmlNode> = dom
+            .descendants()
+            .filter(|n| n.has_tag_name("p") && n.tag_name().namespace() == Some("a"))
+            .collect();
+        assert_eq!(paragraph_text(paras[0]), "Area $A=r^{2}$ here");
+        assert_eq!(paragraph_math(paras[0]), None);
+        assert_eq!(paragraph_text(paras[1]), "$E=mc^2$");
+        assert_eq!(paragraph_math(paras[1]), Some(vec!["E=mc^2".to_string()]));
+    }
+
+    /// PowerPoint wraps a text box holding an equation in
+    /// `mc:AlternateContent`: after `mc.rs` settles it, the `a14` Choice's
+    /// shape is on the tree and the picture Fallback is not.
+    #[test]
+    fn equation_shapes_come_from_the_a14_choice() {
+        let xml = r#"<p:spTree xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main">
+            <mc:AlternateContent><mc:Choice Requires="a14"><p:sp><p:nvSpPr><p:cNvPr id="2" name="eq"/></p:nvSpPr></p:sp></mc:Choice>
+              <mc:Fallback><p:sp><p:nvSpPr><p:cNvPr id="2" name="eq picture"/></p:nvSpPr></p:sp></mc:Fallback></mc:AlternateContent>
+        </p:spTree>"#;
+        let xml = crate::backend::mc::resolve_alternate_content(xml);
+        let dom = roxmltree::Document::parse(&xml).unwrap();
+        let names: Vec<&str> = shapes_by_position(dom.root_element(), &PhMap::default())
+            .into_iter()
+            .filter_map(|sp| descendant(sp, "cNvPr").and_then(|c| c.attribute("name")))
+            .collect();
+        assert_eq!(names, vec!["eq"]);
     }
 }
