@@ -48,6 +48,9 @@ impl DeclarativeBackend for DocxBackend {
         let sm = parse_styles(&styles);
         let num_levels = parse_numbering(&numbering);
 
+        // Settle every `mc:AlternateContent` on the chosen branch first
+        // (#572), so the walks below see one document without alternatives.
+        let document = super::mc::resolve_alternate_content(&document);
         let dom =
             Document::parse(&document).map_err(|e| ConversionError::with_source("docx", e))?;
         let ctx = Ctx {
@@ -254,6 +257,7 @@ pub(super) fn footnote_texts(pkg: &mut Package) -> Vec<DocxNote> {
         let Some(xml) = pkg.read(&part) else {
             continue;
         };
+        let xml = super::mc::resolve_alternate_content(&xml);
         let Ok(dom) = Document::parse(&xml) else {
             eprintln!("docling: failed to parse {tag}s part");
             continue;
@@ -291,6 +295,7 @@ fn emit_header_footer_part(pkg: &mut Package, part: &str, ctx: &Ctx, doc: &mut D
     let Some(xml) = pkg.read(part) else {
         return;
     };
+    let xml = super::mc::resolve_alternate_content(&xml);
     let Ok(dom) = Document::parse(&xml) else {
         return;
     };
@@ -353,6 +358,7 @@ pub(super) fn parse_comments(pkg: &mut Package) -> Vec<(String, String)> {
     let Some(xml) = pkg.read("word/comments.xml") else {
         return Vec::new();
     };
+    let xml = super::mc::resolve_alternate_content(&xml);
     let Ok(dom) = Document::parse(&xml) else {
         return Vec::new();
     };
@@ -592,15 +598,13 @@ fn handle_paragraph_inner(
     // Textbox content is emitted first, before the paragraph's own content — and
     // for *every* paragraph (a textbox can be anchored to a heading or list item,
     // not just a plain one). Each `<w:txbxContent>` yields its paragraphs' text
-    // then any nested images, in document order. A whole textbox is skipped when
-    // its combined text was already seen, dropping the `<mc:AlternateContent>`
-    // duplicate (modern DrawingML + VML fallback carry the same textbox).
+    // then any nested images, in document order. Every paragraph of every box
+    // is emitted: the `mc:AlternateContent` alternatives were settled before
+    // parsing (`mc.rs`, #572), so a box arrives once — docling's text-keyed
+    // dedup in `_handle_textbox_content`, which existed for that duplicate,
+    // also dropped a paragraph legitimately repeated in a box, and is not
+    // reproduced.
     if !skip_textbox {
-        // Dedup textbox *paragraphs* (not whole textboxes): a non-empty one by
-        // its text, an image-only one by its position — exactly docling's
-        // `_handle_textbox_content`, which drops the `<mc:AlternateContent>`
-        // duplicate as well as repeated identical labels in the same drawing.
-        let mut seen: Vec<(String, usize)> = Vec::new();
         for tc in p.descendants().filter(|n| n.has_tag_name("txbxContent")) {
             // Every paragraph of the box — docling's `.//w:p` — so a table
             // inside a text box reads as its cells' paragraphs (#532); one in
@@ -609,17 +613,8 @@ fn handle_paragraph_inner(
                 n.has_tag_name("p")
                     && n.ancestors().find(|a| a.has_tag_name("txbxContent")) == Some(tc)
             });
-            for (idx, tp) in paragraphs.enumerate() {
+            for tp in paragraphs {
                 let trimmed = paragraph_markdown(tp, ctx).trim().to_string();
-                let key = if trimmed.is_empty() {
-                    (String::new(), idx)
-                } else {
-                    (trimmed.clone(), usize::MAX)
-                };
-                if seen.contains(&key) {
-                    continue;
-                }
-                seen.push(key);
                 // Process the paragraph fully (list items, formatting); `skip_textbox`
                 // stops it re-extracting nested textboxes, which this loop covers.
                 if !trimmed.is_empty() {

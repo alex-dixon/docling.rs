@@ -53,6 +53,7 @@ mod latex;
 mod latex_walker;
 mod lotus;
 mod markdown;
+mod mc;
 mod md_tree;
 mod metafile;
 mod mhtml;
