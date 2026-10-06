@@ -254,6 +254,64 @@ pub fn prep_region_lines(
     (bboxes, lines)
 }
 
+/// [`prep_region_lines`] with the text detector's boxes as the line source
+/// (#570): inside each text region, the detected lines whose center falls in
+/// the region are the crops (clipped to the region, in the detector's reading
+/// order); a region the detector found nothing in falls back to the
+/// projection segmentation. `detected` is in image pixels (the detector ran
+/// on `img`).
+///
+/// Why: the projection profile cuts a region into full-width strips, so on a
+/// form — several fields on one baseline, separated by gaps the strip spans —
+/// one crop carries `FROM: J.Smith   DATE: 3/4/92   REF: 1138` and the
+/// recognizer glues or drops words (`OLDCOLDMENTHOLUIGHTS&ULTRA`). RapidOCR,
+/// docling's engine, recognizes the detector's own boxes, each a single text
+/// run with the detector's margin around it. On FUNSD this is the difference
+/// between 0.61 and 0.85 word recall (see the issue's measurements).
+pub fn prep_region_lines_det(
+    img: &RgbImage,
+    regions: &[crate::layout::Region],
+    scale: f32,
+    detected: &[crate::ocr_det::DetBox],
+) -> (Vec<LineBox>, Vec<PrepLine>) {
+    let (iw, ih) = img.dimensions();
+    let mut bboxes = Vec::new();
+    let mut lines = Vec::new();
+    for region in regions {
+        if !is_text_label(region.label) {
+            continue;
+        }
+        let l = (region.l * scale).max(0.0) as u32;
+        let t = (region.t * scale).max(0.0) as u32;
+        let r = ((region.r * scale).max(0.0) as u32).min(iw);
+        let b = ((region.b * scale).max(0.0) as u32).min(ih);
+        if r <= l || b <= t {
+            continue;
+        }
+        let inside = det_boxes_inside(detected, l, t, r, b);
+        if inside.is_empty() {
+            let (bb, pl) = prep_region_lines(img, std::slice::from_ref(region), scale);
+            bboxes.extend(bb);
+            lines.extend(pl);
+            continue;
+        }
+        for (dl, dt, dr, db) in inside {
+            let line = imageops::crop_imm(img, dl, dt, dr - dl, db - dt).to_image();
+            let Some(pl) = prep_line(&line) else {
+                continue;
+            };
+            bboxes.push((
+                dl as f32 / scale,
+                dt as f32 / scale,
+                dr as f32 / scale,
+                db as f32 / scale,
+            ));
+            lines.push(pl);
+        }
+    }
+    (bboxes, lines)
+}
+
 /// Split a text line into word tokens by a vertical ink-projection profile:
 /// runs of ink columns separated by whitespace wider than ~0.6× the line
 /// height (an inter-word/-column gap, not an inter-character one). Returns tight
@@ -348,6 +406,80 @@ pub fn prep_table_words(
     (bboxes, lines)
 }
 
+/// [`prep_table_words`] with the text detector's boxes as the word source
+/// (#570): inside each table region the detected boxes whose center falls in
+/// it are the crops (clipped to the region) — RapidOCR's cells, which is what
+/// docling's TableFormer matcher receives on a scanned table; a table the
+/// detector found nothing in falls back to the projection line/word split.
+pub fn prep_table_words_det(
+    img: &RgbImage,
+    regions: &[crate::layout::Region],
+    scale: f32,
+    detected: &[crate::ocr_det::DetBox],
+) -> (Vec<LineBox>, Vec<PrepLine>) {
+    let (iw, ih) = img.dimensions();
+    let mut bboxes = Vec::new();
+    let mut lines = Vec::new();
+    for region in regions {
+        if !crate::assemble::is_table_like(region.label) {
+            continue;
+        }
+        let l = (region.l * scale).max(0.0) as u32;
+        let t = (region.t * scale).max(0.0) as u32;
+        let r = ((region.r * scale).max(0.0) as u32).min(iw);
+        let b = ((region.b * scale).max(0.0) as u32).min(ih);
+        if r <= l || b <= t {
+            continue;
+        }
+        let inside = det_boxes_inside(detected, l, t, r, b);
+        if inside.is_empty() {
+            let (bb, pl) = prep_table_words(img, std::slice::from_ref(region), scale);
+            bboxes.extend(bb);
+            lines.extend(pl);
+            continue;
+        }
+        for (dl, dt, dr, db) in inside {
+            let word = imageops::crop_imm(img, dl, dt, dr - dl, db - dt).to_image();
+            let Some(pl) = prep_line(&word) else {
+                continue;
+            };
+            bboxes.push((
+                dl as f32 / scale,
+                dt as f32 / scale,
+                dr as f32 / scale,
+                db as f32 / scale,
+            ));
+            lines.push(pl);
+        }
+    }
+    (bboxes, lines)
+}
+
+/// The detected boxes whose center lies in the `l..r × t..b` image-pixel
+/// rectangle, clipped to it, in the detector's reading order.
+fn det_boxes_inside(
+    detected: &[crate::ocr_det::DetBox],
+    l: u32,
+    t: u32,
+    r: u32,
+    b: u32,
+) -> Vec<(u32, u32, u32, u32)> {
+    detected
+        .iter()
+        .filter(|d| {
+            let (cx, cy) = ((d.l + d.r) / 2.0, (d.t + d.b) / 2.0);
+            cx >= l as f32 && cx < r as f32 && cy >= t as f32 && cy < b as f32
+        })
+        .filter_map(|d| {
+            let dl = (d.l.max(0.0) as u32).max(l);
+            let dt = (d.t.max(0.0) as u32).max(t);
+            let dr = (d.r.max(0.0) as u32).min(r);
+            let db = (d.b.max(0.0) as u32).min(b);
+            (dr > dl && db > dt).then_some((dl, dt, dr, db))
+        })
+        .collect()
+}
+
 /// Normalize an image to the scan polarity every stage assumes — dark ink
 /// on light paper (the segmentation threshold and the recognition model's
 /// training data both bake it in): a predominantly dark page (mean luma
@@ -379,6 +511,21 @@ pub fn prep_page_lines(img: &RgbImage) -> Vec<PrepLine> {
             prep_line(&line)
         })
         .collect()
+}
+
+/// RapidOCR's `text_score` (docling's `RapidOcrOptions.text_score`, 0.5): a
+/// recognized line whose mean emitted-character confidence falls below it is
+/// dropped — a shaded bar, a halftone, a rule read as a run of letters
+/// (`TUANEURHENSTGOFUPHYCLTOSHSWOYT` for a form's grey `GEOGRAPHY` band)
+/// would otherwise land in the document as a heading. `DOCLING_RS_OCR_TEXT_SCORE`
+/// overrides it (`0` keeps every line, the pre-#570 behavior). Cached.
+pub fn text_score() -> f32 {
+    static SCORE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SCORE.get_or_init(|| {
+        docling_core::env::parse::<f32>("DOCLING_RS_OCR_TEXT_SCORE")
+            .filter(|s| s.is_finite() && (0.0..=1.0).contains(s))
+            .unwrap_or(0.5)
+    })
 }
 
 /// Deterministic recognition batching: page-order line indices grouped by

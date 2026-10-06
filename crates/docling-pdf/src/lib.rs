@@ -794,15 +794,27 @@ pub(crate) enum Recognizer {
 
 #[cfg(feature = "ml")]
 impl Recognizer {
-    /// See [`ocr::OcrModel::ocr_page`].
+    /// See [`ocr::OcrModel::ocr_page_with`].
     fn ocr_page(
         &mut self,
         img: &image::RgbImage,
         regions: &[layout::Region],
         scale: f32,
     ) -> Result<Vec<(TextCell, f32)>, String> {
+        self.ocr_page_with(img, regions, scale, None)
+    }
+
+    /// [`Self::ocr_page`] with the detector's boxes (#570). Tesseract segments its
+    /// own lines and ignores the detector's boxes.
+    fn ocr_page_with(
+        &mut self,
+        img: &image::RgbImage,
+        regions: &[layout::Region],
+        scale: f32,
+        detected: Option<&[ocr_det::DetBox]>,
+    ) -> Result<Vec<(TextCell, f32)>, String> {
         match self {
-            Self::PpOcr(m) => m.ocr_page(img, regions, scale),
+            Self::PpOcr(m) => m.ocr_page_with(img, regions, scale, detected),
             Self::Tesseract(t) => t.ocr_page(img, regions, scale),
         }
     }
@@ -813,9 +825,10 @@ impl Recognizer {
         img: &image::RgbImage,
         regions: &[layout::Region],
         scale: f32,
+        detected: Option<&[ocr_det::DetBox]>,
     ) -> Result<Vec<(TextCell, f32)>, String> {
         match self {
-            Self::PpOcr(m) => m.ocr_table_words(img, regions, scale),
+            Self::PpOcr(m) => m.ocr_table_words(img, regions, scale, detected),
             Self::Tesseract(t) => t.ocr_table_words(img, regions, scale),
         }
     }
@@ -1526,13 +1539,61 @@ impl Worker {
             // page resolves the same overlap through cell ownership in
             // `fit_regions_to_cells` and needs nothing here.
             assemble::merge_overlapping_regulars(&mut regions);
+            // The text detector's lines (#429), fetched before the region
+            // pass: with `det` line mode (#570, the default) they are the
+            // recognizer's crops inside the regions too — RapidOCR's own line
+            // source — not only the supplement outside them. Usually computed
+            // already, alongside layout (see `detect_alongside`); a page that
+            // reached OCR another way detects here. Degradation over failure:
+            // a detector that loaded but cannot run (a damaged file, an
+            // allocation failure) costs the page its detected lines, not its
+            // conversion — the projection segmentation is complete on its own.
+            let detected: Vec<ocr_det::DetBox> = if self.ocr_model()?.is_some() {
+                let (img, _) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
+                match self.pending_det.remove(&n) {
+                    Some(result) => result,
+                    None => match self.det_model() {
+                        Some(det) => timing::timed("ocr.det", || det.detect(img)),
+                        None => Ok(Vec::new()),
+                    },
+                }
+                .unwrap_or_else(|e| {
+                    docling_core::debug_log!(
+                        "docling-pdf: page {}: text detection failed ({e}); keeping the \
+                         region-scoped OCR only",
+                        n + 1
+                    );
+                    Vec::new()
+                })
+            } else {
+                Vec::new()
+            };
+            docling_core::debug_log!(
+                "docling-pdf: page {}: text detector found {} line(s): {:?}",
+                n + 1,
+                detected.len(),
+                detected
+                    .iter()
+                    .map(|d| (
+                        d.l.round(),
+                        d.t.round(),
+                        d.r.round(),
+                        d.b.round(),
+                        (d.score * 100.0).round() / 100.0
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            let det_lines =
+                (ocr::det_lines() && !detected.is_empty()).then_some(detected.as_slice());
             // `None` = `skip_ocr` or a missing model (#244): the page keeps
             // its layout regions (and TableFormer structure below) with no
             // recognized text, instead of failing the conversion.
             if let Some(ocr) = self.ocr_model()? {
                 let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
-                let cells = timing::timed("ocr.page", || ocr.ocr_page(img, &regions, scl))
-                    .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
+                let cells = timing::timed("ocr.page", || {
+                    ocr.ocr_page_with(img, &regions, scl, det_lines)
+                })
+                .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
                 ocr_confs.extend(cells.iter().map(|(_, conf)| conf));
                 page.cells = cells.into_iter().map(|(cell, _)| cell).collect();
                 // Table interiors carry no words yet: region-scoped OCR skips
@@ -1545,7 +1606,7 @@ impl Worker {
                 if regions.iter().any(|r| assemble::is_table_like(r.label)) {
                     let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
                     let words = timing::timed("ocr.table_words", || {
-                        ocr.ocr_table_words(img, &regions, scl)
+                        ocr.ocr_table_words(img, &regions, scl, det_lines)
                     })
                     .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
                     ocr_confs.extend(words.iter().map(|(_, conf)| conf));
@@ -1564,43 +1625,6 @@ impl Worker {
             // that special's silent children, as upstream).
             if self.ocr_model()?.is_some() {
                 let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
-                // Usually computed already, alongside layout (see
-                // `detect_alongside`); a page that reached OCR another way
-                // detects here.
-                // Degradation over failure: a detector that loaded but cannot
-                // run (a damaged file, an allocation failure) costs the page
-                // its detected lines, not its conversion — the region-scoped
-                // pass above is complete on its own.
-                let detected = match self.pending_det.remove(&n) {
-                    Some(result) => result,
-                    None => match self.det_model() {
-                        Some(det) => timing::timed("ocr.det", || det.detect(img)),
-                        None => Ok(Vec::new()),
-                    },
-                }
-                .unwrap_or_else(|e| {
-                    docling_core::debug_log!(
-                        "docling-pdf: page {}: text detection failed ({e}); keeping the \
-                         region-scoped OCR only",
-                        n + 1
-                    );
-                    Vec::new()
-                });
-                docling_core::debug_log!(
-                    "docling-pdf: page {}: text detector found {} line(s): {:?}",
-                    n + 1,
-                    detected.len(),
-                    detected
-                        .iter()
-                        .map(|d| (
-                            d.l.round(),
-                            d.t.round(),
-                            d.r.round(),
-                            d.b.round(),
-                            (d.score * 100.0).round() / 100.0
-                        ))
-                        .collect::<Vec<_>>()
-                );
                 let uncovered = ocr_det::uncovered_lines(&detected, scl, &regions, &page.cells);
                 docling_core::debug_log!(
                     "docling-pdf: page {}: {} of {} detected line(s) not covered by the region pass",
@@ -1759,7 +1783,7 @@ impl Worker {
             if let (false, Some(ocr)) = (pic_tables.is_empty(), self.ocr_model()?) {
                 let (img, scl) = ocr_input(&mut ocr_view, &page.image, page.scale, ocr_scale);
                 let words = timing::timed("ocr.table_words", || {
-                    ocr.ocr_table_words(img, &pic_tables, scl)
+                    ocr.ocr_table_words(img, &pic_tables, scl, None)
                 })
                 .map_err(|e| PdfError::Ocr(format!("page {}: {e}", n + 1)))?;
                 ocr_confs.extend(words.iter().map(|(_, conf)| conf));

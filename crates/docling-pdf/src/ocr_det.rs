@@ -27,12 +27,15 @@
 //! box — the recognizer's line prep crops rectangles, and rotated lines are
 //! not what documents lose today.
 //!
-//! The detector is a *supplement*: region-scoped recognition stays the source
-//! for text inside layout regions (so every existing snapshot of a scanned
-//! page keeps its lines), and only detected boxes not already covered by a
-//! recognized cell are cropped and recognized. Missing model → no detection,
-//! quietly (`DOCLING_RS_DEBUG` reports it), so an install without it behaves
-//! exactly as before.
+//! Since #570 the detector is also the recognizer's *line source* inside the
+//! layout regions (`ocr_prep::prep_region_lines_det`), as it is for RapidOCR:
+//! the projection split that preceded it cut a region into full-width strips,
+//! which on forms — several fields per baseline — glued and dropped words
+//! (FUNSD word recall 0.57 → 0.68 on this change alone; `DOCLING_RS_OCR_LINES=
+//! projection` restores the strips). Detected boxes outside every region are
+//! still recognized and placed as orphan text (`uncovered_lines`). Missing
+//! model → no detection, quietly (`DOCLING_RS_DEBUG` reports it): regions
+//! fall back to the projection split, the margins go unread.
 
 use image::RgbImage;
 
