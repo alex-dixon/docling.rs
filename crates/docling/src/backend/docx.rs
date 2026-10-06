@@ -1611,8 +1611,11 @@ fn collect_one(
                 out.push((text, lfmt, url.or(link.map(str::to_string))));
             }
         }
-        // Transparent inline wrappers.
-        "smartTag" | "ins" | "moveTo" | "fldSimple" | "sdt" | "sdtContent" => {
+        // Transparent inline wrappers — `customXml` included (#589): a run
+        // inside a custom XML markup element is ordinary text to Word,
+        // python-docx and the JSON walk alike, and the Markdown used to drop
+        // it (`Prefix text.  Suffix text.`).
+        "smartTag" | "customXml" | "ins" | "moveTo" | "fldSimple" | "sdt" | "sdtContent" => {
             collect_run_tuples(child, fmt, link, ctx, out)
         }
         _ => {}
