@@ -107,13 +107,49 @@ fn python_converter_takes_every_option() {
     });
 }
 
-/// Every option the Node surface has is declared in the TypeScript types.
+/// Every option the Node surface has is a property of both napi option
+/// objects — `ConverterOptions` (the `DocumentConverter` / `Pipeline`
+/// constructors) and `ConvertOptions` (the one-shot functions) — read off
+/// their Rust definitions: napi generates `native.d.ts` from them at build
+/// time (it is not checked in), spelling each field in camelCase.
 #[test]
-fn node_types_declare_every_option() {
-    let dts = read("crates/docling-node/native.d.ts");
+fn node_option_objects_declare_every_option() {
+    let src = read("crates/docling-node/src/lib.rs");
+    let struct_body = |name: &str| -> &str {
+        let start = src
+            .find(&format!("pub struct {name} {{"))
+            .unwrap_or_else(|| panic!("docling-node has no `pub struct {name}`"));
+        let end = src[start..].find("\n}\n").expect("struct end") + start;
+        &src[start..end]
+    };
+    // The class takes its options in two halves: the constructor's
+    // `ConverterOptions` and each call's `OutputOptions` (where the
+    // Markdown-export choices such as `pageBreakPlaceholder` live).
+    let converter = format!(
+        "{}\n{}",
+        struct_body("ConverterOptions"),
+        struct_body("OutputOptions")
+    );
+    let one_shot = struct_body("ConvertOptions");
     each_option(|o| {
-        let key = spelling(o.node, || camel_case(o.name))?;
-        (!dts.contains(&format!("  {key}?:"))).then(|| format!("native.d.ts lacks {key}"))
+        // The row's spelling is the TypeScript one; the Rust field is the
+        // wire name itself (napi renames it).
+        spelling(o.node, || camel_case(o.name))?;
+        let field = format!("    pub {}: Option<", o.name);
+        let mut missing = Vec::new();
+        if !converter.contains(&field) {
+            missing.push(format!(
+                "docling-node ConverterOptions/OutputOptions lack {}",
+                camel_case(o.name)
+            ));
+        }
+        if !one_shot.contains(&field) {
+            missing.push(format!(
+                "docling-node ConvertOptions lacks {}",
+                camel_case(o.name)
+            ));
+        }
+        (!missing.is_empty()).then(|| missing.join("\n"))
     });
 }
 

@@ -19,7 +19,7 @@ the table says otherwise. The inventory test
 (`crates/docling/tests/options_inventory.rs`) holds every surface's
 documentation to this table, and the table to the struct: an option added
 to `ConvertOptions` fails CI until it is a flag, a request option, a kwarg,
-a TypeScript property and a row here.
+a property of the Node option objects and a row here.
 
 What is *not* in the set: how and where to emit the result (`to`, the image
 mode, `pandoc_api_version`, the chunker settings). Those depend on what the
