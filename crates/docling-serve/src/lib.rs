@@ -79,9 +79,10 @@
 //! - `pandoc_api_version` — the Pandoc API the client's `pandoc` reads (`to=pandoc`,
 //!   #515): only `1.23` is written, so another version is a 400, not a document
 //!   Pandoc would reject
-//! - `md_page_break_placeholder` — text inserted between pages in Markdown
-//!   output (docling-serve's option of the same name, docling-core's
-//!   `MarkdownParams.page_break_placeholder`; e.g. `<!-- page break -->`).
+//! - `page_break_placeholder` (alias `md_page_break_placeholder`, this
+//!   server's historical spelling) — text inserted between pages in Markdown
+//!   output (docling-core's `MarkdownParams.page_break_placeholder`; e.g.
+//!   `<!-- page break -->`).
 //!   A break lands only between two rendered blocks on different pages;
 //!   unset (the default) keeps docling's break-free Markdown
 //! - `list_attachments` — email (.eml/.msg): append an Attachments section
@@ -157,6 +158,7 @@
 //! authentication: bind to loopback (the default) or front with a policy/auth
 //! proxy before exposing it.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex};
@@ -171,7 +173,7 @@ use docling::{
     ConversionError, DoclingDocument, DocumentConverter, ImageMode, InputFormat, Pipeline,
     SourceDocument,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Semaphore;
 
@@ -239,7 +241,7 @@ struct AppState {
     /// a streaming response's worker and outlive the handler).
     permits: Arc<Semaphore>,
     /// Async conversion jobs (#182), keyed by task id.
-    jobs: Mutex<std::collections::HashMap<String, Job>>,
+    jobs: Mutex<HashMap<String, Job>>,
     readiness: Mutex<Readiness>,
     /// The resolved memory ceiling (#263): the configured value, else the
     /// container's cgroup limit, else none. `0` disables.
@@ -297,7 +299,7 @@ pub fn router(cfg: ServeConfig) -> Router {
     let state = Arc::new(AppState {
         pipeline: Mutex::new(None),
         permits: Arc::new(Semaphore::new(cfg.concurrency.max(1))),
-        jobs: Mutex::new(std::collections::HashMap::new()),
+        jobs: Mutex::new(HashMap::new()),
         readiness: Mutex::new(if cfg.warmup {
             Readiness::Warming
         } else {
@@ -492,94 +494,24 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// Request options, merged from query parameters and body fields.
-#[derive(Clone, Debug, Default, Deserialize)]
+/// One request's options: the conversion options every surface shares
+/// ([`docling::ConvertOptions`], #577 — flattened, so its field names are the
+/// wire keys, with `md_page_break_placeholder`, this server's historical
+/// spelling, accepted as the alias of `page_break_placeholder`) plus what
+/// this surface decides about the output. Three sources feed it — the query
+/// string, a JSON body, multipart text parts — through one generic path:
+/// each is a set of `(name, text)` pairs read by [`Self::set_text`], layered
+/// by [`Self::merge_over`]; neither names a field, so an option added to the
+/// shared struct is a request option here with no edit.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct ConvertOptions {
+    #[serde(flatten)]
+    convert: docling::ConvertOptions,
     to: Option<String>,
-    strict: Option<bool>,
     images: Option<String>,
-    no_ocr: Option<bool>,
-    /// Keep layout + TableFormer, never OCR (#244) — docling's independent
-    /// `do_ocr=False`. `no_ocr` (the whole-stack skip) wins when both are set.
-    skip_ocr: Option<bool>,
-    force_full_page_ocr: Option<bool>,
-    no_table_former: Option<bool>,
-    /// Keep text-panel pictures as pictures (#173): disable the #157 demotion
-    /// of uncaptioned dense-text "picture" regions into paragraphs.
-    no_text_panels: Option<bool>,
-    /// Infer PDF/image section-header levels after assembly (#302, docling's
-    /// `HeadingHierarchyModel`: bookmarks > numbering > font style). Off by
-    /// default — headings then keep the flat level the pipeline emits.
-    heading_hierarchy: Option<bool>,
-    /// Opt-in enrichment models (#423), named as docling's
-    /// `PdfPipelineOptions` flags (and Python docling-serve's options):
-    /// classify pictures with DocumentFigureClassifier (26 classes → the JSON
-    /// picture item's `classification` annotation), rewrite code blocks with
-    /// CodeFormulaV2 (+ `code_language`), decode display formulas to LaTeX.
-    /// Each enabled pass lazily loads its model on the first matching region;
-    /// a missing model warns once and the pass is skipped.
-    do_picture_classification: Option<bool>,
-    do_code_enrichment: Option<bool>,
-    do_formula_enrichment: Option<bool>,
-    fetch_images: Option<bool>,
-    /// Email (.eml/.msg): append an Attachments section — names and content
-    /// types only, never the payload (#251).
-    list_attachments: Option<bool>,
-    /// Omit empty cells from sparse XLSX/XLS table grids (#271, opt-in
-    /// docling.rs extension).
-    skip_empty_cells: Option<bool>,
-    /// Compact (unpadded) Markdown tables (#271, opt-in docling.rs extension).
-    compact_tables: Option<bool>,
-    /// Text inserted between pages in Markdown output — docling-serve's
-    /// `md_page_break_placeholder` (docling-core's
-    /// `MarkdownParams.page_break_placeholder`). Unset = no page breaks.
-    md_page_break_placeholder: Option<String>,
     /// `to=pandoc` (#515): the Pandoc API version the client needs; anything
     /// but the one written (1.23) is rejected.
     pandoc_api_version: Option<String>,
-    /// EBCDIC copybook layout (#252): inline `EbcdicLayout` JSON (uploads
-    /// have no filesystem, so the JSON itself rides in the request).
-    ebcdic_layout: Option<String>,
-    asr_model: Option<String>,
-    /// ASR transcription language for audio/video input: a Whisper code
-    /// (`en`, `de`, …) or `auto` (default) — detected from the first
-    /// 30 seconds. Unknown codes fail the conversion with a clear error.
-    asr_lang: Option<String>,
-    /// Character encoding of text inputs (Markdown, CSV, AsciiDoc, WebVTT,
-    /// XML, …) — docling's `TextBackendOptions.encoding`: a WHATWG label
-    /// (`shift_jis`, `koi8-r`, `windows-1251`). Unset = detect (BOM, UTF-8,
-    /// then windows-1252); bytes it cannot decode fail the request.
-    encoding: Option<String>,
-    /// Max frames sampled from a video input (0 = transcript only; needs the
-    /// server to have the ffmpeg binary).
-    video_frames: Option<usize>,
-    /// XBRL: the server-local directory holding the instance's taxonomy
-    /// (docling's `XBRLBackendOptions.taxonomy`), a relative path without
-    /// `..` like `chunk_tokenizer`; unset = no taxonomy beyond the instance
-    /// itself (an upload has no directory of its own).
-    xbrl_taxonomy: Option<String>,
-    /// PDF page window, `"A-B"` or a single `"N"` (1-based inclusive — #80).
-    pages: Option<String>,
-    /// Per-document budget in seconds for the PDF pipeline (docling's
-    /// `document_timeout`, #497); unset = unlimited. Checked between pages:
-    /// once spent, the pages done so far are the (partial) document.
-    document_timeout: Option<f64>,
-    /// OCR recognition language for scanned pages: `en` (default) | `ch`.
-    ocr_lang: Option<String>,
-    /// Which regions feed the OCR (docling's `OcrMode`, #254): `default` |
-    /// `full_page` | `layout_regions` | `pdf_aware_layout_regions`.
-    ocr_mode: Option<String>,
-    /// Which OCR engine reads scanned pages (#460): `ppocr` (default) |
-    /// `tesseract` (the server's `tesseract` binary).
-    ocr_engine: Option<String>,
-    /// OCR render scale in px per PDF point (docling's `OcrOptions.scale`,
-    /// #254); unset reads the pipeline's own 2.0 px/pt render.
-    ocr_scale: Option<f32>,
-    /// Picture crops and page images in px per PDF point (docling's
-    /// `images_scale`, #520), 0.1–4.0; unset keeps the pipeline's 2.0 render.
-    images_scale: Option<f32>,
-    /// Keep each page's render as the JSON page image (docling's
-    /// `generate_page_images`, #520).
-    page_images: Option<bool>,
     /// `to=images` render scale in pixels per PDF point (#243): default 2.0
     /// (144 dpi, the pipeline's own render scale), accepted range 0.1–4.0.
     scale: Option<f32>,
@@ -599,80 +531,66 @@ struct ConvertOptions {
     /// Hybrid peer-merging for `to=chunks` (docling's `merge_peers`, default
     /// true, #256).
     chunk_merge_peers: Option<bool>,
-    /// Conversion pipeline (#304): `standard` (default) or `vlm` — every PDF
-    /// page / image goes to a remote OpenAI-compatible vision model instead of
-    /// the local ML stack. With `standard` the `vlm_*` options below are
-    /// ignored, not rejected (the Node bindings' contract).
-    pipeline: Option<String>,
-    /// VLM endpoint for `pipeline=vlm`. A request-supplied endpoint is an
-    /// outbound-URL/SSRF surface: it needs `--allow-url-fetch` and passes the
-    /// same private-address check as URL inputs. Unset falls back to the
-    /// operator-pinned `DOCLING_RS_VLM_ENDPOINT` — the safer default: callers
-    /// pick the pipeline, the operator picks where it talks to.
-    vlm_endpoint: Option<String>,
-    /// VLM model name; falls back to `DOCLING_RS_VLM_MODEL`.
-    vlm_model: Option<String>,
-    /// Bearer token for the endpoint; falls back to `DOCLING_RS_VLM_API_KEY`.
-    vlm_api_key: Option<String>,
-    /// Per-page instruction; falls back to `DOCLING_RS_VLM_PROMPT`, else
-    /// docling's DocLang-eliciting default prompt.
-    vlm_prompt: Option<String>,
-    /// `max_tokens` per completion (default 8192).
-    vlm_max_tokens: Option<usize>,
 }
 
 impl ConvertOptions {
+    /// `self` on top of `base`: every option `self` sets wins, the rest
+    /// keep `base`'s — [`docling::merge_options`], no field list.
     fn merge_over(self, base: ConvertOptions) -> ConvertOptions {
-        ConvertOptions {
-            to: self.to.or(base.to),
-            strict: self.strict.or(base.strict),
-            images: self.images.or(base.images),
-            no_ocr: self.no_ocr.or(base.no_ocr),
-            skip_ocr: self.skip_ocr.or(base.skip_ocr),
-            force_full_page_ocr: self.force_full_page_ocr.or(base.force_full_page_ocr),
-            no_table_former: self.no_table_former.or(base.no_table_former),
-            no_text_panels: self.no_text_panels.or(base.no_text_panels),
-            heading_hierarchy: self.heading_hierarchy.or(base.heading_hierarchy),
-            do_picture_classification: self
-                .do_picture_classification
-                .or(base.do_picture_classification),
-            do_code_enrichment: self.do_code_enrichment.or(base.do_code_enrichment),
-            do_formula_enrichment: self.do_formula_enrichment.or(base.do_formula_enrichment),
-            fetch_images: self.fetch_images.or(base.fetch_images),
-            list_attachments: self.list_attachments.or(base.list_attachments),
-            skip_empty_cells: self.skip_empty_cells.or(base.skip_empty_cells),
-            compact_tables: self.compact_tables.or(base.compact_tables),
-            md_page_break_placeholder: self
-                .md_page_break_placeholder
-                .or(base.md_page_break_placeholder),
-            pandoc_api_version: self.pandoc_api_version.or(base.pandoc_api_version),
-            ebcdic_layout: self.ebcdic_layout.or(base.ebcdic_layout),
-            asr_model: self.asr_model.or(base.asr_model),
-            asr_lang: self.asr_lang.or(base.asr_lang),
-            encoding: self.encoding.or(base.encoding),
-            video_frames: self.video_frames.or(base.video_frames),
-            xbrl_taxonomy: self.xbrl_taxonomy.or(base.xbrl_taxonomy),
-            pages: self.pages.or(base.pages),
-            document_timeout: self.document_timeout.or(base.document_timeout),
-            ocr_lang: self.ocr_lang.or(base.ocr_lang),
-            ocr_mode: self.ocr_mode.or(base.ocr_mode),
-            ocr_engine: self.ocr_engine.or(base.ocr_engine),
-            ocr_scale: self.ocr_scale.or(base.ocr_scale),
-            images_scale: self.images_scale.or(base.images_scale),
-            page_images: self.page_images.or(base.page_images),
-            scale: self.scale.or(base.scale),
-            chunker: self.chunker.or(base.chunker),
-            chunk_tokenizer: self.chunk_tokenizer.or(base.chunk_tokenizer),
-            chunk_max_tokens: self.chunk_max_tokens.or(base.chunk_max_tokens),
-            chunk_merge_peers: self.chunk_merge_peers.or(base.chunk_merge_peers),
-            pipeline: self.pipeline.or(base.pipeline),
-            vlm_endpoint: self.vlm_endpoint.or(base.vlm_endpoint),
-            vlm_model: self.vlm_model.or(base.vlm_model),
-            vlm_api_key: self.vlm_api_key.or(base.vlm_api_key),
-            vlm_prompt: self.vlm_prompt.or(base.vlm_prompt),
-            vlm_max_tokens: self.vlm_max_tokens.or(base.vlm_max_tokens),
-        }
+        docling::merge_options(self, base)
     }
+
+    /// Set one option from its text form — a query parameter or a multipart
+    /// text part. The text is tried as the option's type in turn: a string,
+    /// an integer, a decimal number, then a boolean (`1`/`true`/`yes`/`on`
+    /// and `0`/`false`/`no`/`off`); the first reading the option accepts
+    /// lands. An unknown name is ignored (as unknown query parameters always
+    /// were); a value no reading accepts — `document_timeout=soon`,
+    /// `strict=maybe` — is a 400 naming the option.
+    fn set_text(&mut self, name: &str, text: &str) -> Result<(), ApiError> {
+        let trimmed = text.trim();
+        let mut candidates = vec![serde_json::Value::String(text.to_string())];
+        if let Ok(n) = trimmed.parse::<u64>() {
+            candidates.push(serde_json::Value::from(n));
+        } else if let Ok(f) = trimmed.parse::<f64>() {
+            if let Some(n) = serde_json::Number::from_f64(f) {
+                candidates.push(serde_json::Value::Number(n));
+            }
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => candidates.push(serde_json::Value::Bool(true)),
+            "0" | "false" | "no" | "off" => candidates.push(serde_json::Value::Bool(false)),
+            _ => {}
+        }
+        for value in candidates {
+            let mut patch = serde_json::Map::new();
+            patch.insert(name.to_string(), value);
+            if let Ok(parsed) =
+                serde_json::from_value::<ConvertOptions>(serde_json::Value::Object(patch))
+            {
+                *self = parsed.merge_over(std::mem::take(self));
+                return Ok(());
+            }
+        }
+        Err(ApiError::Bad(format!(
+            "{name}: cannot read {text:?} as that option's value"
+        )))
+    }
+
+    /// The query string's options (`?strict=true&pages=2-5`).
+    fn from_query(query: HashMap<String, String>) -> Result<ConvertOptions, ApiError> {
+        let mut options = ConvertOptions::default();
+        for (name, text) in &query {
+            options.set_text(name, text)?;
+        }
+        Ok(options)
+    }
+}
+
+/// A rejected shared option is this API's 400, with the library's message
+/// (which names the option in its wire spelling).
+fn bad(e: docling::OptionsError) -> ApiError {
+    ApiError::Bad(e.to_string())
 }
 
 /// JSON body: the legacy `{"url": …}` shorthand, or docling's
@@ -937,14 +855,10 @@ fn validate_output(options: &ConvertOptions) -> Result<(String, ImageMode), ApiE
             )))
         }
     };
-    // OCR mode/scale (#254) validate here too — before the conversion starts —
+    // The shared options validate here too — before the conversion starts —
     // because the streaming path flattens later errors into a mid-stream 422,
     // and a bad option deserves a plain 400 up front.
-    parse_ocr_mode(options.ocr_mode.as_deref())?;
-    parse_ocr_scale(options.ocr_scale)?;
-    parse_images_scale(options.images_scale)?;
-    parse_ocr_engine(options.ocr_engine.as_deref())?;
-    parse_ocr_lang(options)?;
+    options.convert.validate().map_err(bad)?;
     parse_chunk_options(options)?;
     Ok((to, image_mode))
 }
@@ -987,10 +901,11 @@ fn parse_chunk_options(
 
 async fn convert(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ConvertOptions>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: axum::extract::Request,
 ) -> Result<Response, ApiError> {
+    let query = ConvertOptions::from_query(query)?;
     let (sources, options, target) = parse_convert_request(&state, query, headers, body).await?;
     let (to, image_mode) = validate_output(&options)?;
     // #304: bad pipeline/vlm options are a 400/422 up front (no DNS here —
@@ -1088,7 +1003,7 @@ impl JobState {
 /// Evict finished jobs whose result has outlived the TTL. Called from the job
 /// endpoints — no background sweeper thread needed, since memory only ever
 /// accumulates through those same endpoints' submissions.
-fn purge_expired(jobs: &mut std::collections::HashMap<String, Job>, ttl_secs: u64) {
+fn purge_expired(jobs: &mut HashMap<String, Job>, ttl_secs: u64) {
     let ttl = std::time::Duration::from_secs(ttl_secs);
     jobs.retain(|_, job| job.done_at.is_none_or(|done| done.elapsed() < ttl));
 }
@@ -1114,10 +1029,11 @@ fn task_id() -> String {
 /// `GET /v1/result/{id}`.
 async fn convert_async(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<ConvertOptions>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: axum::extract::Request,
 ) -> Result<Response, ApiError> {
+    let query = ConvertOptions::from_query(query)?;
     let (mut sources, options, target) =
         parse_convert_request(&state, query, headers, body).await?;
     let (to, image_mode) = validate_output(&options)?;
@@ -1726,12 +1642,7 @@ fn rasterize_pages(
             "scale {scale} out of range (0.1–4.0 pixels per PDF point; 2.0 = 144 dpi)"
         )));
     }
-    let range = options
-        .pages
-        .as_deref()
-        .map(docling::parse_page_range)
-        .transpose()
-        .map_err(|e| ApiError::Bad(format!("pages: {e}")))?;
+    let range = options.convert.page_range().map_err(bad)?;
     // Enforce the page cap before rendering anything. Count with the window
     // applied — pages=A-B is exactly the documented way to rasterize a slice
     // of a document that exceeds the cap.
@@ -1953,8 +1864,8 @@ fn markdown_string(
     options: &ConvertOptions,
 ) -> String {
     let mut doc = document.clone();
-    doc.strict_markdown = options.strict.unwrap_or(state.cfg.strict);
-    doc.page_break_placeholder = options.md_page_break_placeholder.clone();
+    doc.strict_markdown = options.convert.strict.unwrap_or(state.cfg.strict);
+    doc.page_break_placeholder = options.convert.page_break_placeholder.clone();
     match image_mode {
         ImageMode::Placeholder => doc.export_to_markdown(),
         _ => {
@@ -2027,122 +1938,12 @@ async fn read_multipart(
                     .map_err(|e| ApiError::Bad(format!("reading upload: {e}")))?;
                 files.push((file_name, bytes.to_vec()));
             }
-            "to" | "images" => {
+            // Every other text part is an option in its wire spelling —
+            // the shared set and this surface's output options alike.
+            _ => {
                 let v = text_field(field).await?;
-                match name.as_str() {
-                    "to" => body_opts.to = Some(v),
-                    _ => body_opts.images = Some(v),
-                }
+                body_opts.set_text(&name, &v)?;
             }
-            "asr_model" => body_opts.asr_model = Some(text_field(field).await?),
-            "asr_lang" => body_opts.asr_lang = Some(text_field(field).await?),
-            "encoding" => body_opts.encoding = Some(text_field(field).await?),
-            "pages" => body_opts.pages = Some(text_field(field).await?),
-            "document_timeout" => {
-                let v = text_field(field).await?;
-                body_opts.document_timeout = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!(
-                        "document_timeout must be a number of seconds, got {v:?}"
-                    ))
-                })?);
-            }
-            "ocr_lang" => body_opts.ocr_lang = Some(text_field(field).await?),
-            "ocr_mode" => body_opts.ocr_mode = Some(text_field(field).await?),
-            "ocr_engine" => body_opts.ocr_engine = Some(text_field(field).await?),
-            "ocr_scale" => {
-                let v = text_field(field).await?;
-                body_opts.ocr_scale = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!("ocr_scale must be a number, got {v:?}"))
-                })?);
-            }
-            "images_scale" => {
-                let v = text_field(field).await?;
-                body_opts.images_scale = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!("images_scale must be a number, got {v:?}"))
-                })?);
-            }
-            "ebcdic_layout" => body_opts.ebcdic_layout = Some(text_field(field).await?),
-            "md_page_break_placeholder" => {
-                body_opts.md_page_break_placeholder = Some(text_field(field).await?)
-            }
-            "pandoc_api_version" => body_opts.pandoc_api_version = Some(text_field(field).await?),
-            "pipeline" => body_opts.pipeline = Some(text_field(field).await?),
-            "vlm_endpoint" => body_opts.vlm_endpoint = Some(text_field(field).await?),
-            "vlm_model" => body_opts.vlm_model = Some(text_field(field).await?),
-            "vlm_api_key" => body_opts.vlm_api_key = Some(text_field(field).await?),
-            "vlm_prompt" => body_opts.vlm_prompt = Some(text_field(field).await?),
-            "vlm_max_tokens" => {
-                let v = text_field(field).await?;
-                body_opts.vlm_max_tokens = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!(
-                        "vlm_max_tokens must be a positive integer, got {v:?}"
-                    ))
-                })?);
-            }
-            "chunker" => body_opts.chunker = Some(text_field(field).await?),
-            "chunk_tokenizer" => body_opts.chunk_tokenizer = Some(text_field(field).await?),
-            "xbrl_taxonomy" => body_opts.xbrl_taxonomy = Some(text_field(field).await?),
-            "chunk_max_tokens" => {
-                let v = text_field(field).await?;
-                body_opts.chunk_max_tokens = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!(
-                        "chunk_max_tokens must be a positive integer, got {v:?}"
-                    ))
-                })?);
-            }
-            "scale" => {
-                let v = text_field(field).await?;
-                body_opts.scale =
-                    Some(v.parse().map_err(|_| {
-                        ApiError::Bad(format!("scale must be a number, got {v:?}"))
-                    })?);
-            }
-            "video_frames" => {
-                let v = text_field(field).await?;
-                body_opts.video_frames = Some(v.parse().map_err(|_| {
-                    ApiError::Bad(format!(
-                        "video_frames must be a non-negative integer, got {v:?}"
-                    ))
-                })?);
-            }
-            "strict"
-            | "no_ocr"
-            | "skip_ocr"
-            | "no_table_former"
-            | "force_full_page_ocr"
-            | "no_text_panels"
-            | "heading_hierarchy"
-            | "do_picture_classification"
-            | "do_code_enrichment"
-            | "do_formula_enrichment"
-            | "fetch_images"
-            | "list_attachments"
-            | "skip_empty_cells"
-            | "compact_tables"
-            | "page_images"
-            | "chunk_merge_peers" => {
-                let v = text_field(field).await?;
-                let b = matches!(v.as_str(), "1" | "true" | "yes" | "on");
-                match name.as_str() {
-                    "strict" => body_opts.strict = Some(b),
-                    "no_ocr" => body_opts.no_ocr = Some(b),
-                    "skip_ocr" => body_opts.skip_ocr = Some(b),
-                    "force_full_page_ocr" => body_opts.force_full_page_ocr = Some(b),
-                    "no_table_former" => body_opts.no_table_former = Some(b),
-                    "no_text_panels" => body_opts.no_text_panels = Some(b),
-                    "heading_hierarchy" => body_opts.heading_hierarchy = Some(b),
-                    "do_picture_classification" => body_opts.do_picture_classification = Some(b),
-                    "do_code_enrichment" => body_opts.do_code_enrichment = Some(b),
-                    "do_formula_enrichment" => body_opts.do_formula_enrichment = Some(b),
-                    "list_attachments" => body_opts.list_attachments = Some(b),
-                    "skip_empty_cells" => body_opts.skip_empty_cells = Some(b),
-                    "compact_tables" => body_opts.compact_tables = Some(b),
-                    "chunk_merge_peers" => body_opts.chunk_merge_peers = Some(b),
-                    "page_images" => body_opts.page_images = Some(b),
-                    _ => body_opts.fetch_images = Some(b),
-                }
-            }
-            _ => {} // unknown parts are ignored
         }
     }
     if files.is_empty() {
@@ -2496,65 +2297,26 @@ fn resolve_vlm_options(
     options: &ConvertOptions,
     check_ip: bool,
 ) -> Result<Option<docling::vlm::VlmOptions>, ApiError> {
-    let set = |s: &Option<String>| s.clone().filter(|v| !v.trim().is_empty());
-    match options.pipeline.as_deref() {
-        None | Some("standard") => Ok(None),
-        Some("vlm") => {
-            let endpoint = set(&options.vlm_endpoint);
-            if let Some(url) = endpoint.as_deref() {
-                if !state.cfg.allow_url_fetch {
-                    return Err(ApiError::Unsupported(
-                        "request-supplied vlm_endpoint is disabled; start docling-serve \
-                         with --allow-url-fetch (SSRF surface — see docs/SECURITY.md), \
-                         or pin the endpoint server-side via DOCLING_RS_VLM_ENDPOINT"
-                            .into(),
-                    ));
-                }
-                if check_ip {
-                    check_outbound_url(url)?;
-                }
-            }
-            let mut v = docling::vlm::VlmOptions::resolve(endpoint, set(&options.vlm_model))
-                .map_err(|e| {
-                    // The library's message names the CLI flags; this surface's
-                    // spelling is the request options.
-                    ApiError::Bad(
-                        e.to_string()
-                            .replace("pass --vlm-endpoint", "pass vlm_endpoint")
-                            .replace("pass --vlm-model", "pass vlm_model"),
-                    )
-                })?;
-            if let Some(p) = set(&options.vlm_prompt) {
-                v.prompt = Some(p);
-            }
-            if let Some(k) = set(&options.vlm_api_key) {
-                v.api_key = Some(k);
-            }
-            // Validated like the Node bindings' `vlmMaxTokens`: 0 would have
-            // every page come back empty and surface as a model error.
-            match options.vlm_max_tokens {
-                Some(0) => {
-                    return Err(ApiError::Bad(
-                        "vlm_max_tokens must be greater than 0".into(),
-                    ))
-                }
-                Some(n) => v.max_tokens = n,
-                None => {}
-            }
-            // `pages` composes with the VLM exactly as with the ML pipeline —
-            // only the selected pages are rendered and sent.
-            v.page_range = options
-                .pages
-                .as_deref()
-                .map(docling::parse_page_range)
-                .transpose()
-                .map_err(|e| ApiError::Bad(format!("pages: {e}")))?;
-            Ok(Some(v))
-        }
-        Some(other) => Err(ApiError::Bad(format!(
-            "unknown pipeline '{other}' (expected: standard, vlm)"
-        ))),
+    let o = &options.convert;
+    if o.pipeline().map_err(bad)? != docling::PipelineKind::Vlm {
+        return Ok(None);
     }
+    if let Some(url) = o.vlm_endpoint.as_deref().filter(|v| !v.trim().is_empty()) {
+        if !state.cfg.allow_url_fetch {
+            return Err(ApiError::Unsupported(
+                "request-supplied vlm_endpoint is disabled; start docling-serve \
+                 with --allow-url-fetch (SSRF surface — see docs/SECURITY.md), \
+                 or pin the endpoint server-side via DOCLING_RS_VLM_ENDPOINT"
+                    .into(),
+            ));
+        }
+        if check_ip {
+            check_outbound_url(url)?;
+        }
+    }
+    // The shared resolution (#577): env fallbacks, blank-as-unset, the
+    // `max_tokens` check, `pages` composing like it does with the ML pipeline.
+    o.vlm_options().map_err(bad)
 }
 
 fn convert_document_inner(
@@ -2601,41 +2363,26 @@ fn convert_document_inner(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let pipeline = warm_pipeline(&mut guard, options)?;
-            // The page window (#80) is per-request configuration on the shared
-            // warm pipeline — set it unconditionally so no request inherits a
-            // previous one's window. Images are single-page; no window.
-            let range = options
-                .pages
-                .as_deref()
-                .map(docling::parse_page_range)
-                .transpose()
-                .map_err(|e| ApiError::Bad(format!("pages: {e}")))?;
-            pipeline.set_pages(range);
-            // OCR language likewise applies per request; only a worker whose
-            // cached recognition model mismatches actually reloads anything.
-            pipeline.set_ocr_engine(parse_ocr_engine(options.ocr_engine.as_deref())?);
-            pipeline.set_ocr_lang(parse_ocr_lang(options)?);
-            pipeline.set_tesseract_lang(tesseract_lang(options)?);
-            // Forcing, mode and scale (#254) are pure per-worker configuration
-            // — set unconditionally like the page window. (This also makes
-            // `force_full_page_ocr` effective on the warm path at all: it was
-            // only ever applied to the declarative converter before, which
-            // PDFs never route through.)
-            pipeline.set_force_full_page_ocr(options.force_full_page_ocr.unwrap_or(false));
-            pipeline.set_ocr_mode(parse_ocr_mode(options.ocr_mode.as_deref())?);
-            pipeline.set_ocr_scale(parse_ocr_scale(options.ocr_scale)?);
-            // Picture-crop scale and page images (#519/#520): per request too.
-            pipeline.set_images(docling::ImageOutput {
-                scale: parse_images_scale(options.images_scale)?,
-                page_images: options.page_images.unwrap_or(false),
-            });
-            // #302: pure per-request post-processing configuration, set
-            // unconditionally like the page window.
+            // Every per-request setting of the shared warm pipeline, read as
+            // typed values off the validated option set (#577) — set
+            // unconditionally so no request inherits a previous one's: the
+            // page window (#80), the OCR engine / language (only a worker
+            // whose cached recognition model mismatches reloads anything),
+            // forcing, mode and scale (#254), picture-crop scale and page
+            // images (#519/#520), the heading pass (#302), the budget (#497).
+            let o = &options.convert;
+            pipeline.set_pages(o.page_range().map_err(bad)?);
+            pipeline.set_ocr_engine(o.ocr_engine().map_err(bad)?);
+            pipeline.set_ocr_lang(o.ocr_lang().map_err(bad)?);
+            pipeline.set_tesseract_lang(o.tesseract_lang().map_err(bad)?);
+            pipeline.set_force_full_page_ocr(o.force_full_page_ocr.unwrap_or(false));
+            pipeline.set_ocr_mode(o.ocr_mode().map_err(bad)?);
+            pipeline.set_ocr_scale(o.ocr_scale);
+            pipeline.set_images(o.image_output());
             pipeline.set_heading_hierarchy(docling::HeadingHierarchyOptions::enabled(
-                options.heading_hierarchy.unwrap_or(false),
+                o.heading_hierarchy.unwrap_or(false),
             ));
-            // The document budget (#497) is per-request too.
-            pipeline.set_document_timeout(parse_document_timeout(options.document_timeout)?);
+            pipeline.set_document_timeout(o.document_timeout().map_err(bad)?);
             let mut converted = match source.format {
                 InputFormat::Pdf => pipeline
                     .convert_outcome(&source.bytes, None, &source.name)
@@ -2695,22 +2442,14 @@ struct PipelineFlags {
 
 impl PipelineFlags {
     fn of(options: &ConvertOptions) -> Self {
+        let o = &options.convert;
         Self {
-            no_ocr: options.no_ocr.unwrap_or(false),
-            skip_ocr: options.skip_ocr.unwrap_or(false),
-            no_table_former: options.no_table_former.unwrap_or(false),
-            no_text_panels: options.no_text_panels.unwrap_or(false),
-            enrich: enrichments(options),
+            no_ocr: o.no_ocr.unwrap_or(false),
+            skip_ocr: o.skip_ocr.unwrap_or(false),
+            no_table_former: o.no_table_former.unwrap_or(false),
+            no_text_panels: o.no_text_panels.unwrap_or(false),
+            enrich: o.enrichments(),
         }
-    }
-}
-
-/// The request's enrichment passes (#423), all off unless asked for.
-fn enrichments(options: &ConvertOptions) -> docling::EnrichmentOptions {
-    docling::EnrichmentOptions {
-        picture_classification: options.do_picture_classification.unwrap_or(false),
-        code: options.do_code_enrichment.unwrap_or(false),
-        formula: options.do_formula_enrichment.unwrap_or(false),
     }
 }
 
@@ -2740,71 +2479,23 @@ fn warm_pipeline<'a>(
 }
 
 /// Per-request declarative converter (construction is cheap — it's
-/// configuration, models don't apply).
+/// configuration, models don't apply): the shared options validated and
+/// applied by [`docling::ConvertOptions::apply`] onto this server's base
+/// (`--strict`), after the two policies only a server has.
 fn request_converter(
     state: &AppState,
     options: &ConvertOptions,
 ) -> Result<DocumentConverter, ApiError> {
-    let mut converter = DocumentConverter::new()
-        .strict(options.strict.unwrap_or(state.cfg.strict))
-        // `fetch_images` pulls external `<img src>` over the network — the same
-        // outbound-fetch / SSRF surface as URL inputs, so it lives behind the
-        // same `--allow-url-fetch` gate. Off by default, it's silently ignored
-        // rather than honored (the UI greys the box; an API caller just gets
-        // placeholder images instead of a surprise outbound fetch).
-        .fetch_images(state.cfg.allow_url_fetch && options.fetch_images.unwrap_or(false))
-        .list_attachments(options.list_attachments.unwrap_or(false))
-        .skip_empty_cells(options.skip_empty_cells.unwrap_or(false))
-        .compact_tables(options.compact_tables.unwrap_or(false))
-        .page_break_placeholder(options.md_page_break_placeholder.clone())
-        .ebcdic_layout_opt(options.ebcdic_layout.clone())
-        .asr_model(options.asr_model.clone())
-        .asr_lang(options.asr_lang.clone())
-        .encoding(options.encoding.clone())
-        .video_frames(
-            options
-                .video_frames
-                .unwrap_or(docling::DEFAULT_VIDEO_FRAMES),
-        )
-        .no_ocr(options.no_ocr.unwrap_or(false))
-        .skip_ocr(options.skip_ocr.unwrap_or(false))
-        .force_full_page_ocr(options.force_full_page_ocr.unwrap_or(false))
-        .no_table_former(options.no_table_former.unwrap_or(false))
-        .no_text_panels(options.no_text_panels.unwrap_or(false))
-        .heading_hierarchy(options.heading_hierarchy.unwrap_or(false))
-        .do_picture_classification(options.do_picture_classification.unwrap_or(false))
-        .do_code_enrichment(options.do_code_enrichment.unwrap_or(false))
-        .do_formula_enrichment(options.do_formula_enrichment.unwrap_or(false));
-    if let Some(pages) = &options.pages {
-        let (first, last) =
-            docling::parse_page_range(pages).map_err(|e| ApiError::Bad(format!("pages: {e}")))?;
-        converter = converter.page_range(first, last);
-    }
-    converter = converter.document_timeout(parse_document_timeout(options.document_timeout)?);
-    // Validated against the request's engine (#460): `deu` is a language
-    // to Tesseract only.
-    parse_ocr_lang(options)?;
-    if let Some(lang) = &options.ocr_lang {
-        converter = converter.ocr_lang(lang.clone());
-    }
-    if parse_ocr_engine(options.ocr_engine.as_deref())?.is_some() {
-        converter = converter.ocr_engine(options.ocr_engine.clone().expect("checked above"));
-    }
-    // #254: the converter path reaches the ML pipeline too (rasterized SVG),
-    // so mode/scale plumb here as well — validated up front like ocr_lang.
-    if parse_ocr_mode(options.ocr_mode.as_deref())?.is_some() {
-        converter = converter.ocr_mode(options.ocr_mode.clone().expect("checked above"));
-    }
-    if let Some(s) = parse_ocr_scale(options.ocr_scale)? {
-        converter = converter.ocr_scale(s);
-    }
-    if let Some(s) = parse_images_scale(options.images_scale)? {
-        converter = converter.images_scale(s);
-    }
-    converter = converter.generate_page_images(options.page_images.unwrap_or(false));
+    let mut o = options.convert.clone();
+    // `fetch_images` pulls external `<img src>` over the network — the same
+    // outbound-fetch / SSRF surface as URL inputs, so it lives behind the
+    // same `--allow-url-fetch` gate. Off by default, it's silently ignored
+    // rather than honored (the UI greys the box; an API caller just gets
+    // placeholder images instead of a surprise outbound fetch).
+    o.fetch_images = Some(state.cfg.allow_url_fetch && o.fetch_images.unwrap_or(false));
     // A server-local directory, held to the same rule as `chunk_tokenizer`:
     // relative, no `..` — a request must not name arbitrary server paths.
-    if let Some(dir) = options.xbrl_taxonomy.as_deref() {
+    if let Some(dir) = o.xbrl_taxonomy.as_deref() {
         let path = std::path::Path::new(dir);
         let unsafe_component = path.components().any(|c| {
             !matches!(
@@ -2817,108 +2508,9 @@ fn request_converter(
                 "xbrl_taxonomy must be a relative path without '..' components, got {dir:?}"
             )));
         }
-        converter = converter.xbrl_taxonomy(path);
     }
-    Ok(converter)
-}
-
-/// Validate a request's `ocr_mode` (#254; None passes through — the engine
-/// default).
-fn parse_ocr_mode(raw: Option<&str>) -> Result<Option<docling::OcrMode>, ApiError> {
-    raw.map(|v| {
-        docling::OcrMode::parse(v).ok_or_else(|| {
-            ApiError::Bad(format!(
-                "ocr_mode {v:?} is not \
-                 default|full_page|layout_regions|pdf_aware_layout_regions"
-            ))
-        })
-    })
-    .transpose()
-}
-
-/// Validate a request's `ocr_scale` (#254; None passes through — the engine
-/// default).
-/// Validate a request's `document_timeout` (#497): a positive number of
-/// seconds, or unset (unlimited).
-fn parse_document_timeout(raw: Option<f64>) -> Result<Option<std::time::Duration>, ApiError> {
-    match raw {
-        Some(s) if !(s.is_finite() && s > 0.0) => Err(ApiError::Bad(format!(
-            "document_timeout must be a positive number of seconds, got {s}"
-        ))),
-        Some(s) => Ok(Some(std::time::Duration::from_secs_f64(s))),
-        None => Ok(None),
-    }
-}
-
-/// Validate a request's `images_scale` (#520): 0.1–4.0 like `scale`, or
-/// unset (the pipeline's 2.0 render).
-fn parse_images_scale(raw: Option<f32>) -> Result<Option<f32>, ApiError> {
-    match raw {
-        Some(s) if !(0.1..=4.0).contains(&s) => Err(ApiError::Bad(format!(
-            "images_scale must be a number in 0.1-4.0, got {s}"
-        ))),
-        other => Ok(other),
-    }
-}
-
-fn parse_ocr_scale(raw: Option<f32>) -> Result<Option<f32>, ApiError> {
-    match raw {
-        Some(s) if !(s.is_finite() && s > 0.0) => Err(ApiError::Bad(format!(
-            "ocr_scale must be a positive number, got {s}"
-        ))),
-        other => Ok(other),
-    }
-}
-
-/// Validate a request's `ocr_engine` (#460; None passes through — the
-/// process default).
-fn parse_ocr_engine(raw: Option<&str>) -> Result<Option<docling::OcrEngine>, ApiError> {
-    raw.map(|v| {
-        docling::OcrEngine::parse(v).ok_or_else(|| {
-            ApiError::Bad(format!(
-                "ocr_engine {v:?} is not {}",
-                docling::OcrEngine::ACCEPTED
-            ))
-        })
-    })
-    .transpose()
-}
-
-/// The engine a request's OCR options are read against: its `ocr_engine`,
-/// else the process default (`DOCLING_RS_OCR_ENGINE`, else PP-OCR).
-fn request_engine(options: &ConvertOptions) -> Result<docling::OcrEngine, ApiError> {
-    Ok(parse_ocr_engine(options.ocr_engine.as_deref())?
-        .unwrap_or_else(docling::OcrEngine::from_env))
-}
-
-/// Validate a request's `ocr_lang` against its engine (None passes through —
-/// the engine default) and return the PP-OCR model it selects; under
-/// Tesseract the value is that engine's language list ([`tesseract_lang`])
-/// and no PP-OCR model is selected.
-fn parse_ocr_lang(options: &ConvertOptions) -> Result<Option<docling::OcrLang>, ApiError> {
-    let Some(v) = options.ocr_lang.as_deref() else {
-        return Ok(None);
-    };
-    let engine = request_engine(options)?;
-    engine.validate_lang(v).map_err(ApiError::Bad)?;
-    Ok(match engine {
-        docling::OcrEngine::PpOcr => docling::OcrLang::parse(v),
-        docling::OcrEngine::Tesseract => None,
-    })
-}
-
-/// Tesseract's `-l` argument from a request's `ocr_lang` (#460), `None`
-/// under PP-OCR or without a language.
-fn tesseract_lang(options: &ConvertOptions) -> Result<Option<String>, ApiError> {
-    let Some(v) = options.ocr_lang.as_deref() else {
-        return Ok(None);
-    };
-    match request_engine(options)? {
-        docling::OcrEngine::Tesseract => docling::tesseract_lang_arg(v)
-            .map(Some)
-            .map_err(ApiError::Bad),
-        docling::OcrEngine::PpOcr => Ok(None),
-    }
+    o.apply(DocumentConverter::new().strict(state.cfg.strict))
+        .map_err(bad)
 }
 
 /// Markdown response: converted through the streaming serializer, body sent
@@ -2956,7 +2548,7 @@ async fn stream_markdown(
         // per-page remote conversion, and its "wrong input format" rejection
         // must reach the client instead of the declarative streamer running a
         // standard conversion the caller didn't ask for.
-        let buffered = options.pipeline.as_deref() == Some("vlm")
+        let buffered = options.convert.pipeline().ok() == Some(docling::PipelineKind::Vlm)
             || matches!(source.format, InputFormat::Pdf | InputFormat::Image);
         if buffered {
             // Buffered document → streamed serialization is pointless for
@@ -2973,8 +2565,8 @@ async fn stream_markdown(
                         eprintln!("docling-serve: partial document: {}", e.error_message);
                     }
                     let mut doc = converted.document;
-                    doc.strict_markdown = options.strict.unwrap_or(st.cfg.strict);
-                    doc.page_break_placeholder = options.md_page_break_placeholder.clone();
+                    doc.strict_markdown = options.convert.strict.unwrap_or(st.cfg.strict);
+                    doc.page_break_placeholder = options.convert.page_break_placeholder.clone();
                     let md = match image_mode {
                         ImageMode::Placeholder => doc.export_to_markdown(),
                         _ => {
@@ -3105,7 +2697,10 @@ mod pipeline_flag_tests {
         let mut slot = None;
         let default_opts = ConvertOptions::default();
         let no_ocr_opts = ConvertOptions {
-            no_ocr: Some(true),
+            convert: docling::ConvertOptions {
+                no_ocr: Some(true),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         };
         assert!(warm_pipeline(&mut slot, &no_ocr_opts).is_ok());
@@ -3128,8 +2723,11 @@ mod pipeline_flag_tests {
     fn enrichment_flags_are_part_of_the_rebuild_guard() {
         let mut slot = None;
         let enriched = ConvertOptions {
-            do_picture_classification: Some(true),
-            do_formula_enrichment: Some(true),
+            convert: docling::ConvertOptions {
+                do_picture_classification: Some(true),
+                do_formula_enrichment: Some(true),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         };
         assert!(warm_pipeline(&mut slot, &enriched).is_ok());
@@ -3139,7 +2737,10 @@ mod pipeline_flag_tests {
         assert_ne!(built, PipelineFlags::default());
         // Explicit `false` and unset mean the same thing: off.
         let off = ConvertOptions {
-            do_code_enrichment: Some(false),
+            convert: docling::ConvertOptions {
+                do_code_enrichment: Some(false),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         };
         assert_eq!(PipelineFlags::of(&off), PipelineFlags::default());
@@ -3281,9 +2882,12 @@ mod vlm_tests {
 
     fn vlm_opts(endpoint: Option<&str>) -> ConvertOptions {
         ConvertOptions {
-            pipeline: Some("vlm".into()),
-            vlm_endpoint: endpoint.map(str::to_string),
-            vlm_model: Some("m".into()),
+            convert: docling::ConvertOptions {
+                pipeline: Some("vlm".into()),
+                vlm_endpoint: endpoint.map(str::to_string),
+                vlm_model: Some("m".into()),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         }
     }
@@ -3293,10 +2897,8 @@ mod vlm_tests {
         // Same contract as the Node bindings: no `pipeline=vlm`, no VLM — the
         // stray options are ignored, not rejected, and nothing is resolved.
         for pipeline in [None, Some("standard".to_string())] {
-            let options = ConvertOptions {
-                pipeline,
-                ..vlm_opts(Some("http://127.0.0.1:9/v1"))
-            };
+            let mut options = vlm_opts(Some("http://127.0.0.1:9/v1"));
+            options.convert.pipeline = pipeline;
             let resolved = resolve_vlm_options(&state(false), &options, true);
             assert!(matches!(resolved, Ok(None)));
         }
@@ -3305,7 +2907,10 @@ mod vlm_tests {
     #[test]
     fn unknown_pipeline_is_rejected() {
         let options = ConvertOptions {
-            pipeline: Some("magic".into()),
+            convert: docling::ConvertOptions {
+                pipeline: Some("magic".into()),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         };
         match resolve_vlm_options(&state(true), &options, false) {
@@ -3374,7 +2979,7 @@ mod vlm_tests {
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DOCLING_RS_VLM_ENDPOINT");
         let mut options = vlm_opts(Some("http://example.com/v1"));
-        options.vlm_max_tokens = Some(0);
+        options.convert.vlm_max_tokens = Some(0);
         match resolve_vlm_options(&state(true), &options, false) {
             Err(ApiError::Bad(m)) => assert!(m.contains("vlm_max_tokens"), "{m}"),
             _ => panic!("expected Bad"),
@@ -3382,7 +2987,10 @@ mod vlm_tests {
         // And without any endpoint at all, the error names this surface's
         // option spelling, not the CLI flag.
         let none = ConvertOptions {
-            pipeline: Some("vlm".into()),
+            convert: docling::ConvertOptions {
+                pipeline: Some("vlm".into()),
+                ..Default::default()
+            },
             ..ConvertOptions::default()
         };
         match resolve_vlm_options(&state(true), &none, false) {
@@ -3394,10 +3002,10 @@ mod vlm_tests {
         }
         // The full option set reaches the resolved struct.
         let mut options = vlm_opts(Some("http://example.com/v1"));
-        options.vlm_api_key = Some("sk-test".into());
-        options.vlm_prompt = Some("Read the page.".into());
-        options.vlm_max_tokens = Some(512);
-        options.pages = Some("2-5".into());
+        options.convert.vlm_api_key = Some("sk-test".into());
+        options.convert.vlm_prompt = Some("Read the page.".into());
+        options.convert.vlm_max_tokens = Some(512);
+        options.convert.pages = Some("2-5".into());
         let v = resolve_vlm_options(&state(true), &options, false)
             .ok()
             .flatten()

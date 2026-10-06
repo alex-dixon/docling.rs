@@ -29,6 +29,7 @@ pub mod dclx;
 pub mod email_attachments;
 mod error;
 mod format;
+pub mod options;
 mod result;
 mod sniff;
 mod source;
@@ -46,6 +47,9 @@ pub use converter::{parse_page_range, DocumentConverter, DEFAULT_VIDEO_FRAMES};
 pub use email_attachments::{EmailAttachmentInfo, EmailAttachments};
 pub use error::ConversionError;
 pub use format::InputFormat;
+pub use options::{
+    cli_flag, merge_options, ConvertOptions, OptionInfo, OptionsError, PipelineKind, OPTIONS,
+};
 pub use result::{ConversionResult, ConversionStatus, ErrorItem};
 pub use source::SourceDocument;
 #[cfg(feature = "pdf")]

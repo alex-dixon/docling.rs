@@ -57,6 +57,11 @@ convert(
   max_pages?: number,                      // convert only the first N PDF pages
   page_break_placeholder?: string,         // text between pages in Markdown, e.g. "<!-- page break -->"
 ): string
+convert_with_options(            // #577: the same options as the CLI / serve / C ABI, one JSON object
+  bytes: Uint8Array,
+  filename: string,
+  options_json?: string,                   // JSON: { to, images, ...docling ConvertOptions }
+): string
 supported_extensions(): string   // JSON array, e.g. for <input accept=…>
 version(): string
 
@@ -70,6 +75,18 @@ The filename's extension drives format detection, same as the CLI. `images`
 mirrors docling-serve's option: `placeholder` emits docling's `<!-- image -->`,
 `embedded` inlines the picture as a `data:` URI so the Markdown is
 self-contained (a page has no filesystem, so there is no `referenced` mode).
+
+`convert_with_options` takes one JSON object instead of positional arguments:
+`to` and `images` as above, plus every key of the shared
+[`docling::ConvertOptions`](../docling/src/options.rs) — `strict`,
+`compact_tables`, `page_break_placeholder`, `pages` (`"A-B"`), `encoding`,
+`skip_empty_cells`, `list_attachments`, `xbrl_taxonomy`, … (the full table is
+[`docs/OPTIONS.md`](../../docs/OPTIONS.md)). The ML-pipeline options are
+accepted and inert in this build; an unknown key is an error.
+
+```js
+const md = convert_with_options(bytes, file.name, JSON.stringify({ strict: true, pages: "1-3" }));
+```
 
 ### Convert a file the user picked
 

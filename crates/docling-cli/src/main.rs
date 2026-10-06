@@ -342,51 +342,21 @@ fn main() -> ExitCode {
         }
     }
 
-    let mut strict = false;
+    // Every conversion option lands in the shared `ConvertOptions` (#577):
+    // the flags below only parse their values; the rejection rules and the
+    // mapping onto the converter are the library's, the same the other
+    // surfaces (serve, the bindings, the C ABI) apply.
+    let mut opts = docling::ConvertOptions::default();
     // `--to` is repeatable (#491, Python's `--to md --to json`): every
     // occurrence — or comma-separated entry — is collected here and resolved
     // to a de-duplicated format list below; empty means Markdown.
     let mut to: Vec<String> = Vec::new();
     // `None` = not given: placeholder, except embedded for `--to pandoc` (#537).
     let mut images: Option<String> = None;
-    let mut fetch_images = false;
-    let mut list_attachments = false;
-    let mut skip_empty_cells = false;
-    let mut compact_tables = false;
-    let mut page_break_placeholder: Option<String> = None;
-    let mut ebcdic_layout: Option<String> = None;
     let mut no_stream = false;
-    let mut no_table_former = false;
-    let mut no_ocr = false;
-    let mut skip_ocr = false;
-    let mut force_full_page_ocr = false;
-    let mut no_text_panels = false;
-    let mut heading_hierarchy = false;
-    let mut use_web_browser = false;
-    let mut asr_model: Option<String> = None;
-    let mut asr_lang: Option<String> = None;
-    let mut encoding: Option<String> = None;
-    let mut video_frames: Option<usize> = None;
-    let mut xbrl_taxonomy: Option<std::path::PathBuf> = None;
-    let mut enrich_picture_classes = false;
-    let mut enrich_code = false;
-    let mut enrich_formula = false;
     let mut bench_warm: Option<usize> = None;
-    let mut pages: Option<(usize, usize)> = None;
     let mut scale: f32 = 2.0;
-    let mut ocr_lang: Option<String> = None;
-    let mut ocr_mode: Option<String> = None;
-    let mut ocr_engine: Option<String> = None;
-    let mut ocr_scale: Option<f32> = None;
-    let mut images_scale: Option<f32> = None;
-    let mut page_images = false;
     let mut chunk_opts = docling::chunks::ChunkOptions::default();
-    let mut pipeline: Option<String> = None;
-    let mut vlm_endpoint: Option<String> = None;
-    let mut vlm_model: Option<String> = None;
-    let mut vlm_api_key: Option<String> = None;
-    let mut vlm_prompt: Option<String> = None;
-    let mut vlm_max_tokens: Option<usize> = None;
     // Positional sources (#489): files, directories or quoted globs, any
     // number of them — one is the classic single-file (stdout) mode, more
     // than one (or a directory) is a batch and needs `--output`.
@@ -395,26 +365,25 @@ fn main() -> ExitCode {
     let mut abort_on_error = false;
     let mut output: Option<String> = None;
     let mut output_dirs = OutputDirs::Auto;
-    let mut document_timeout: Option<std::time::Duration> = None;
     let mut jobs: usize = 1;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--strict" => strict = true,
-            "--fetch-images" => fetch_images = true,
+            "--strict" => opts.strict = Some(true),
+            "--fetch-images" => opts.fetch_images = Some(true),
             // #251: append an Attachments section to converted emails
             // (.eml/.msg) — names and content types only.
-            "--list-attachments" => list_attachments = true,
+            "--list-attachments" => opts.list_attachments = Some(true),
             // Sparse-spreadsheet compaction (#271, docling.rs extensions):
             // omit empty cells from XLSX/XLS table grids, and/or render all
             // Markdown tables compact (no width padding).
-            "--skip-empty-cells" => skip_empty_cells = true,
-            "--compact-tables" => compact_tables = true,
+            "--skip-empty-cells" => opts.skip_empty_cells = Some(true),
+            "--compact-tables" => opts.compact_tables = Some(true),
             // docling's `page_break_placeholder`: the text that separates
             // pages in Markdown (an empty TEXT is allowed — upstream then
             // leaves a doubled blank line between pages).
             "--page-break-placeholder" => match args.next() {
-                Some(v) => page_break_placeholder = Some(v),
+                Some(v) => opts.page_break_placeholder = Some(v),
                 None => {
                     eprintln!("error: --page-break-placeholder needs the text to insert");
                     return ExitCode::from(2);
@@ -423,28 +392,28 @@ fn main() -> ExitCode {
             // #252: EBCDIC copybook layout — inline JSON or a file path
             // (default: the <stem>.layout.json sidecar next to the source).
             "--ebcdic-layout" => match args.next() {
-                Some(v) => ebcdic_layout = Some(v),
+                Some(v) => opts.ebcdic_layout = Some(v),
                 None => {
                     eprintln!("error: --ebcdic-layout needs a JSON string or file path");
                     return ExitCode::from(2);
                 }
             },
             "--no-stream" => no_stream = true,
-            "--no-table-former" => no_table_former = true,
-            "--no-ocr" => no_ocr = true,
+            "--no-table-former" => opts.no_table_former = Some(true),
+            "--no-ocr" => opts.no_ocr = Some(true),
             // #244: keep layout + TableFormer, never OCR (docling's
             // independent do_ocr=False) — unlike --no-ocr, which skips the
             // whole ML stack.
-            "--skip-ocr" => skip_ocr = true,
-            "--force-full-page-ocr" => force_full_page_ocr = true,
-            "--no-text-panels" => no_text_panels = true,
-            "--heading-hierarchy" => heading_hierarchy = true,
-            "--use-web-browser" => use_web_browser = true,
+            "--skip-ocr" => opts.skip_ocr = Some(true),
+            "--force-full-page-ocr" => opts.force_full_page_ocr = Some(true),
+            "--no-text-panels" => opts.no_text_panels = Some(true),
+            "--heading-hierarchy" => opts.heading_hierarchy = Some(true),
+            "--use-web-browser" => opts.use_web_browser = Some(true),
             // Opt-in enrichment models (docling CLI flag names): picture
             // classification, code rewrite + language, formula LaTeX.
-            "--enrich-picture-classes" => enrich_picture_classes = true,
-            "--enrich-code" => enrich_code = true,
-            "--enrich-formula" => enrich_formula = true,
+            "--enrich-picture-classes" => opts.do_picture_classification = Some(true),
+            "--enrich-code" => opts.do_code_enrichment = Some(true),
+            "--enrich-formula" => opts.do_formula_enrichment = Some(true),
             "--abort-on-error" => abort_on_error = true,
             "--output-dirs" => match args.next().as_deref().map(OutputDirs::parse) {
                 Some(Some(mode)) => output_dirs = mode,
@@ -458,7 +427,7 @@ fn main() -> ExitCode {
                 }
             },
             "--document-timeout" => match args.next().as_deref().map(parse_document_timeout) {
-                Some(Ok(t)) => document_timeout = Some(t),
+                Some(Ok(t)) => opts.document_timeout = Some(t),
                 Some(Err(e)) => {
                     eprintln!("error: --document-timeout: {e}");
                     return ExitCode::from(2);
@@ -501,14 +470,14 @@ fn main() -> ExitCode {
             // Named Whisper preset for audio inputs (English-only /
             // Distil-Whisper variants under .models/asr/<preset>/; fetch with
             // download_dependencies.sh --asr-model=<preset>).
-            "--asr-model" => asr_model = args.next(),
+            "--asr-model" => opts.asr_model = args.next(),
             // Transcription language (or "auto"); validated against the model's
             // vocabulary at conversion time.
-            "--asr-lang" => asr_lang = args.next(),
+            "--asr-lang" => opts.asr_lang = args.next(),
             // Character encoding of text inputs; validated when a text backend
             // first decodes the file.
             "--encoding" => match args.next() {
-                Some(label) => encoding = Some(label),
+                Some(label) => opts.encoding = Some(label),
                 None => {
                     eprintln!("error: --encoding needs an encoding label (e.g. shift_jis)");
                     std::process::exit(2);
@@ -520,16 +489,14 @@ fn main() -> ExitCode {
             // swallowed silently and the default applied, so a typo
             // (`--video-frames 1O`) went unnoticed.
             "--video-frames" => match args.next().map(|v| v.trim().parse::<usize>()) {
-                Some(Ok(n)) => video_frames = Some(n),
+                Some(Ok(n)) => opts.video_frames = Some(n),
                 _ => {
                     eprintln!("error: --video-frames needs a non-negative integer");
                     return ExitCode::from(2);
                 }
             },
             "--xbrl-taxonomy" => match args.next() {
-                Some(dir) if !dir.trim().is_empty() => {
-                    xbrl_taxonomy = Some(std::path::PathBuf::from(dir))
-                }
+                Some(dir) if !dir.trim().is_empty() => opts.xbrl_taxonomy = Some(dir),
                 _ => {
                     eprintln!("error: --xbrl-taxonomy needs a directory");
                     return ExitCode::from(2);
@@ -559,12 +526,10 @@ fn main() -> ExitCode {
                 }
             },
             // PDF page window, 1-based inclusive: `--pages 3-7` or `--pages 3`.
-            "--pages" => match args.next().as_deref().map(docling::parse_page_range) {
-                Some(Ok(range)) => pages = Some(range),
-                Some(Err(e)) => {
-                    eprintln!("error: --pages: {e}");
-                    return ExitCode::from(2);
-                }
+            "--pages" => match args.next() {
+                // Checked by `validate()` below like every other option; a
+                // missing value is a usage error of its own.
+                Some(v) => opts.pages = Some(v),
                 None => {
                     eprintln!("error: --pages needs a range like 1-10 (or a single page)");
                     return ExitCode::from(2);
@@ -577,7 +542,7 @@ fn main() -> ExitCode {
             // may come later on the line, and `deu` is only a language to
             // Tesseract.
             "--ocr-lang" => match args.next() {
-                Some(v) => ocr_lang = Some(v),
+                Some(v) => opts.ocr_lang = Some(v),
                 None => {
                     eprintln!(
                         "error: --ocr-lang needs a value (en | ch | a BCP-47 tag; tessdata \
@@ -589,14 +554,7 @@ fn main() -> ExitCode {
             // Which OCR engine reads scanned pages (#460): the built-in
             // PP-OCRv3 recognizer (default) or the system tesseract binary.
             "--ocr-engine" => match args.next() {
-                Some(v) if docling::OcrEngine::parse(&v).is_some() => ocr_engine = Some(v),
-                Some(v) => {
-                    eprintln!(
-                        "error: --ocr-engine {v:?} is not {}",
-                        docling::OcrEngine::ACCEPTED
-                    );
-                    return ExitCode::from(2);
-                }
+                Some(v) => opts.ocr_engine = Some(v),
                 None => {
                     eprintln!("error: --ocr-engine needs a value (ppocr | tesseract)");
                     return ExitCode::from(2);
@@ -607,21 +565,7 @@ fn main() -> ExitCode {
             // --force-full-page-ocr; pdf_aware_layout_regions (= default) is
             // the standard text-layer-aware behavior.
             "--ocr-mode" => match args.next() {
-                Some(v)
-                    if matches!(
-                        v.trim(),
-                        "default" | "full_page" | "layout_regions" | "pdf_aware_layout_regions"
-                    ) =>
-                {
-                    ocr_mode = Some(v)
-                }
-                Some(v) => {
-                    eprintln!(
-                        "error: --ocr-mode {v:?} is not \
-                         default|full_page|layout_regions|pdf_aware_layout_regions"
-                    );
-                    return ExitCode::from(2);
-                }
+                Some(v) => opts.ocr_mode = Some(v),
                 None => {
                     eprintln!("error: --ocr-mode needs a value");
                     return ExitCode::from(2);
@@ -631,7 +575,7 @@ fn main() -> ExitCode {
             // OcrOptions.scale, #254): unset reads the pipeline's own 2.0
             // px/pt render; docling's default is 3 (216 dpi).
             "--ocr-scale" => match args.next().map(|v| v.trim().parse::<f32>()) {
-                Some(Ok(s)) if s > 0.0 && s.is_finite() => ocr_scale = Some(s),
+                Some(Ok(s)) => opts.ocr_scale = Some(s),
                 Some(_) => {
                     eprintln!("error: --ocr-scale needs a positive number");
                     return ExitCode::from(2);
@@ -644,7 +588,7 @@ fn main() -> ExitCode {
             // Picture crops / page images in px per PDF point (docling's
             // images_scale, #520); the same 0.1-4.0 window as `--scale`.
             "--images-scale" => match args.next().and_then(|v| v.trim().parse::<f32>().ok()) {
-                Some(v) if (0.1..=4.0).contains(&v) => images_scale = Some(v),
+                Some(v) => opts.images_scale = Some(v),
                 _ => {
                     eprintln!(
                         "error: --images-scale needs a number in 0.1-4.0 \
@@ -653,7 +597,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
-            "--page-images" => page_images = true,
+            "--page-images" => opts.page_images = Some(true),
             // Per-run `--to chunks` configuration (#256, mirrors the serve
             // fields / docling's service-datamodel `HybridChunkerOptions`);
             // the DOCLING_CHUNK_* env knobs stay the defaults.
@@ -687,28 +631,23 @@ fn main() -> ExitCode {
             // `vlm` — render pages and convert them through a remote
             // OpenAI-compatible vision endpoint returning DocLang.
             "--pipeline" => match args.next() {
-                Some(v) if matches!(v.trim(), "standard" | "vlm") => pipeline = Some(v),
-                Some(v) => {
-                    eprintln!("error: --pipeline {v:?} is not standard|vlm");
-                    return ExitCode::from(2);
-                }
+                Some(v) => opts.pipeline = Some(v),
                 None => {
                     eprintln!("error: --pipeline needs a value (standard|vlm)");
                     return ExitCode::from(2);
                 }
             },
-            "--vlm-endpoint" => vlm_endpoint = args.next(),
-            "--vlm-model" => vlm_model = args.next(),
+            "--vlm-endpoint" => opts.vlm_endpoint = args.next(),
+            "--vlm-model" => opts.vlm_model = args.next(),
             // #312: the remaining VlmOptions knobs, for parity with the Node/
             // Python bindings and serve (previously env-only, or — for
             // max_tokens — not settable at all). Inert without --pipeline vlm,
             // like every other --vlm-* flag.
-            "--vlm-api-key" => vlm_api_key = args.next(),
-            "--vlm-prompt" => vlm_prompt = args.next(),
+            "--vlm-api-key" => opts.vlm_api_key = args.next(),
+            "--vlm-prompt" => opts.vlm_prompt = args.next(),
             "--vlm-max-tokens" => match args.next().map(|v| v.trim().parse::<usize>()) {
-                // 0 would have every page come back empty and surface as a
-                // model error — reject it here, like the other bindings do.
-                Some(Ok(n)) if n > 0 => vlm_max_tokens = Some(n),
+                // 0 is rejected by `validate()` below, like the other surfaces do.
+                Some(Ok(n)) => opts.vlm_max_tokens = Some(n),
                 _ => {
                     eprintln!("error: --vlm-max-tokens needs a positive integer");
                     return ExitCode::from(2);
@@ -756,19 +695,31 @@ fn main() -> ExitCode {
         }
     }
     let to = formats;
-    // `--ocr-lang` is checked against the engine it will drive, whichever
-    // order the two flags came in: en/ch (or a BCP-47 tag for either) under
-    // PP-OCR, tessdata stems or BCP-47 tags under Tesseract.
-    if let Some(lang) = &ocr_lang {
-        let engine = ocr_engine
-            .as_deref()
-            .and_then(docling::OcrEngine::parse)
-            .unwrap_or_else(docling::OcrEngine::from_env);
-        if let Err(e) = engine.validate_lang(lang) {
-            eprintln!("error: --ocr-lang: {e}");
+    // The one validation pass every surface runs (#577): `--pages`,
+    // `--document-timeout`, the OCR engine/mode/scale, `--ocr-lang` against
+    // the engine it will drive (whichever order the two flags came in),
+    // `--pipeline`, `--vlm-max-tokens` — reported with the CLI's flag
+    // spelling, before any file is touched.
+    if let Err(e) = opts.validate() {
+        eprintln!("error: {}", e.cli_message());
+        return ExitCode::from(2);
+    }
+    // `--pipeline vlm` resolves its endpoint/model now (flags, else the
+    // `DOCLING_RS_VLM_*` environment) so a missing one is a usage error, not
+    // a failure after the file was read.
+    let vlm = match opts.vlm_options() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {}", e.cli_message());
             return ExitCode::from(2);
         }
-    }
+    };
+    // Validated above; read back as typed values where the paths below
+    // need them.
+    let pages = opts.page_range().ok().flatten();
+    let strict = opts.strict.unwrap_or(false);
+    let no_ocr = opts.no_ocr.unwrap_or(false);
+    let page_break_placeholder = opts.page_break_placeholder.clone();
     let image_mode = match images.as_deref().unwrap_or("placeholder") {
         "placeholder" => ImageMode::Placeholder,
         "embedded" => ImageMode::Embedded,
@@ -850,61 +801,15 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             return ExitCode::from(2);
         }
-        let vlm = if pipeline.as_deref() == Some("vlm") {
-            match resolve_vlm_flags(
-                vlm_endpoint,
-                vlm_model,
-                vlm_api_key,
-                vlm_prompt,
-                vlm_max_tokens,
-                pages,
-            ) {
-                Ok(o) => Some(o),
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    return ExitCode::from(2);
-                }
-            }
-        } else {
-            None
-        };
         let cfg = BatchCfg {
             to,
             image_mode,
             pandoc_image_mode,
-            strict,
-            fetch_images,
-            list_attachments,
-            skip_empty_cells,
-            compact_tables,
-            page_break_placeholder,
-            ebcdic_layout,
-            no_table_former,
-            no_ocr,
-            skip_ocr,
-            force_full_page_ocr,
-            no_text_panels,
-            heading_hierarchy,
-            use_web_browser,
-            enrich_picture_classes,
-            enrich_code,
-            enrich_formula,
-            asr_model,
-            asr_lang,
-            encoding,
-            video_frames,
-            xbrl_taxonomy: xbrl_taxonomy.clone(),
+            opts,
             pages,
-            ocr_lang,
-            ocr_mode,
-            ocr_engine,
-            ocr_scale,
-            images_scale,
-            page_images,
             scale,
             chunk: chunk_opts.clone(),
             vlm,
-            document_timeout,
         };
         return run_batch(
             items,
@@ -948,7 +853,12 @@ fn main() -> ExitCode {
     let is_pdf = source.format == InputFormat::Pdf;
 
     if let Some(runs) = bench_warm {
-        return match bench_warm_conversion(&source, runs, no_table_former, no_ocr) {
+        return match bench_warm_conversion(
+            &source,
+            runs,
+            opts.no_table_former.unwrap_or(false),
+            no_ocr,
+        ) {
             Ok(avg) => {
                 // Bare seconds on stdout for the benchmark harness; a human line on stderr.
                 println!("{avg:.6}");
@@ -997,22 +907,8 @@ fn main() -> ExitCode {
     // #77: the remote-VLM pipeline replaces the whole ML stack — convert,
     // then fall through to the regular output selection (md/json/dclx/chunks
     // all work; there is no page-streaming, the endpoint is the bottleneck).
-    if pipeline.as_deref() == Some("vlm") {
-        let opts = match resolve_vlm_flags(
-            vlm_endpoint,
-            vlm_model,
-            vlm_api_key,
-            vlm_prompt,
-            vlm_max_tokens,
-            pages,
-        ) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::from(2);
-            }
-        };
-        let mut document = match docling::vlm::convert_vlm(&source, &opts) {
+    if let Some(vlm) = &vlm {
+        let mut document = match docling::vlm::convert_vlm(&source, vlm) {
             Ok(doc) => doc,
             Err(e) => {
                 eprintln!("error: {e}");
@@ -1024,54 +920,15 @@ fn main() -> ExitCode {
         return output_document(document, &to, image_mode, &path, &chunk_opts);
     }
 
-    let mut converter = DocumentConverter::new()
-        .strict(strict)
-        .asr_model(asr_model.clone())
-        .asr_lang(asr_lang.clone())
-        .encoding(encoding.clone())
-        .fetch_images(fetch_images)
-        .list_attachments(list_attachments)
-        .skip_empty_cells(skip_empty_cells)
-        .compact_tables(compact_tables)
-        .page_break_placeholder(page_break_placeholder.clone())
-        .ebcdic_layout_opt(ebcdic_layout.clone())
-        .no_table_former(no_table_former)
-        .skip_ocr(skip_ocr)
-        .no_ocr(no_ocr)
-        .force_full_page_ocr(force_full_page_ocr)
-        .no_text_panels(no_text_panels)
-        .heading_hierarchy(heading_hierarchy)
-        .use_web_browser(use_web_browser)
-        .do_picture_classification(enrich_picture_classes)
-        .do_code_enrichment(enrich_code)
-        .do_formula_enrichment(enrich_formula);
-    if let Some(max) = video_frames {
-        converter = converter.video_frames(max);
-    }
-    if let Some(dir) = xbrl_taxonomy {
-        converter = converter.xbrl_taxonomy(dir);
-    }
-    if let Some((first, last)) = pages {
-        converter = converter.page_range(first, last);
-    }
-    if let Some(lang) = &ocr_lang {
-        converter = converter.ocr_lang(lang.clone());
-    }
-    if let Some(mode) = &ocr_mode {
-        converter = converter.ocr_mode(mode.clone());
-    }
-    if let Some(engine) = &ocr_engine {
-        converter = converter.ocr_engine(engine.clone());
-    }
-    if let Some(s) = ocr_scale {
-        converter = converter.ocr_scale(s);
-    }
-    if let Some(s) = images_scale {
-        converter = converter.images_scale(s);
-    }
-    converter = converter
-        .generate_page_images(page_images)
-        .document_timeout(document_timeout);
+    // Validated above, so this cannot fail; the mapping onto the builder is
+    // the library's, shared with every other surface (#577).
+    let converter = match DocumentConverter::from_options(&opts) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}", e.cli_message());
+            return ExitCode::from(2);
+        }
+    };
 
     // Stream Markdown by default: print each chunk as the converter produces it
     // (page by page for PDF). Referenced images stream too (#80): each page's
@@ -1208,36 +1065,6 @@ fn pdf_no_ocr_fallback(
     }
 }
 
-/// Resolve `--pipeline vlm`'s options from the flags (#77, #312): endpoint
-/// and model fall back to `DOCLING_RS_VLM_ENDPOINT` / `DOCLING_RS_VLM_MODEL`,
-/// and `--vlm-api-key` / `--vlm-prompt` / `--vlm-max-tokens` override their
-/// env-or-default values when given (max_tokens is validated > 0 at parse).
-/// Blank values count as unset, matching the env helpers and the other
-/// bindings; `--pages` composes exactly as with the ML pipeline.
-fn resolve_vlm_flags(
-    endpoint: Option<String>,
-    model: Option<String>,
-    api_key: Option<String>,
-    prompt: Option<String>,
-    max_tokens: Option<usize>,
-    page_range: Option<(usize, usize)>,
-) -> Result<docling::vlm::VlmOptions, String> {
-    let set = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
-    let mut o =
-        docling::vlm::VlmOptions::resolve(set(endpoint), set(model)).map_err(|e| e.to_string())?;
-    if let Some(k) = set(api_key) {
-        o.api_key = Some(k);
-    }
-    if let Some(p) = set(prompt) {
-        o.prompt = Some(p);
-    }
-    if let Some(n) = max_tokens {
-        o.max_tokens = n;
-    }
-    o.page_range = page_range;
-    Ok(o)
-}
-
 /// The buffered output tail shared by the standard (non-streaming) and VLM
 /// paths: `--to` selection, image sidecars, exit code.
 /// The CLI flags a batch run freezes for every file (#205).
@@ -1249,50 +1076,16 @@ struct BatchCfg {
     /// `image_mode` for `--to pandoc`: embedded unless `--images` was given
     /// (#537).
     pandoc_image_mode: ImageMode,
-    strict: bool,
-    fetch_images: bool,
-    list_attachments: bool,
-    /// Omit empty cells from sparse spreadsheet grids (#271).
-    skip_empty_cells: bool,
-    /// Compact (unpadded) Markdown tables (#271).
-    compact_tables: bool,
-    /// docling's `page_break_placeholder`: text between pages in Markdown.
-    page_break_placeholder: Option<String>,
-    ebcdic_layout: Option<String>,
-    no_table_former: bool,
-    no_ocr: bool,
-    skip_ocr: bool,
-    force_full_page_ocr: bool,
-    no_text_panels: bool,
-    heading_hierarchy: bool,
-    use_web_browser: bool,
-    enrich_picture_classes: bool,
-    enrich_code: bool,
-    enrich_formula: bool,
-    asr_model: Option<String>,
-    asr_lang: Option<String>,
-    encoding: Option<String>,
-    video_frames: Option<usize>,
-    xbrl_taxonomy: Option<std::path::PathBuf>,
+    /// Every conversion option (#577), validated before the batch started.
+    opts: docling::ConvertOptions,
+    /// `opts.pages` parsed — the PDF page window.
     pages: Option<(usize, usize)>,
-    ocr_lang: Option<String>,
-    /// Which regions feed the OCR (docling's `OcrMode`, #254).
-    ocr_mode: Option<String>,
-    /// Which OCR engine reads scanned pages (#460): `ppocr` | `tesseract`.
-    ocr_engine: Option<String>,
-    /// OCR render scale in px/pt (docling's `OcrOptions.scale`, #254).
-    ocr_scale: Option<f32>,
-    /// Picture-crop / page-image scale (docling's `images_scale`, #520).
-    images_scale: Option<f32>,
-    /// Keep page renders as JSON page images (`generate_page_images`, #520).
-    page_images: bool,
     /// `--to images` render scale (pixels per PDF point, #243).
     scale: f32,
     /// Per-run `--to chunks` configuration (#256).
     chunk: ChunkOptions,
+    /// `--pipeline vlm` resolved (#77); `None` = the standard pipeline.
     vlm: Option<docling::vlm::VlmOptions>,
-    /// `--document-timeout` (#497): the PDF pipeline's per-document budget.
-    document_timeout: Option<std::time::Duration>,
 }
 
 /// `--output-dirs` (#496): how several inputs lay out under `--output`.
@@ -1402,7 +1195,7 @@ fn mirror_pair(
 
 /// `--document-timeout SECONDS`: a positive number of seconds (fractions
 /// allowed, like Python docling's float).
-fn parse_document_timeout(s: &str) -> Result<std::time::Duration, String> {
+fn parse_document_timeout(s: &str) -> Result<f64, String> {
     let secs: f64 = s
         .trim()
         .parse()
@@ -1410,7 +1203,7 @@ fn parse_document_timeout(s: &str) -> Result<std::time::Duration, String> {
     if !secs.is_finite() || secs <= 0.0 {
         return Err(format!("expected a positive number of seconds, got {s:?}"));
     }
-    Ok(std::time::Duration::from_secs_f64(secs))
+    Ok(secs)
 }
 
 /// Expand one source argument (#489) into (files, base): an existing file is
@@ -1683,53 +1476,7 @@ fn batch_out_path(file: &Path, base: &Path, output: &Path, to: &str) -> std::pat
 
 /// Mirror of the single-file converter construction for batch workers.
 fn batch_converter(cfg: &BatchCfg) -> DocumentConverter {
-    let mut converter = DocumentConverter::new()
-        .strict(cfg.strict)
-        .asr_model(cfg.asr_model.clone())
-        .asr_lang(cfg.asr_lang.clone())
-        .encoding(cfg.encoding.clone())
-        .fetch_images(cfg.fetch_images)
-        .list_attachments(cfg.list_attachments)
-        .skip_empty_cells(cfg.skip_empty_cells)
-        .compact_tables(cfg.compact_tables)
-        .page_break_placeholder(cfg.page_break_placeholder.clone())
-        .ebcdic_layout_opt(cfg.ebcdic_layout.clone())
-        .no_table_former(cfg.no_table_former)
-        .no_ocr(cfg.no_ocr)
-        .force_full_page_ocr(cfg.force_full_page_ocr)
-        .no_text_panels(cfg.no_text_panels)
-        .heading_hierarchy(cfg.heading_hierarchy)
-        .use_web_browser(cfg.use_web_browser)
-        .do_picture_classification(cfg.enrich_picture_classes)
-        .do_code_enrichment(cfg.enrich_code)
-        .do_formula_enrichment(cfg.enrich_formula);
-    if let Some(max) = cfg.video_frames {
-        converter = converter.video_frames(max);
-    }
-    if let Some(dir) = &cfg.xbrl_taxonomy {
-        converter = converter.xbrl_taxonomy(dir.clone());
-    }
-    if let Some((first, last)) = cfg.pages {
-        converter = converter.page_range(first, last);
-    }
-    if let Some(lang) = &cfg.ocr_lang {
-        converter = converter.ocr_lang(lang.clone());
-    }
-    if let Some(mode) = &cfg.ocr_mode {
-        converter = converter.ocr_mode(mode.clone());
-    }
-    if let Some(engine) = &cfg.ocr_engine {
-        converter = converter.ocr_engine(engine.clone());
-    }
-    if let Some(s) = cfg.ocr_scale {
-        converter = converter.ocr_scale(s);
-    }
-    if let Some(s) = cfg.images_scale {
-        converter = converter.images_scale(s);
-    }
-    converter
-        .generate_page_images(cfg.page_images)
-        .document_timeout(cfg.document_timeout)
+    DocumentConverter::from_options(&cfg.opts).expect("options validated before the batch")
 }
 
 /// The lazily-built warm PDF/image pipeline shared by every batch worker —
@@ -1741,40 +1488,31 @@ fn batch_pipeline<'a>(
     cfg: &BatchCfg,
 ) -> Result<&'a mut Pipeline, String> {
     if slot.is_none() {
-        let ocr_engine = cfg
-            .ocr_engine
-            .as_deref()
-            .and_then(docling::OcrEngine::parse);
+        // The typed readers of the validated option set (#577) — the same
+        // values `DocumentConverter::from_options` applies on the
+        // declarative path, here on the warm pipeline.
+        let o = &cfg.opts;
+        let err = |e: docling::OptionsError| e.cli_message();
         let mut p = Pipeline::new()
             .map_err(|e| e.to_string())?
-            .no_table_former(cfg.no_table_former)
-            .no_ocr(cfg.no_ocr)
-            .skip_ocr(cfg.skip_ocr)
-            .force_full_page_ocr(cfg.force_full_page_ocr)
-            .no_text_panels(cfg.no_text_panels)
+            .no_table_former(o.no_table_former.unwrap_or(false))
+            .no_ocr(o.no_ocr.unwrap_or(false))
+            .skip_ocr(o.skip_ocr.unwrap_or(false))
+            .force_full_page_ocr(o.force_full_page_ocr.unwrap_or(false))
+            .no_text_panels(o.no_text_panels.unwrap_or(false))
             .heading_hierarchy(docling::HeadingHierarchyOptions::enabled(
-                cfg.heading_hierarchy,
+                o.heading_hierarchy.unwrap_or(false),
             ))
-            .ocr_mode(cfg.ocr_mode.as_deref().and_then(docling::OcrMode::parse))
-            .ocr_engine(ocr_engine)
-            .tesseract_lang(if ocr_engine == Some(docling::OcrEngine::Tesseract) {
-                cfg.ocr_lang
-                    .as_deref()
-                    .and_then(|l| docling::tesseract_lang_arg(l).ok())
-            } else {
-                None
-            })
-            .ocr_scale(cfg.ocr_scale)
-            .images_scale(cfg.images_scale)
-            .generate_page_images(cfg.page_images)
-            .enrichments(docling::EnrichmentOptions {
-                picture_classification: cfg.enrich_picture_classes,
-                code: cfg.enrich_code,
-                formula: cfg.enrich_formula,
-            })
-            .document_timeout(cfg.document_timeout);
+            .ocr_mode(o.ocr_mode().map_err(err)?)
+            .ocr_engine(o.ocr_engine().map_err(err)?)
+            .tesseract_lang(o.tesseract_lang().map_err(err)?)
+            .ocr_scale(o.ocr_scale)
+            .images_scale(o.images_scale)
+            .generate_page_images(o.page_images.unwrap_or(false))
+            .enrichments(o.enrichments())
+            .document_timeout(o.document_timeout().map_err(err)?);
         p.set_pages(cfg.pages);
-        p.set_ocr_lang(cfg.ocr_lang.as_deref().and_then(docling::OcrLang::parse));
+        p.set_ocr_lang(o.ocr_lang().map_err(err)?);
         // Dot-progress on stderr: one dot per 10 finished pages, newline when
         // the document completes (only if any dots were printed).
         p.set_progress(Some(std::sync::Arc::new(|done: usize, total: usize| {
@@ -1915,8 +1653,8 @@ fn batch_convert_one(
         partial.extend(result.errors.into_iter().map(|e| e.error_message));
         result.document
     };
-    document.strict_markdown = cfg.strict;
-    document.page_break_placeholder = cfg.page_break_placeholder.clone();
+    document.strict_markdown = cfg.opts.strict.unwrap_or(false);
+    document.page_break_placeholder = cfg.opts.page_break_placeholder.clone();
 
     for to in formats {
         let out = batch_out_path(file, base, output, to);
@@ -2551,14 +2289,8 @@ mod tests {
     /// `--document-timeout` (#497) takes a positive number of seconds.
     #[test]
     fn document_timeout_parses_positive_seconds() {
-        assert_eq!(
-            parse_document_timeout("90").unwrap(),
-            std::time::Duration::from_secs(90)
-        );
-        assert_eq!(
-            parse_document_timeout(" 0.5 ").unwrap(),
-            std::time::Duration::from_millis(500)
-        );
+        assert_eq!(parse_document_timeout("90").unwrap(), 90.0);
+        assert_eq!(parse_document_timeout(" 0.5 ").unwrap(), 0.5);
         assert!(parse_document_timeout("0").is_err());
         assert!(parse_document_timeout("-3").is_err());
         assert!(parse_document_timeout("soon").is_err());

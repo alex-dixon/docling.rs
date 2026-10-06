@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use serde::Serialize;
 
 use docling::{
     ConversionStatus, DoclingDocument, DocumentConverter as RsConverter, ImageMode, InputFormat,
@@ -29,7 +30,7 @@ use docling::{
 
 /// Config for a reusable [`DocumentConverter`].
 #[napi(object)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct ConverterOptions {
     /// Named Whisper model preset for audio sources (English-only /
     /// Distil-Whisper variants under `.models/asr/<preset>/`).
@@ -101,6 +102,13 @@ pub struct ConverterOptions {
     /// pixels (scanned pages, text inside images) comes back empty.
     /// Default `false`.
     pub skip_ocr: Option<bool>,
+    /// Skip the whole PDF ML stack and read the embedded text layer only —
+    /// the CLI's `--no-ocr` (#577: the option every other surface had).
+    /// Default `false`.
+    pub no_ocr: Option<bool>,
+    /// Skip TableFormer — tables come from the layout model's geometry
+    /// instead (the CLI's `--no-table-former`, #577). Default `false`.
+    pub no_table_former: Option<bool>,
     /// OCR every PDF page even when it carries an embedded text layer
     /// (docling's `force_full_page_ocr`) — for text layers that exist but lie.
     /// Default `false`.
@@ -206,7 +214,7 @@ pub struct OutputOptions {
 /// All options for the one-shot module-level functions (converter config +
 /// output options in a single object).
 #[napi(object)]
-#[derive(Clone, Default)]
+#[derive(Serialize, Clone, Default)]
 pub struct ConvertOptions {
     pub strict: Option<bool>,
     pub fetch_images: Option<bool>,
@@ -262,6 +270,13 @@ pub struct ConvertOptions {
     /// pixels (scanned pages, text inside images) comes back empty.
     /// Default `false`.
     pub skip_ocr: Option<bool>,
+    /// Skip the whole PDF ML stack and read the embedded text layer only —
+    /// the CLI's `--no-ocr` (#577: the option every other surface had).
+    /// Default `false`.
+    pub no_ocr: Option<bool>,
+    /// Skip TableFormer — tables come from the layout model's geometry
+    /// instead (the CLI's `--no-table-former`, #577). Default `false`.
+    pub no_table_former: Option<bool>,
     /// OCR every PDF page even when it carries a text layer (docling's
     /// `force_full_page_ocr`). Default `false`.
     pub force_full_page_ocr: Option<bool>,
@@ -409,32 +424,9 @@ impl RawArchiveItem {
 /// Fully-resolved conversion config, free of any napi/JS types so it can move
 /// onto a worker thread for the async and streaming paths.
 struct ConvertConfig {
-    strict: bool,
-    fetch_images: bool,
-    asr_model: Option<String>,
-    asr_lang: Option<String>,
-    encoding: Option<String>,
-    video_frames: Option<usize>,
-    xbrl_taxonomy: Option<String>,
-    page_range: Option<(usize, usize)>,
-    /// docling's `document_timeout` (#497).
-    document_timeout: Option<std::time::Duration>,
-    ocr_lang: Option<String>,
-    ocr_mode: Option<String>,
-    ocr_engine: Option<String>,
-    ocr_scale: Option<f32>,
-    images_scale: Option<f32>,
-    page_images: bool,
-    list_attachments: bool,
-    skip_empty_cells: bool,
-    compact_tables: bool,
-    ebcdic_layout: Option<String>,
-    skip_ocr: bool,
-    force_full_page_ocr: bool,
-    no_text_panels: bool,
-    heading_hierarchy: bool,
-    /// Opt-in enrichment passes (#423), all off by default.
-    enrich: docling::EnrichmentOptions,
+    /// The shared conversion options (#577), validated on the way in — the
+    /// `DocumentConverter` is built from them by the library's own mapping.
+    opts: docling::ConvertOptions,
     /// `Some` only for `pipeline: "vlm"` (#77), already resolved against the
     /// `DOCLING_RS_VLM_*` environment. Its presence *is* the pipeline switch:
     /// [`run_convert`] short-circuits the whole ML stack when it is set.
@@ -443,7 +435,9 @@ struct ConvertConfig {
     to: OutputKind,
     image_mode: ImageMode,
     artifacts_dir: String,
-    /// docling's `page_break_placeholder` for the Markdown export.
+    /// docling's `page_break_placeholder` for the Markdown export (an
+    /// *output* option on this surface — `OutputOptions` — so it overrides
+    /// whatever the converter options carry).
     page_break_placeholder: Option<String>,
 }
 
@@ -494,8 +488,46 @@ impl RawResult {
     }
 }
 
+/// The shared option set (#577) read off a napi options object: serde
+/// serializes the Rust fields — snake_case, the wire names — and the keys
+/// `docling::ConvertOptions` lacks (`to`, `imageMode`, `allowedFormats`, …)
+/// are this surface's own and left behind. One mapping for the one-shot
+/// options, the `DocumentConverter` class and the warm `Pipeline`.
+fn shared_options<T: Serialize>(o: &T) -> Result<docling::ConvertOptions> {
+    serde_json::to_value(o)
+        .and_then(serde_json::from_value)
+        .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))
+}
+
+/// A rejected option as this surface's error: `InvalidArg` (a bad call, not
+/// a conversion that went wrong), the option named as TypeScript spells it
+/// (`ocrLang`, `documentTimeout`, `vlmEndpoint`).
+fn option_err(e: docling::OptionsError) -> Error {
+    Error::new(
+        Status::InvalidArg,
+        e.message.replacen(e.field, &camel_case(e.field), 1),
+    )
+}
+
+/// `ocr_lang` → `ocrLang`: napi's rename of the option fields.
+fn camel_case(snake: &str) -> String {
+    let mut out = String::with_capacity(snake.len());
+    let mut upper = false;
+    for c in snake.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.extend(c.to_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn build_config(o: ConvertOptions) -> Result<ConvertConfig> {
-    let allowed = match o.allowed_formats {
+    let allowed = match &o.allowed_formats {
         Some(list) => Some(
             list.iter()
                 .map(|s| parse_format(s))
@@ -503,280 +535,38 @@ fn build_config(o: ConvertOptions) -> Result<ConvertConfig> {
         ),
         None => None,
     };
-    let page_range = parse_pages(o.pages.as_deref())?;
+    let opts = shared_options(&o)?;
+    // Validated at option-parsing time, not at conversion time, so a bad
+    // option fails fast on the call instead of after a file has been read —
+    // and `pipeline: "vlm"` resolves its endpoint/model now for the same
+    // reason (the standard pipeline ignores stray `vlm*` options, the CLI's
+    // rule too; pinned by `standard_pipeline_ignores_vlm_options`).
+    opts.validate().map_err(option_err)?;
+    let vlm = opts.vlm_options().map_err(option_err)?;
+    let to = parse_output_kind(o.to.as_deref())?;
     Ok(ConvertConfig {
-        strict: o.strict.unwrap_or(false),
-        fetch_images: o.fetch_images.unwrap_or(false),
-        asr_model: o.asr_model,
-        asr_lang: o.asr_lang,
-        encoding: o.encoding,
-        video_frames: o.video_frames.map(|n| n as usize),
-        xbrl_taxonomy: o.xbrl_taxonomy,
-        page_range,
-        document_timeout: parse_document_timeout(o.document_timeout)?,
-        ocr_lang: parse_ocr_lang(o.ocr_lang, o.ocr_engine.as_deref())?,
-        ocr_mode: parse_ocr_mode(o.ocr_mode)?,
-        ocr_engine: parse_ocr_engine(o.ocr_engine)?,
-        ocr_scale: parse_ocr_scale(o.ocr_scale)?,
-        images_scale: parse_images_scale(o.images_scale)?,
-        page_images: o.page_images.unwrap_or(false),
-        list_attachments: o.list_attachments.unwrap_or(false),
-        skip_empty_cells: o.skip_empty_cells.unwrap_or(false),
-        compact_tables: o.compact_tables.unwrap_or(false),
-        ebcdic_layout: o.ebcdic_layout,
-        skip_ocr: o.skip_ocr.unwrap_or(false),
-        force_full_page_ocr: o.force_full_page_ocr.unwrap_or(false),
-        no_text_panels: o.no_text_panels.unwrap_or(false),
-        heading_hierarchy: o.heading_hierarchy.unwrap_or(false),
-        enrich: enrichments(
-            o.do_picture_classification,
-            o.do_code_enrichment,
-            o.do_formula_enrichment,
-        ),
-        vlm: resolve_vlm(
-            o.pipeline.as_deref(),
-            o.vlm_endpoint,
-            o.vlm_model,
-            o.vlm_api_key,
-            o.vlm_prompt,
-            o.vlm_max_tokens,
-            page_range,
-        )?,
+        opts,
+        vlm,
         allowed_formats: allowed,
-        to: parse_output_kind(o.to.as_deref())?,
-        image_mode: parse_image_mode(o.image_mode.as_deref(), parse_output_kind(o.to.as_deref())?)?,
+        to,
+        image_mode: parse_image_mode(o.image_mode.as_deref(), to)?,
         artifacts_dir: o.artifacts_dir.unwrap_or_else(|| "artifacts".to_string()),
         page_break_placeholder: o.page_break_placeholder,
     })
 }
 
-/// Resolve the `pipeline` selection into the VLM options the conversion needs
-/// (#77), or `None` for the standard ONNX pipeline.
-///
-/// [`docling::vlm::VlmOptions::resolve`] does the endpoint/model fallback onto
-/// `DOCLING_RS_VLM_ENDPOINT` / `_MODEL` and reads `_PROMPT` / `_API_KEY` itself,
-/// so going through it — rather than building the struct field by field — is
-/// what makes the environment behave identically from Node and from the CLI.
-/// The explicit options then override whatever the environment supplied.
-///
-/// Resolution happens at option-parsing time, not at conversion time, so a
-/// missing endpoint fails fast on the call (or on the `DocumentConverter`
-/// constructor) instead of after a file has been read.
-///
-/// The standard branch drops the `vlm_*` arguments instead of rejecting them:
-/// an option configures the VLM, only `pipeline` selects it, and that is one
-/// rule shared with the CLI — which parses `--vlm-endpoint` / `--vlm-model`
-/// and ignores them without `--pipeline vlm`. Pinned by
-/// `standard_pipeline_ignores_vlm_options` below and by the Node-side smoke
-/// check, so the ignore stays a decision rather than resurfacing as a bug.
-/// The three enrichment switches as the engine's option set (#423); unset
-/// and `false` both mean off.
-fn enrichments(
-    picture_classification: Option<bool>,
-    code: Option<bool>,
-    formula: Option<bool>,
-) -> docling::EnrichmentOptions {
-    docling::EnrichmentOptions {
-        picture_classification: picture_classification.unwrap_or(false),
-        code: code.unwrap_or(false),
-        formula: formula.unwrap_or(false),
-    }
-}
-
-fn resolve_vlm(
-    pipeline: Option<&str>,
-    endpoint: Option<String>,
-    model: Option<String>,
-    api_key: Option<String>,
-    prompt: Option<String>,
-    max_tokens: Option<u32>,
-    page_range: Option<(usize, usize)>,
-) -> Result<Option<docling::vlm::VlmOptions>> {
-    // An empty string counts as unset, the way `docling_core::env::nonempty`
-    // treats the variables these options fall back to. `vlmEndpoint:
-    // process.env.VLM_URL ?? ''` is an easy shape to write, and it must reach
-    // the env fallback rather than resolve to an empty endpoint.
-    let set = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
-    match pipeline {
-        // Intentionally without inspecting the `vlm_*` arguments: see above.
-        None | Some("standard") => Ok(None),
-        Some("vlm") => {
-            let (endpoint, model) = (set(endpoint), set(model));
-            let (api_key, prompt) = (set(api_key), set(prompt));
-            let mut v = docling::vlm::VlmOptions::resolve(endpoint, model).map_err(|e| {
-                // InvalidArg, not GenericFailure: a missing endpoint/model is a
-                // bad call, not a conversion that went wrong.
-                Error::new(Status::InvalidArg, e.to_string())
-            })?;
-            if prompt.is_some() {
-                v.prompt = prompt;
-            }
-            if api_key.is_some() {
-                v.api_key = api_key;
-            }
-            // Validated like `ocrScale`: 0 would have every page come back
-            // empty and surface as "the model's responses contained no
-            // parseable DocLang" — a message pointing at the model, not at the
-            // option. (napi applies JS ToUint32, so a negative number arrives
-            // here as a huge one; the server rejects that on its own terms.)
-            match max_tokens {
-                Some(0) => {
-                    return Err(Error::new(
-                        Status::InvalidArg,
-                        "vlmMaxTokens must be greater than 0",
-                    ))
-                }
-                Some(n) => v.max_tokens = n as usize,
-                None => {}
-            }
-            // `pages` composes with the VLM exactly as with the ML pipeline —
-            // only the selected pages are rendered and sent.
-            v.page_range = page_range;
-            Ok(Some(v))
-        }
-        Some(other) => Err(Error::new(
-            Status::InvalidArg,
-            format!("unknown pipeline '{other}' (expected: standard, vlm)"),
-        )),
-    }
-}
-
-/// Validate an `ocrLang` option against the engine it will drive (#388,
-/// #460): `"en"`/`"ch"` or a BCP-47 tag for English / Chinese under PP-OCR,
-/// tessdata stems or BCP-47 tags under Tesseract; an unknown language is an
-/// error.
-fn parse_ocr_lang(s: Option<String>, engine: Option<&str>) -> Result<Option<String>> {
-    let Some(v) = s else {
-        return Ok(None);
-    };
-    let engine = engine
-        .and_then(docling::OcrEngine::parse)
-        .unwrap_or_else(docling::OcrEngine::from_env);
-    engine
-        .validate_lang(&v)
-        .map(|()| Some(v))
-        .map_err(|e| Error::from_reason(format!("ocrLang: {e}")))
-}
-
-/// Validate an `ocrEngine` option (#460); an unknown id is an error.
-fn parse_ocr_engine(s: Option<String>) -> Result<Option<String>> {
-    match s {
-        Some(v) if docling::OcrEngine::parse(&v).is_some() => Ok(Some(v)),
-        Some(v) => Err(Error::from_reason(format!(
-            "ocrEngine {v:?} is not {}",
-            docling::OcrEngine::ACCEPTED
-        ))),
-        None => Ok(None),
-    }
-}
-
-/// Validate an `ocrMode` option (#254); an unknown id is an error.
-fn parse_ocr_mode(s: Option<String>) -> Result<Option<String>> {
-    match s {
-        Some(v) if docling::OcrMode::parse(&v).is_some() => Ok(Some(v)),
-        Some(v) => Err(Error::from_reason(format!(
-            "ocrMode {v:?} is not default|full_page|layout_regions|pdf_aware_layout_regions"
-        ))),
-        None => Ok(None),
-    }
-}
-
-/// Validate an `ocrScale` option (#254); non-positive values are an error.
-/// `documentTimeout` (#497): a positive number of seconds, or unset.
-fn parse_document_timeout(s: Option<f64>) -> Result<Option<std::time::Duration>> {
-    match s {
-        Some(v) if v.is_finite() && v > 0.0 => Ok(Some(std::time::Duration::from_secs_f64(v))),
-        Some(v) => Err(Error::from_reason(format!(
-            "documentTimeout must be a positive number of seconds, got {v}"
-        ))),
-        None => Ok(None),
-    }
-}
-
-/// `imagesScale` (#520): 0.1–4.0, the CLI's and serve's window.
-fn parse_images_scale(s: Option<f64>) -> Result<Option<f32>> {
-    match s {
-        Some(v) if (0.1..=4.0).contains(&v) => Ok(Some(v as f32)),
-        Some(v) => Err(Error::from_reason(format!(
-            "imagesScale must be a number in 0.1-4.0, got {v}"
-        ))),
-        None => Ok(None),
-    }
-}
-
-fn parse_ocr_scale(s: Option<f64>) -> Result<Option<f32>> {
-    match s {
-        Some(v) if v.is_finite() && v > 0.0 => Ok(Some(v as f32)),
-        Some(v) => Err(Error::from_reason(format!(
-            "ocrScale must be a positive number, got {v}"
-        ))),
-        None => Ok(None),
-    }
-}
-
-/// `"A-B"` / `"N"` → the converter's 1-based inclusive page window (#80).
-fn parse_pages(s: Option<&str>) -> Result<Option<(usize, usize)>> {
-    s.map(|v| docling::parse_page_range(v).map_err(|e| Error::from_reason(format!("pages: {e}"))))
-        .transpose()
-}
-
-fn build_converter(cfg: &ConvertConfig) -> RsConverter {
+fn build_converter(cfg: &ConvertConfig) -> Result<RsConverter> {
     let base = match &cfg.allowed_formats {
         Some(list) => RsConverter::with_allowed_formats(list.iter().copied()),
         None => RsConverter::new(),
     };
-    let base = base
-        .strict(cfg.strict)
-        .fetch_images(cfg.fetch_images)
-        .list_attachments(cfg.list_attachments)
-        .skip_empty_cells(cfg.skip_empty_cells)
-        .compact_tables(cfg.compact_tables)
-        .page_break_placeholder(cfg.page_break_placeholder.clone())
-        .ebcdic_layout_opt(cfg.ebcdic_layout.clone())
-        .skip_ocr(cfg.skip_ocr)
-        .force_full_page_ocr(cfg.force_full_page_ocr)
-        .no_text_panels(cfg.no_text_panels)
-        .heading_hierarchy(cfg.heading_hierarchy)
-        .do_picture_classification(cfg.enrich.picture_classification)
-        .do_code_enrichment(cfg.enrich.code)
-        .do_formula_enrichment(cfg.enrich.formula)
-        .asr_model(cfg.asr_model.clone())
-        .asr_lang(cfg.asr_lang.clone())
-        .encoding(cfg.encoding.clone());
-    let base = match cfg.video_frames {
-        Some(max) => base.video_frames(max),
-        None => base,
-    };
-    let base = match &cfg.xbrl_taxonomy {
-        Some(dir) => base.xbrl_taxonomy(dir.clone()),
-        None => base,
-    };
-    let base = match cfg.page_range {
-        Some((first, last)) => base.page_range(first, last),
-        None => base,
-    };
-    let base = base.document_timeout(cfg.document_timeout);
-    let base = match &cfg.ocr_lang {
-        Some(lang) => base.ocr_lang(lang.clone()),
-        None => base,
-    };
-    let base = match &cfg.ocr_mode {
-        Some(mode) => base.ocr_mode(mode.clone()),
-        None => base,
-    };
-    let base = match &cfg.ocr_engine {
-        Some(engine) => base.ocr_engine(engine.clone()),
-        None => base,
-    };
-    let base = match cfg.ocr_scale {
-        Some(s) => base.ocr_scale(s),
-        None => base,
-    };
-    let base = match cfg.images_scale {
-        Some(s) => base.images_scale(s),
-        None => base,
-    };
-    base.generate_page_images(cfg.page_images)
+    let mut o = cfg.opts.clone();
+    if cfg.page_break_placeholder.is_some() {
+        o.page_break_placeholder = cfg.page_break_placeholder.clone();
+    }
+    // The library's mapping onto the builder (#577); `opts` was validated
+    // when the config was built, so this cannot fail.
+    o.apply(base).map_err(option_err)
 }
 
 /// Render an already-converted document to Markdown/JSON per the config. The
@@ -846,8 +636,8 @@ fn run_convert(source: SourceDocument, cfg: &ConvertConfig) -> Result<RawResult>
         // The serializer knobs `DocumentConverter::convert` would have applied
         // (converter.rs) — this path never reaches it, so they are set here or
         // they silently lapse under `pipeline: "vlm"`.
-        document.strict_markdown = cfg.strict;
-        document.compact_tables = cfg.compact_tables;
+        document.strict_markdown = cfg.opts.strict.unwrap_or(false);
+        document.compact_tables = cfg.opts.compact_tables.unwrap_or(false);
         document.page_break_placeholder = cfg.page_break_placeholder.clone();
         return Ok(render_doc(
             document,
@@ -858,7 +648,7 @@ fn run_convert(source: SourceDocument, cfg: &ConvertConfig) -> Result<RawResult>
             Vec::new(),
         ));
     }
-    let converter = build_converter(cfg);
+    let converter = build_converter(cfg)?;
     let result = converter.convert(source).map_err(convert_err)?;
     let format = result.format.as_str().to_string();
     let status = status_str(result.status);
@@ -1120,31 +910,8 @@ impl Task for ConvertBytesTask {
 /// the analogue of the Rust `DocumentConverter`.
 #[napi]
 pub struct DocumentConverter {
-    strict: bool,
-    fetch_images: bool,
-    asr_model: Option<String>,
-    asr_lang: Option<String>,
-    encoding: Option<String>,
-    video_frames: Option<usize>,
-    xbrl_taxonomy: Option<String>,
-    page_range: Option<(usize, usize)>,
-    /// docling's `document_timeout` (#497).
-    document_timeout: Option<std::time::Duration>,
-    ocr_lang: Option<String>,
-    ocr_mode: Option<String>,
-    ocr_engine: Option<String>,
-    ocr_scale: Option<f32>,
-    images_scale: Option<f32>,
-    page_images: bool,
-    list_attachments: bool,
-    skip_empty_cells: bool,
-    compact_tables: bool,
-    ebcdic_layout: Option<String>,
-    skip_ocr: bool,
-    force_full_page_ocr: bool,
-    no_text_panels: bool,
-    heading_hierarchy: bool,
-    enrich: docling::EnrichmentOptions,
+    /// The shared conversion options (#577), validated in the constructor.
+    opts: docling::ConvertOptions,
     // Resolved once in the constructor and cloned per call: a converter is
     // configuration, so a missing endpoint should surface at `new`, and the
     // `DOCLING_RS_VLM_*` environment should be read at the same moment every
@@ -1158,7 +925,7 @@ impl DocumentConverter {
     #[napi(constructor)]
     pub fn new(options: Option<ConverterOptions>) -> Result<Self> {
         let o = options.unwrap_or_default();
-        let allowed = match o.allowed_formats {
+        let allowed = match &o.allowed_formats {
             Some(list) => Some(
                 list.iter()
                     .map(|s| parse_format(s))
@@ -1166,83 +933,25 @@ impl DocumentConverter {
             ),
             None => None,
         };
-        let page_range = parse_pages(o.pages.as_deref())?;
+        let opts = shared_options(&o)?;
+        opts.validate().map_err(option_err)?;
+        let vlm = opts.vlm_options().map_err(option_err)?;
         Ok(Self {
-            strict: o.strict.unwrap_or(false),
-            fetch_images: o.fetch_images.unwrap_or(false),
-            asr_model: o.asr_model.clone(),
-            asr_lang: o.asr_lang.clone(),
-            encoding: o.encoding.clone(),
-            video_frames: o.video_frames.map(|n| n as usize),
-            xbrl_taxonomy: o.xbrl_taxonomy.clone(),
-            page_range,
-            document_timeout: parse_document_timeout(o.document_timeout)?,
-            ocr_lang: parse_ocr_lang(o.ocr_lang.clone(), o.ocr_engine.as_deref())?,
-            ocr_mode: parse_ocr_mode(o.ocr_mode.clone())?,
-            ocr_engine: parse_ocr_engine(o.ocr_engine.clone())?,
-            ocr_scale: parse_ocr_scale(o.ocr_scale)?,
-            images_scale: parse_images_scale(o.images_scale)?,
-            page_images: o.page_images.unwrap_or(false),
-            list_attachments: o.list_attachments.unwrap_or(false),
-            skip_empty_cells: o.skip_empty_cells.unwrap_or(false),
-            compact_tables: o.compact_tables.unwrap_or(false),
-            ebcdic_layout: o.ebcdic_layout.clone(),
-            skip_ocr: o.skip_ocr.unwrap_or(false),
-            force_full_page_ocr: o.force_full_page_ocr.unwrap_or(false),
-            no_text_panels: o.no_text_panels.unwrap_or(false),
-            heading_hierarchy: o.heading_hierarchy.unwrap_or(false),
-            enrich: enrichments(
-                o.do_picture_classification,
-                o.do_code_enrichment,
-                o.do_formula_enrichment,
-            ),
-            vlm: resolve_vlm(
-                o.pipeline.as_deref(),
-                o.vlm_endpoint.clone(),
-                o.vlm_model.clone(),
-                o.vlm_api_key.clone(),
-                o.vlm_prompt.clone(),
-                o.vlm_max_tokens,
-                page_range,
-            )?,
+            opts,
+            vlm,
             allowed_formats: allowed,
         })
     }
 
     fn config(&self, out: Option<OutputOptions>) -> Result<ConvertConfig> {
         let out = out.unwrap_or_default();
+        let to = parse_output_kind(out.to.as_deref())?;
         Ok(ConvertConfig {
-            strict: self.strict,
-            fetch_images: self.fetch_images,
-            asr_model: self.asr_model.clone(),
-            asr_lang: self.asr_lang.clone(),
-            encoding: self.encoding.clone(),
-            video_frames: self.video_frames,
-            xbrl_taxonomy: self.xbrl_taxonomy.clone(),
-            page_range: self.page_range,
-            document_timeout: self.document_timeout,
-            ocr_lang: self.ocr_lang.clone(),
-            ocr_mode: self.ocr_mode.clone(),
-            ocr_engine: self.ocr_engine.clone(),
-            ocr_scale: self.ocr_scale,
-            images_scale: self.images_scale,
-            page_images: self.page_images,
-            list_attachments: self.list_attachments,
-            skip_empty_cells: self.skip_empty_cells,
-            compact_tables: self.compact_tables,
-            ebcdic_layout: self.ebcdic_layout.clone(),
-            skip_ocr: self.skip_ocr,
-            force_full_page_ocr: self.force_full_page_ocr,
-            no_text_panels: self.no_text_panels,
-            heading_hierarchy: self.heading_hierarchy,
-            enrich: self.enrich,
+            opts: self.opts.clone(),
             vlm: self.vlm.clone(),
             allowed_formats: self.allowed_formats.clone(),
-            to: parse_output_kind(out.to.as_deref())?,
-            image_mode: parse_image_mode(
-                out.image_mode.as_deref(),
-                parse_output_kind(out.to.as_deref())?,
-            )?,
+            to,
+            image_mode: parse_image_mode(out.image_mode.as_deref(), to)?,
             artifacts_dir: out.artifacts_dir.unwrap_or_else(|| "artifacts".to_string()),
             page_break_placeholder: out.page_break_placeholder,
         })
@@ -1411,9 +1120,9 @@ impl DocumentConverter {
                 // `referenced` up front. Mirrors the buffered branch above,
                 // which honours both `compactTables` and `artifactsDir`.
                 let mut streamer = MarkdownStreamer::with_artifacts(
-                    cfg.strict,
+                    cfg.opts.strict.unwrap_or(false),
                     image_mode,
-                    cfg.compact_tables,
+                    cfg.opts.compact_tables.unwrap_or(false),
                     &cfg.artifacts_dir,
                 )
                 .with_page_break_placeholder(cfg.page_break_placeholder.clone());
@@ -1426,6 +1135,13 @@ impl DocumentConverter {
                 callback.call(Ok(None), ThreadsafeFunctionCallMode::NonBlocking);
                 return;
             }
+            let converter = match converter {
+                Ok(c) => c,
+                Err(e) => {
+                    callback.call(Err(e), ThreadsafeFunctionCallMode::NonBlocking);
+                    return;
+                }
+            };
             let stream = match converter.convert_streaming_images(source, image_mode) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1477,13 +1193,15 @@ pub struct Pipeline {
 
 /// The PDF/image options of a [`ConverterOptions`] resolved into the typed
 /// values the engine's builders take (#471): what `new Pipeline(options)`
-/// primes the warm [`RsPipeline`] with. Validation is the same
-/// `parse_*` set [`DocumentConverter::new`] runs, so the constructor rejects
-/// exactly what the one-shot path rejects instead of quietly running the
-/// process defaults.
+/// primes the warm [`RsPipeline`] with. Validation is the shared
+/// `ConvertOptions::validate` [`DocumentConverter::new`] runs too (#577), so
+/// the constructor rejects exactly what the one-shot path rejects instead of
+/// quietly running the process defaults.
 #[derive(Debug, PartialEq)]
 struct WarmPipelineConfig {
     skip_ocr: bool,
+    no_ocr: bool,
+    no_table_former: bool,
     force_full_page_ocr: bool,
     no_text_panels: bool,
     heading_hierarchy: bool,
@@ -1510,47 +1228,27 @@ struct WarmPipelineConfig {
 /// `docling::DocumentConverter` applies, including the #460 split of
 /// `ocrLang` into a PP-OCR model under PP-OCR and Tesseract's `-l` list under
 /// Tesseract (against the engine the option selects, else the process's
-/// `DOCLING_RS_OCR_ENGINE` default, exactly as [`parse_ocr_lang`] validates).
+/// `DOCLING_RS_OCR_ENGINE` default — the library's `ocr_lang()` /
+/// `tesseract_lang()` readers).
 fn warm_pipeline_config(o: &ConverterOptions) -> Result<WarmPipelineConfig> {
-    let ocr_engine = parse_ocr_engine(o.ocr_engine.clone())?
-        .as_deref()
-        .and_then(docling::OcrEngine::parse);
-    let ocr_lang = parse_ocr_lang(o.ocr_lang.clone(), o.ocr_engine.as_deref())?;
-    let engine = ocr_engine.unwrap_or_else(docling::OcrEngine::from_env);
-    let (ocr_lang, tesseract_lang) = match (ocr_lang, engine) {
-        (Some(lang), docling::OcrEngine::Tesseract) => (
-            None,
-            Some(
-                docling::tesseract_lang_arg(&lang)
-                    .map_err(|e| Error::from_reason(format!("ocrLang: {e}")))?,
-            ),
-        ),
-        (Some(lang), docling::OcrEngine::PpOcr) => (docling::OcrLang::parse(&lang), None),
-        (None, _) => (None, None),
-    };
+    let s = shared_options(o)?;
+    s.validate().map_err(option_err)?;
     Ok(WarmPipelineConfig {
-        skip_ocr: o.skip_ocr.unwrap_or(false),
-        force_full_page_ocr: o.force_full_page_ocr.unwrap_or(false),
-        no_text_panels: o.no_text_panels.unwrap_or(false),
-        heading_hierarchy: o.heading_hierarchy.unwrap_or(false),
-        page_range: parse_pages(o.pages.as_deref())?,
-        document_timeout: parse_document_timeout(o.document_timeout)?,
-        ocr_engine,
-        ocr_lang,
-        tesseract_lang,
-        ocr_mode: parse_ocr_mode(o.ocr_mode.clone())?
-            .as_deref()
-            .and_then(docling::OcrMode::parse),
-        ocr_scale: parse_ocr_scale(o.ocr_scale)?,
-        images: docling::ImageOutput {
-            scale: parse_images_scale(o.images_scale)?,
-            page_images: o.page_images.unwrap_or(false),
-        },
-        enrich: enrichments(
-            o.do_picture_classification,
-            o.do_code_enrichment,
-            o.do_formula_enrichment,
-        ),
+        skip_ocr: s.skip_ocr.unwrap_or(false),
+        no_ocr: s.no_ocr.unwrap_or(false),
+        no_table_former: s.no_table_former.unwrap_or(false),
+        force_full_page_ocr: s.force_full_page_ocr.unwrap_or(false),
+        no_text_panels: s.no_text_panels.unwrap_or(false),
+        heading_hierarchy: s.heading_hierarchy.unwrap_or(false),
+        page_range: s.page_range().map_err(option_err)?,
+        document_timeout: s.document_timeout().map_err(option_err)?,
+        ocr_engine: s.ocr_engine().map_err(option_err)?,
+        ocr_lang: s.ocr_lang().map_err(option_err)?,
+        tesseract_lang: s.tesseract_lang().map_err(option_err)?,
+        ocr_mode: s.ocr_mode().map_err(option_err)?,
+        ocr_scale: s.ocr_scale,
+        images: s.image_output(),
+        enrich: s.enrichments(),
     })
 }
 
@@ -1599,6 +1297,8 @@ impl Pipeline {
         let pipeline = RsPipeline::new()
             .map_err(convert_err)?
             .skip_ocr(warm.skip_ocr)
+            .no_ocr(warm.no_ocr)
+            .no_table_former(warm.no_table_former)
             .force_full_page_ocr(warm.force_full_page_ocr)
             .no_text_panels(warm.no_text_panels)
             .heading_hierarchy(docling::HeadingHierarchyOptions::enabled(
@@ -1895,33 +1595,13 @@ impl Task for PipelineBytesTask {
 fn output_config(out: Option<OutputOptions>, strict: bool) -> Result<ConvertConfig> {
     let out = out.unwrap_or_default();
     Ok(ConvertConfig {
-        strict,
-        fetch_images: false,
-        asr_model: None,
-        asr_lang: None,
-        encoding: None,
-        video_frames: None,
-        xbrl_taxonomy: None,
-        page_range: None,
-        document_timeout: None,
-        list_attachments: false,
-        skip_empty_cells: false,
-        compact_tables: false,
-        ebcdic_layout: None,
-        skip_ocr: false,
-        force_full_page_ocr: false,
-        no_text_panels: false,
-        heading_hierarchy: false,
-        enrich: docling::EnrichmentOptions::default(),
+        opts: docling::ConvertOptions {
+            strict: Some(strict),
+            ..Default::default()
+        },
         // The warm `Pipeline` is the ONNX-models class; `Pipeline::new` rejects
         // `pipeline: "vlm"` outright, so nothing reaches here with one set.
         vlm: None,
-        ocr_lang: None,
-        ocr_mode: None,
-        ocr_engine: None,
-        ocr_scale: None,
-        images_scale: None,
-        page_images: false,
         allowed_formats: None,
         to: parse_output_kind(out.to.as_deref())?,
         image_mode: parse_image_mode(
@@ -2599,6 +2279,56 @@ fn convert_err(e: impl std::fmt::Display) -> Error {
 mod tests {
     use super::*;
 
+    /// The VLM resolution as the one-shot options reach it: the flat
+    /// `ConvertOptions` object → the shared set → `vlm_options()` (#577).
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_vlm(
+        pipeline: Option<&str>,
+        endpoint: Option<String>,
+        model: Option<String>,
+        api_key: Option<String>,
+        prompt: Option<String>,
+        max_tokens: Option<u32>,
+        page_range: Option<(usize, usize)>,
+    ) -> Result<Option<docling::vlm::VlmOptions>> {
+        let o = ConvertOptions {
+            pipeline: pipeline.map(str::to_string),
+            vlm_endpoint: endpoint,
+            vlm_model: model,
+            vlm_api_key: api_key,
+            vlm_prompt: prompt,
+            vlm_max_tokens: max_tokens,
+            pages: page_range.map(|(a, b)| format!("{a}-{b}")),
+            ..Default::default()
+        };
+        shared_options(&o)?.vlm_options().map_err(option_err)
+    }
+
+    /// The option names reach the error messages as TypeScript spells them.
+    #[test]
+    fn errors_name_options_in_camel_case() {
+        assert_eq!(camel_case("ocr_lang"), "ocrLang");
+        assert_eq!(camel_case("document_timeout"), "documentTimeout");
+        let Err(err) = DocumentConverter::new(Some(ConverterOptions {
+            document_timeout: Some(-5.0),
+            ..Default::default()
+        })) else {
+            panic!("a negative documentTimeout must be rejected");
+        };
+        assert_eq!(err.status, Status::InvalidArg);
+        assert!(err.reason.contains("documentTimeout"), "{}", err.reason);
+        let Err(err) = DocumentConverter::new(Some(ConverterOptions {
+            vlm_max_tokens: Some(0),
+            pipeline: Some("vlm".into()),
+            vlm_endpoint: Some("http://127.0.0.1:1/v1".into()),
+            vlm_model: Some("m".into()),
+            ..Default::default()
+        })) else {
+            panic!("vlmMaxTokens: 0 must be rejected");
+        };
+        assert!(err.reason.contains("vlmMaxTokens"), "{}", err.reason);
+    }
+
     // napi-derive gates its N-API registration glue behind `cfg(not(test))`, so
     // the cdylib's lib target still links as an ordinary test binary and the
     // pure option-resolution helpers can be pinned here. This is the *enforced*
@@ -2644,8 +2374,8 @@ mod tests {
     }
 
     /// Every explicit option must land on the resolved struct — including the
-    /// four `resolve_vlm` applies itself on top of `VlmOptions::resolve`
-    /// (api_key, prompt, max_tokens, page_range). Precedence against a *set*
+    /// four the shared `vlm_options()` applies on top of
+    /// `VlmOptions::resolve` (api_key, prompt, max_tokens, page_range). Precedence against a *set*
     /// `DOCLING_RS_VLM_*` is not asserted here: `std::env::set_var` is unsound
     /// under the parallel test harness.
     #[test]
@@ -2714,8 +2444,8 @@ mod tests {
     }
 
     /// `new Pipeline(options)` primes the warm engine with every PDF/image
-    /// option the one-shot path honours (#471) — the same `parse_*` set as
-    /// `DocumentConverter`, resolved into the engine's typed values, with
+    /// option the one-shot path honours (#471) — the same shared option set
+    /// as `DocumentConverter`, resolved into the engine's typed values, with
     /// `ocrLang` read against the engine it drives (#460): Tesseract's `-l`
     /// list under Tesseract, the en/ch recognizer under PP-OCR.
     #[test]
@@ -2776,6 +2506,8 @@ mod tests {
             got,
             WarmPipelineConfig {
                 skip_ocr: false,
+                no_ocr: false,
+                no_table_former: false,
                 force_full_page_ocr: false,
                 no_text_panels: false,
                 heading_hierarchy: false,

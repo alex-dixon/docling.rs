@@ -494,6 +494,30 @@ println!("{}", result.document.export_to_markdown()); // Markdown
 println!("{}", result.document.export_to_json());     // docling DoclingDocument JSON
 ```
 
+### One option set, every surface — `ConvertOptions`
+
+Every conversion knob — the `DocumentConverter` builder's methods plus the
+pipeline selection and the `vlm_*` settings — is also one serializable struct,
+[`docling::ConvertOptions`](crates/docling/src/options.rs) (#577), and every
+surface speaks it: the CLI fills it from flags, `docling-rs serve` from the
+query string / JSON body / multipart text parts, the Python and Node bindings
+from their keyword arguments and option objects, the C ABI and the wasm
+module from one JSON object. They all then run the same
+`ConvertOptions::validate()` (one set of rejection rules and messages) and
+`ConvertOptions::apply()` (one mapping onto the builder); the engine defaults
+are defined once, in `DocumentConverter::default()`, and an unset option means
+that default everywhere. The full table — wire name, values, default, and each
+surface's spelling where it differs — is [`docs/OPTIONS.md`](docs/OPTIONS.md);
+an inventory test holds every surface's documentation to it, so a new option
+cannot ship on one surface and silently miss another.
+
+```rust
+use docling::{ConvertOptions, DocumentConverter};
+
+let options: ConvertOptions = serde_json::from_str(r#"{"pages": "1-3", "skip_ocr": true}"#)?;
+let converter = DocumentConverter::from_options(&options)?; // validated + applied
+```
+
 ### Post-extraction table editing
 
 Tables converted by the PDF ML pipeline carry **first-class cells**
