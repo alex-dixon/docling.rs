@@ -66,6 +66,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-lint-
 
@@ -73,7 +80,8 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo clippy --workspace --all-targets -- -D warnings
 
       # actions/cache saves target/ in its post-step, i.e. after this runs:
       # drop what is cheap to recreate (incremental data shouldn't exist with
@@ -107,6 +115,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-test-
 
@@ -128,7 +143,8 @@ jobs:
       # guard that keeps the committed Cargo.lock in sync with the manifests
       # (a Cargo.toml change without its lock update fails here).
       - name: Test
-        run: cargo test --workspace --locked
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo test --workspace --locked
 
       # actions/cache saves target/ in its post-step, i.e. after this runs:
       # drop what is cheap to recreate (incremental data shouldn't exist with
@@ -169,6 +185,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-msrv-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-msrv-
 
@@ -176,7 +199,8 @@ jobs:
         run: cargo +${{ env.MSRV_CORE }} check -p docling-core --locked
 
       - name: Check workspace on ${{ env.MSRV_WORKSPACE }}
-        run: cargo +${{ env.MSRV_WORKSPACE }} check --workspace --locked
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo +${{ env.MSRV_WORKSPACE }} check --workspace --locked
 
       # actions/cache saves target/ in its post-step, i.e. after this runs:
       # drop what is cheap to recreate (incremental data shouldn't exist with
@@ -195,7 +219,11 @@ jobs:
   # runners: `cargo check` proves the feature plumbing and the EP registration
   # code compile against the matching `ort` feature set. Each provider is
   # checked on the platform its ONNX Runtime binaries exist for — actually
-  # *running* on GPU is out of scope for CI (no GPU hardware here).
+  # *running* on GPU is out of scope for CI (no GPU hardware here). The
+  # cargo steps run through `cargo_retry_ort.sh`: each provider's ONNX
+  # Runtime is a separate prebuilt archive ort-sys fetches from cdn.pyke.io,
+  # and a dropped connection there ("Peer disconnected") is the one failure
+  # worth a second attempt — the extracted archive is cached across runs.
   ep-features:
     name: check (${{ matrix.features }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -232,16 +260,25 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-ep-${{ matrix.slug }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-ep-${{ matrix.slug }}-
 
       - name: Check docling-cli with GPU features
-        run: cargo check -p docling-cli --features "${{ matrix.features }}"
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo check -p docling-cli --features "${{ matrix.features }}"
 
       # docling-rag mirrors the same EP features (ingest conversion + the
       # onnx-embed embedder session route through docling-pdf's ep module).
       - name: Check docling-rag with GPU features
-        run: cargo check -p docling-rag --features "${{ matrix.features }},onnx-embed"
+        shell: bash
+        run: scripts/ci/cargo_retry_ort.sh cargo check -p docling-rag --features "${{ matrix.features }},onnx-embed"
 
       - name: Test docling-pdf EP selection with GPU features
         run: 'cargo test -p docling-pdf --lib --features "${{ matrix.features }}" ep::'
@@ -353,6 +390,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-s390x-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-s390x-
 
@@ -412,6 +456,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            # ort-sys's extracted prebuilt ONNX Runtime (`<cache dir>/
+            # ort.pyke.io/dfbin/<target>/<hash>`): present, the build script
+            # skips the cdn.pyke.io download altogether. One path per OS;
+            # actions/cache ignores the ones that do not exist.
+            ~/.cache/ort.pyke.io
+            ~/Library/Caches/ort.pyke.io
+            ~/AppData/Local/ort.pyke.io
           key: ${{ runner.os }}-cargo-v2-publish-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-publish-
 
