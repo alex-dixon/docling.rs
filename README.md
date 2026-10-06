@@ -1554,8 +1554,9 @@ instead — the same models — and see
 | Asset | Destination |
 | --- | --- |
 | RT-DETR layout | `.models/layout_heron.onnx` |
-| PP-OCRv3 rec + dictionary, English (the runtime default) | `.models/ocr_rec_en.onnx`, `.models/en_dict.txt` |
-| PP-OCRv3 rec + dictionary, multilingual `ch_` (`DOCLING_RS_OCR_LANG=ch`; the docling-conformance model — weak Latin word spacing) | `.models/ocr_rec.onnx`, `.models/ppocr_keys_v1.txt` |
+| PP-OCRv6 rec + dictionary, multilingual (#570 — RapidOCR's and docling's recognizer; preferred for every `ocr_lang` when present) | `.models/ocr_rec_v6.onnx`, `.models/ocr_rec_v6_dict.txt` |
+| PP-OCRv3 rec + dictionary, English (the fallback without the v6 pair) | `.models/ocr_rec_en.onnx`, `.models/en_dict.txt` |
+| PP-OCRv3 rec + dictionary, multilingual `ch_` (`DOCLING_RS_OCR_LANG=ch` without the v6 pair; the model the PDF conformance baselines were pinned against — weak Latin word spacing) | `.models/ocr_rec.onnx`, `.models/ppocr_keys_v1.txt` |
 | PP-OCRv6 text detector (optional, #429 — lines outside layout regions on bitmap pages; without it OCR stays region-scoped; also fetched by the Python `download_models()`, reported by Node's `checkDependencies().ocrDet`, and loaded by the browser demo) | `.models/ocr_det.onnx` |
 | TableFormer (optional) | `.models/tableformer/{encoder,decoder,bbox}.onnx` (+ `.data` sidecars where the export needs them); `decoder_kv.onnx` is preferred when present — its current export has a dynamic batch axis, so all tables on a page decode in one lockstep loop (byte-identical to one at a time; an older fixed-batch `decoder_kv.onnx` still works, one table at a time) |
 | Whisper tiny (audio/ASR; skip with `--no-asr`) | `.models/asr/{encoder_model,decoder_model}.onnx`, `.models/asr/vocab.json` (+ `added_tokens.json` for language selection) |

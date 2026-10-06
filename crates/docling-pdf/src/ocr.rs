@@ -25,19 +25,26 @@ pub struct OcrModel {
     /// Single-threaded recognition sessions, one per parallel lane (see
     /// [`Self::load_with`]); lines are dealt across them by batch index.
     recs: Vec<Session>,
-    /// CTC classes: index 0 = blank, 1..=6623 = dictionary, 6624 = space.
+    /// CTC classes: index 0 = blank, then the dictionary, then space.
     chars: Vec<String>,
 }
 
-/// OCR recognition language: which PP-OCRv3 model + dictionary pair runs.
+/// OCR recognition language: which PP-OCRv3 model + dictionary pair runs
+/// when the PP-OCRv6 recognizer is not installed.
 ///
-/// The default is **English** (`.models/ocr_rec_en.onnx` + `.models/en_dict.txt`):
-/// the multilingual `ch_` model reads Latin scripts with badly degraded word
-/// spacing (glued words on ordinary English scans), which is the common
-/// real-world case. `Ch` selects the `ch_` pair (`.models/ocr_rec.onnx` +
-/// `.models/ppocr_keys_v1.txt`) — that is what upstream docling conformance is
-/// measured with, and `scripts/conformance/pdf_*.sh` pin it explicitly (by
-/// path, which wins over this selector).
+/// With `.models/ocr_rec_v6.onnx` + `.models/ocr_rec_v6_dict.txt` on disk
+/// (#570; `download_dependencies.sh` fetches them) both languages run that
+/// one multilingual model — RapidOCR's `PP-OCRv6_rec_small`, the recognizer
+/// docling runs for English and Chinese alike, and the single largest factor
+/// in the FUNSD word-recall gap once the detector's lines are the crops
+/// (0.70 → 0.77 on 30 forms). Without it, the PP-OCRv3 pairs: the default is
+/// **English** (`.models/ocr_rec_en.onnx` + `.models/en_dict.txt`) — the
+/// multilingual `ch_` v3 model reads Latin scripts with badly degraded word
+/// spacing (glued words on ordinary English scans) — and `Ch` selects the
+/// `ch_` pair (`.models/ocr_rec.onnx` + `.models/ppocr_keys_v1.txt`), what
+/// the PDF conformance baselines were pinned against;
+/// `scripts/conformance/pdf_*.sh` pin it explicitly by path, which wins over
+/// this selector and over the v6 preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OcrLang {
     /// en_PP-OCRv3 — English-only, proper Latin word spacing.
@@ -277,10 +284,19 @@ pub fn det_lines() -> bool {
 pub(crate) fn resolve_rec_pair(lang: OcrLang) -> (String, String) {
     const CH: (&str, &str) = (".models/ocr_rec.onnx", ".models/ppocr_keys_v1.txt");
     const EN: (&str, &str) = (".models/ocr_rec_en.onnx", ".models/en_dict.txt");
+    const V6: (&str, &str) = (".models/ocr_rec_v6.onnx", ".models/ocr_rec_v6_dict.txt");
+    let exists = |p: &str| std::path::Path::new(p).exists();
+    // The multilingual PP-OCRv6 recognizer, when installed, serves both
+    // languages (see `OcrLang`); explicit paths below still win.
+    let (v6_rec, v6_dict) = (crate::resolve_asset(V6.0), crate::resolve_asset(V6.1));
+    let (mut rec, mut dict) = if exists(&v6_rec) && exists(&v6_dict) {
+        (v6_rec, v6_dict)
+    } else {
+        let pick = if lang == OcrLang::Ch { CH } else { EN };
+        (crate::resolve_asset(pick.0), crate::resolve_asset(pick.1))
+    };
     let want_ch = lang == OcrLang::Ch;
-    let pick = if want_ch { CH } else { EN };
-    let (mut rec, mut dict) = (crate::resolve_asset(pick.0), crate::resolve_asset(pick.1));
-    if !want_ch && (!std::path::Path::new(&rec).exists() || !std::path::Path::new(&dict).exists()) {
+    if !want_ch && (!exists(&rec) || !exists(&dict)) {
         let (ch_rec, ch_dict) = (crate::resolve_asset(CH.0), crate::resolve_asset(CH.1));
         if std::path::Path::new(&ch_rec).exists() && std::path::Path::new(&ch_dict).exists() {
             eprintln!(

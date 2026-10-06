@@ -593,6 +593,80 @@ mod tests {
         );
     }
 
+    /// #570: inside a text region the detector's boxes are the crops — one
+    /// per box, clipped to the region, in the detector's order — and a region
+    /// the detector saw nothing in falls back to the projection strips. The
+    /// two-bar page as one region: two detected boxes → two det-shaped lines;
+    /// the region's second bar split by the detector into two words → three
+    /// lines where the projection found two; no boxes → the projection's two.
+    #[test]
+    fn detector_boxes_are_the_region_lines_with_projection_fallback() {
+        let img = page();
+        let region = crate::layout::Region {
+            label: "text",
+            score: 0.9,
+            l: 0.0,
+            t: 0.0,
+            r: 200.0,
+            b: 100.0,
+        };
+        let bx = |l: f32, t: f32, r: f32, b: f32| crate::ocr_det::DetBox {
+            l,
+            t,
+            r,
+            b,
+            score: 0.9,
+        };
+        let det = [bx(8.0, 18.0, 192.0, 32.0), bx(8.0, 58.0, 122.0, 74.0)];
+        let (boxes, lines) = prep_region_lines_det(&img, std::slice::from_ref(&region), 1.0, &det);
+        assert_eq!(
+            boxes,
+            vec![(8.0, 18.0, 192.0, 32.0), (8.0, 58.0, 122.0, 74.0)]
+        );
+        assert_eq!(lines.len(), 2);
+        // A box reaching past the region is clipped to it; one centered
+        // outside the region is not its line.
+        let det = [bx(-10.0, 18.0, 250.0, 32.0), bx(300.0, 60.0, 400.0, 70.0)];
+        let (boxes, _) = prep_region_lines_det(&img, std::slice::from_ref(&region), 1.0, &det);
+        assert_eq!(boxes, vec![(0.0, 18.0, 200.0, 32.0)]);
+        // The detector split the second bar into two words.
+        let det = [
+            bx(8.0, 18.0, 192.0, 32.0),
+            bx(8.0, 58.0, 60.0, 74.0),
+            bx(70.0, 58.0, 122.0, 74.0),
+        ];
+        let (boxes, _) = prep_region_lines_det(&img, std::slice::from_ref(&region), 1.0, &det);
+        assert_eq!(boxes.len(), 3);
+        // No detected box in the region → the projection segmentation.
+        let (fallback, _) = prep_region_lines_det(&img, std::slice::from_ref(&region), 1.0, &[]);
+        let (projection, _) = prep_region_lines(&img, std::slice::from_ref(&region), 1.0);
+        assert_eq!(fallback, projection);
+        assert_eq!(projection.len(), 2);
+        // Table regions take the same boxes as their word crops.
+        let table = crate::layout::Region {
+            label: "table",
+            ..region.clone()
+        };
+        let det = [bx(8.0, 18.0, 92.0, 32.0), bx(108.0, 18.0, 192.0, 32.0)];
+        let (words, _) = prep_table_words_det(&img, std::slice::from_ref(&table), 1.0, &det);
+        assert_eq!(
+            words,
+            vec![(8.0, 18.0, 92.0, 32.0), (108.0, 18.0, 192.0, 32.0)]
+        );
+        let (fallback, _) = prep_table_words_det(&img, std::slice::from_ref(&table), 1.0, &[]);
+        assert_eq!(
+            fallback,
+            prep_table_words(&img, std::slice::from_ref(&table), 1.0).0
+        );
+    }
+
+    /// RapidOCR's `text_score` default, the pre-#570 "keep everything" with
+    /// `0`, and garbage values ignored.
+    #[test]
+    fn text_score_default_is_rapidocrs() {
+        assert_eq!(text_score(), 0.5);
+    }
+
     #[test]
     fn dark_mode_pages_normalize_to_scan_polarity() {
         // The same two-bar page, inverted (light text on dark) — the raw

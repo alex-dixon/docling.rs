@@ -20,6 +20,8 @@ set "ASR_BASE_URL=https://huggingface.co/onnx-community/whisper-tiny/resolve/mai
 set "OCR_EN_URL=https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv3/en_PP-OCRv3_rec_infer.onnx"
 set "EN_DICT_URL=https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/en_dict.txt"
 set "OCR_DET_URL=https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx"
+set "OCR_REC_V6_URL=https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx"
+set "OCR_REC_V6_DICT_URL=https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt"
 
 set WITH_ASR=1
 set WITH_INT8=1
@@ -75,6 +77,13 @@ rem region on bitmap pages. Release first, RapidOCR's hub second; optional -
 rem without it OCR stays region-scoped.
 call :fetch_opt "%BASE_URL%/ocr_det.onnx"               .models\ocr_det.onnx
 if not exist .models\ocr_det.onnx call :fetch_opt "%OCR_DET_URL%" .models\ocr_det.onnx
+rem PP-OCRv6 recognizer + dictionary (#570): RapidOCR's / docling's
+rem multilingual recognizer, preferred over the PP-OCRv3 pairs when present.
+rem Release first, RapidOCR's hub second; optional - the v3 pairs run without it.
+call :fetch_opt "%BASE_URL%/ocr_rec_v6.onnx"            .models\ocr_rec_v6.onnx
+if not exist .models\ocr_rec_v6.onnx call :fetch_opt "%OCR_REC_V6_URL%" .models\ocr_rec_v6.onnx
+call :fetch_opt "%BASE_URL%/ocr_rec_v6_dict.txt"        .models\ocr_rec_v6_dict.txt
+if not exist .models\ocr_rec_v6_dict.txt call :fetch_opt "%OCR_REC_V6_DICT_URL%" .models\ocr_rec_v6_dict.txt
 call :fetch "%BASE_URL%/encoder.onnx"                   .models\tableformer\encoder.onnx    || goto :fail
 call :fetch_opt "%BASE_URL%/encoder.onnx.data"          .models\tableformer\encoder.onnx.data
 call :fetch "%BASE_URL%/decoder.onnx"                   .models\tableformer\decoder.onnx    || goto :fail
