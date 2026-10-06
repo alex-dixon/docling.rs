@@ -20,7 +20,9 @@
 # Trigger: manual only (workflow_dispatch) — it installs torch and exports two
 # models, several GB and 10-20 minutes, not something to run on every push.
 # Re-running with the same tag re-uploads (clobbers) matching asset names, so
-# it's safe to retry after fixing a failed export.
+# it's safe to retry after fixing a failed export; assets this run did not
+# stage are pruned, except those other workflows own (see "Prune stale
+# release assets").
 #
 #   gh workflow run publish-models.yml                    # tag = models-v1
 #   gh workflow run publish-models.yml -f tag=models-v2    # a future re-export
@@ -276,9 +278,16 @@ jobs:
           gh release view "$TAG" --repo "${{ github.repository }}" \
             --json assets --jq '.assets[].name' |
           while IFS= read -r asset; do
-            # docling-parse-render.yml publishes its per-platform tarballs
-            # into the same release; they are not staged here, so keep them.
-            case "$asset" in docling-parse-render-*) continue ;; esac
+            # Other workflows publish into the same release and are not
+            # staged here, so their assets are kept: docling-parse-render.yml's
+            # per-platform tarballs, and onnxruntime-s390x.yml's runtime
+            # (onnxruntime-linux-s390x.tar.gz, #504) — pruning it broke the
+            # s390x images, whose smoke test requires the runtime in the image
+            # (v1.98.0, after a re-run of this workflow). Keep the patterns in
+            # sync with every workflow that uploads into $TAG.
+            case "$asset" in
+              docling-parse-render-*|onnxruntime-linux-*) continue ;;
+            esac
             if [ ! -f "release-assets/$asset" ]; then
               echo "pruning stale asset: $asset"
               gh release delete-asset "$TAG" "$asset" --repo "${{ github.repository }}" --yes
