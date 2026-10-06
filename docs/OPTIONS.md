@@ -1,0 +1,110 @@
+# Conversion options — one set, every surface
+
+Every way of driving docling.rs — the `docling-rs` CLI, `docling-rs serve` /
+`docling-serve` (query string, JSON body or multipart text parts), the
+Python `docling_rs.DocumentConverter`, the Node `docling.rs` package, the C
+ABI (`docling-ffi`) and the wasm module (`convert_with_options`) — speaks
+the same conversion options: the fields of
+[`docling::ConvertOptions`](../crates/docling/src/options.rs) (#577).
+Validation (`ConvertOptions::validate`) and the mapping onto the converter
+(`ConvertOptions::apply`) live there once; the surfaces only parse their
+input shape. The engine defaults are defined once too, in
+`DocumentConverter::default()`: an option a caller leaves unset means that
+default on every surface.
+
+The **wire** column is the JSON key (serve, C ABI, wasm) and the Rust field;
+the CLI flag is `--` + the name with `_` → `-`, the Node option is the name
+in camelCase, the Python keyword argument is the name itself — except where
+the table says otherwise. The inventory test
+(`crates/docling/tests/options_inventory.rs`) holds every surface's
+documentation to this table, and the table to the struct: an option added
+to `ConvertOptions` fails CI until it is a flag, a request option, a kwarg,
+a TypeScript property and a row here.
+
+What is *not* in the set: how and where to emit the result (`to`, the image
+mode, `pandoc_api_version`, the chunker settings). Those depend on what the
+surface can do with the output — serve streams, the browser cannot write
+files, the CLI writes several formats at once — so each surface keeps its
+own output options next to the shared ones.
+
+| Wire name | Values | Default | CLI | Python | Node | Meaning |
+|---|---|---|---|---|---|---|
+| `strict` | bool | false | `--strict` | — | `strict` | Cleaner, more conformant Markdown instead of the readable default. Python: at export time (`export_to_markdown` reads `document.strict_markdown`). |
+| `compact_tables` | bool | false | `--compact-tables` | `compact_tables` | `compactTables` | Unpadded `| a | b |` Markdown tables (#271). |
+| `page_break_placeholder` | string | unset = no breaks | `--page-break-placeholder` | — | `pageBreakPlaceholder` | Text inserted between pages in the Markdown export (docling-core's `MarkdownParams.page_break_placeholder`). serve also accepts the historical `md_page_break_placeholder`; Python: `export_to_markdown(page_break_placeholder=…)`; Node: an output option (`OutputOptions`). |
+| `fetch_images` | bool | false | `--fetch-images` | `fetch_images` | `fetchImages` | Resolve external `<img src>` for HTML/EPUB/MHTML/JATS (network access). serve honours it only under `--allow-url-fetch`. |
+| `list_attachments` | bool | false | `--list-attachments` | `list_attachments` | `listAttachments` | Email (.eml/.msg): append an Attachments section — names and content types, never the payload (#251). |
+| `skip_empty_cells` | bool | false | `--skip-empty-cells` | `skip_empty_cells` | `skipEmptyCells` | Omit empty cells from sparse XLSX/XLS table grids (#271). |
+| `ebcdic_layout` | string | unset = the `<stem>.layout.json` sidecar | `--ebcdic-layout` | `ebcdic_layout` | `ebcdicLayout` | EBCDIC copybook layout (#252): inline `EbcdicLayout` JSON or a file path. |
+| `encoding` | WHATWG label | unset = detect (BOM, UTF-8, windows-1252) | `--encoding` | `encoding` | `encoding` | Character encoding of text inputs (docling's `TextBackendOptions.encoding`). |
+| `use_web_browser` | bool | false | `--use-web-browser` | `use_web_browser` | — | Pre-render HTML with a headless browser (the `web-browser` Cargo feature). Not in the npm addon (not built with the feature). |
+| `xbrl_taxonomy` | directory | unset = the instance's own directory | `--xbrl-taxonomy` | `xbrl_taxonomy` | `xbrlTaxonomy` | XBRL: the directory the instance's taxonomy is read from (docling's `XBRLBackendOptions.taxonomy`). serve: a server-local relative path without `..`. |
+| `asr_model` | preset name | unset = Whisper tiny | `--asr-model` | `asr_model` | `asrModel` | ASR preset for audio/video (`whisper_*`, `parakeet_tdt_0.6b_v3`). |
+| `asr_lang` | Whisper code \| `auto` | `auto` | `--asr-lang` | `asr_lang` | `asrLang` | Transcription language for audio/video. |
+| `video_frames` | int ≥ 0 | 8 | `--video-frames` | `video_frames` | `videoFrames` | Max frames sampled from a video (0 = transcript only; needs ffmpeg). |
+| `pages` | `A-B` \| `N` | unset = every page | `--pages` | `page_range` | `pages` | PDF page window, 1-based inclusive (#80). Python: `page_range=(first, last)`. |
+| `document_timeout` | seconds > 0 | unset = unlimited | `--document-timeout` | `document_timeout` | `documentTimeout` | Per-document budget for the PDF pipeline (#497): checked between pages, the pages done so far are the partial document. |
+| `no_ocr` | bool | false | `--no-ocr` | `text_layer_only` | `noOcr` | Skip the whole ML stack: text layer only. Python: `text_layer_only`. |
+| `skip_ocr` | bool | false | `--skip-ocr` | `do_ocr` | `skipOcr` | Keep layout + TableFormer, never run OCR (docling's `do_ocr=False`, #244). Python: `do_ocr` (inverted). |
+| `force_full_page_ocr` | bool | false | `--force-full-page-ocr` | `force_full_page_ocr` | `forceFullPageOcr` | OCR every page, discarding the text layer. |
+| `no_table_former` | bool | false | `--no-table-former` | `do_table_structure` | `noTableFormer` | Skip TableFormer (geometric tables instead). Python: `do_table_structure` (inverted). |
+| `no_text_panels` | bool | false | `--no-text-panels` | `no_text_panels` | `noTextPanels` | Disable the text-panel heuristic (#173). |
+| `heading_hierarchy` | bool | false | `--heading-hierarchy` | `heading_hierarchy` | `headingHierarchy` | Infer PDF/image heading levels after assembly (#302). |
+| `ocr_engine` | `ppocr` \| `tesseract` | `ppocr` (`DOCLING_RS_OCR_ENGINE`) | `--ocr-engine` | `ocr_engine` | `ocrEngine` | Which OCR engine reads scanned pages (#460). |
+| `ocr_lang` | `en` \| `ch` \| BCP-47; tessdata stems under Tesseract | `en` (`DOCLING_RS_OCR_LANG`) | `--ocr-lang` | `ocr_lang` | `ocrLang` | OCR recognition language, validated against the engine it will drive. |
+| `ocr_mode` | `default` \| `full_page` \| `layout_regions` \| `pdf_aware_layout_regions` | `default` | `--ocr-mode` | `ocr_mode` | `ocrMode` | Which regions feed the OCR (docling's `OcrMode`, #254). |
+| `ocr_scale` | px/pt > 0 | unset = the 2.0 render | `--ocr-scale` | `ocr_scale` | `ocrScale` | OCR input scale (docling's `OcrOptions.scale`, #254). |
+| `images_scale` | 0.1–4.0 px/pt | unset = the 2.0 render | `--images-scale` | `images_scale` | `imagesScale` | Picture-crop / page-image scale (docling's `images_scale`, #520). |
+| `page_images` | bool | false | `--page-images` | `generate_page_images` | `pageImages` | Keep each page's render as the JSON page image (docling's `generate_page_images`, #520). Python: `generate_page_images` (also accepted as a JSON alias). |
+| `do_picture_classification` | bool | false | `--enrich-picture-classes` | `do_picture_classification` | `doPictureClassification` | Enrichment: classify pictures with DocumentFigureClassifier (#423). CLI: `--enrich-picture-classes`. |
+| `do_code_enrichment` | bool | false | `--enrich-code` | `do_code_enrichment` | `doCodeEnrichment` | Enrichment: rewrite code blocks with CodeFormulaV2 (#423). CLI: `--enrich-code`. |
+| `do_formula_enrichment` | bool | false | `--enrich-formula` | `do_formula_enrichment` | `doFormulaEnrichment` | Enrichment: decode display formulas to LaTeX with CodeFormulaV2 (#423). CLI: `--enrich-formula`. |
+| `pipeline` | `standard` \| `vlm` | `standard` | `--pipeline` | `pipeline` | `pipeline` | The remote vision-model pipeline instead of the local ML stack (#77); the `vlm_*` options are inert under `standard`. |
+| `vlm_endpoint` | URL | `DOCLING_RS_VLM_ENDPOINT` | `--vlm-endpoint` | `vlm_endpoint` | `vlmEndpoint` | OpenAI-compatible endpoint for `pipeline=vlm`. serve: a request-supplied endpoint needs `--allow-url-fetch`. |
+| `vlm_model` | string | `DOCLING_RS_VLM_MODEL` | `--vlm-model` | `vlm_model` | `vlmModel` | Model name for `pipeline=vlm`. |
+| `vlm_api_key` | string | `DOCLING_RS_VLM_API_KEY` | `--vlm-api-key` | `vlm_api_key` | `vlmApiKey` | Bearer token for the endpoint. |
+| `vlm_prompt` | string | `DOCLING_RS_VLM_PROMPT`, else docling's default | `--vlm-prompt` | `vlm_prompt` | `vlmPrompt` | Per-page instruction. |
+| `vlm_max_tokens` | int > 0 | 8192 | `--vlm-max-tokens` | `vlm_max_tokens` | `vlmMaxTokens` | `max_tokens` per completion. |
+
+## Validation rules (shared)
+
+Checked before any work starts, with the same message on every surface
+(the CLI prints the flag spelling, Node the camelCase one):
+
+- `pages` — `A-B` or `N`, 1-based, `A ≤ B`.
+- `document_timeout`, `ocr_scale` — finite and positive.
+- `images_scale` — in 0.1–4.0.
+- `ocr_engine` — `ppocr` | `tesseract`; `ocr_mode` — one of the four modes.
+- `ocr_lang` — a language the selected engine reads (`en`/`ch`/BCP-47 under
+  PP-OCR; tessdata stems or BCP-47 tags under Tesseract).
+- `pipeline` — `standard` | `vlm`; `vlm_max_tokens` — positive; under `vlm`,
+  an endpoint and a model must come from the options or the
+  `DOCLING_RS_VLM_*` environment.
+
+`asr_lang`, `encoding` and `ebcdic_layout` are checked against the model,
+codec or copybook when the conversion runs.
+
+## Surface notes
+
+- **CLI** — flags fill a `ConvertOptions`, `validate()` runs once after the
+  command line is parsed; errors read `--ocr-scale must be a positive
+  number, got 0`.
+- **serve** — the query string, the JSON body and multipart text parts are
+  three layers of the same struct (body over query, text parts over query),
+  merged generically; a text value is read as the option's type (string,
+  integer, number, then `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` for
+  booleans), an unreadable one is a 400 naming the option. Unknown names are
+  ignored, as unknown query parameters always were. The two server-side
+  policies stay in serve: `fetch_images` and a request-supplied
+  `vlm_endpoint` need `--allow-url-fetch`, `xbrl_taxonomy` must be a
+  relative path without `..`.
+- **Python** — the keyword arguments keep docling's spellings (`do_ocr`,
+  `do_table_structure`, `page_range`, `generate_page_images`) and map onto
+  the struct; a rejected option is a `ValueError` at construction.
+- **Node** — the option objects (`ConverterOptions`, `ConvertOptions`,
+  `StreamOptions`) serialize into the struct, so every property is honoured
+  by `convertFile`, `new DocumentConverter`, `new Pipeline` and the
+  streaming functions alike; a rejected option throws `InvalidArg` naming
+  the property (`ocrLang`, `documentTimeout`).
+- **C ABI / wasm** — one JSON object: `to`, `images` plus the wire names;
+  an unknown key is an error.

@@ -102,6 +102,24 @@ println!("{}", result.document.export_to_markdown());   // or .export_to_json()
 
 ---
 
+### One option set across the surfaces (#577)
+
+Every conversion option is one serializable struct, `docling::ConvertOptions`
+(`crates/docling/src/options.rs`), with `validate()` and `apply()` in the
+library: the CLI, docling-serve, the C ABI, the wasm module and the Python /
+Node bindings parse their own input shape into it and share the rejection
+rules, the messages and the mapping onto `DocumentConverter`; the engine
+defaults are stated once (`DocumentConverter::default()`). Before, each
+surface re-declared the fields and re-implemented the checks — the C ABI had
+no `list_attachments`, the Python wrapper dropped five kwargs the native
+class took, docling-serve's OpenAPI document was missing five request options
+it accepted, and nothing caught any of it. The inventory test
+(`crates/docling/tests/options_inventory.rs`) now holds every surface's
+documentation to the central table (`docs/OPTIONS.md`, `OPTIONS` in
+`options.rs`). docling has no single equivalent — its options are spread
+over `PipelineOptions`, per-format backend options and docling-serve's
+request model — so this is a docling.rs structure, not a parity item.
+
 ## 2. Format coverage
 
 Conformance is measured against the latest **published** docling (installed from

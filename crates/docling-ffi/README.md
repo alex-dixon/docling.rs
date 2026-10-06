@@ -34,23 +34,27 @@ docling_result_free(r);
 
 ## Options
 
-`options_json` is one JSON object (`NULL` or `""` = defaults) whose keys
-mirror [docling-serve](../docling-serve)'s request options:
+`options_json` is one JSON object (`NULL` or `""` = defaults): the output
+selection below plus **every conversion option of
+[`docling::ConvertOptions`](../docling/src/options.rs)** — the one option
+set the CLI, docling-serve, the wasm module and the Python/Node bindings
+share (#577), with the same validation rules and the same engine defaults.
+The full list with each surface's spelling is
+[`docs/OPTIONS.md`](../../docs/OPTIONS.md); the keys here are its "wire"
+column.
 
 | Key | Values | Meaning |
 |---|---|---|
 | `to` | `md` (default) \| `json` \| `dclx` \| `latex` \| `html` \| `pandoc` | Output format (`latex` = docling 2.124's LaTeX document, #317; `pandoc` = Pandoc's JSON AST for `pandoc -f json`, #515) |
-| `strict` | bool | Docling-faithful Markdown instead of the readable default |
 | `images` | `placeholder` (default) \| `embedded` | Pictures in Markdown: comment placeholder or base64 data URIs |
+| `strict`, `compact_tables`, `page_break_placeholder` | bool, bool, string | Markdown shaping: docling-faithful Markdown; unpadded tables (#271); text between pages |
+| `fetch_images`, `list_attachments`, `skip_empty_cells`, `ebcdic_layout`, `encoding`, `xbrl_taxonomy`, `use_web_browser` | — | Declarative formats: external `<img src>` (the embedder owns its network policy); the email Attachments section (#251); sparse spreadsheet grids (#271); the EBCDIC copybook (#252); text encoding; the XBRL taxonomy directory; headless-browser HTML pre-render |
+| `asr_model`, `asr_lang`, `video_frames` | string, string, int | Audio/video: ASR preset, transcription language, max sampled frames (0 = transcript only) |
+| `pages`, `document_timeout` | `"A-B"` or `"N"`, seconds | PDF page window (1-based inclusive); per-document budget (#497) |
 | `no_ocr`, `skip_ocr`, `force_full_page_ocr`, `no_table_former`, `no_text_panels`, `heading_hierarchy` | bool | PDF/image pipeline switches (`skip_ocr` #244: layout + TableFormer, never OCR; `heading_hierarchy` #302: infer section-header levels) |
-| `ocr_mode` | `default` \| `full_page` \| `layout_regions` \| `pdf_aware_layout_regions` | Which regions feed the OCR (docling's `OcrMode`, #254) |
-| `ocr_scale` | float | OCR render scale in px per PDF point (docling's default 3; unset reads the 2.0 px/pt pipeline render) |
-| `compact_tables`, `skip_empty_cells` | bool | Unpadded Markdown tables / drop empty cells from sparse spreadsheet grids (#271) |
-| `fetch_images` | bool | Resolve external `<img src>` for HTML/EPUB (the embedder owns its network policy) |
-| `asr_model`, `asr_lang` | string | Whisper preset / transcription language for audio & video |
-| `video_frames` | int | Max sampled video frames (0 = transcript only) |
-| `pages` | `"A-B"` or `"N"` | PDF page window (1-based inclusive) |
-| `ocr_lang` | `en` (default) \| `ch` | OCR recognition language |
+| `ocr_engine`, `ocr_lang`, `ocr_mode`, `ocr_scale`, `images_scale`, `page_images` | — | OCR engine (`ppocr` \| `tesseract`, #460) and language; which regions feed the OCR (#254); OCR / picture-crop scale in px per PDF point; keep page renders in the JSON (#520) |
+| `do_picture_classification`, `do_code_enrichment`, `do_formula_enrichment` | bool | Enrichment models (#423) |
+| `pipeline`, `vlm_endpoint`, `vlm_model`, `vlm_api_key`, `vlm_prompt`, `vlm_max_tokens` | — | `standard` (default) \| `vlm`: the remote vision-model pipeline (#77) and its settings |
 
 Unknown keys fail the conversion with a clear message — a typo never
 silently does nothing.

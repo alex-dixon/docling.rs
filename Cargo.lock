@@ -1598,6 +1598,8 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1702,6 +1704,7 @@ dependencies = [
  "docling-pdf",
  "image",
  "js-sys",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

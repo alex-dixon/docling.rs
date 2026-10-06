@@ -16,7 +16,8 @@
 //! const md = convert(new Uint8Array(await file.arrayBuffer()), file.name, "md");
 //! ```
 
-use docling::{DocumentConverter, ImageMode, InputFormat, SourceDocument};
+use docling::{ConvertOptions, DocumentConverter, ImageMode, InputFormat, SourceDocument};
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "ocr")]
@@ -41,6 +42,57 @@ fn start() {
     console_error_panic_hook::set_once();
 }
 
+/// One request: the output selection plus the conversion options every
+/// surface shares ([`docling::ConvertOptions`], #577) — the JSON object
+/// [`convert_with_options`] takes.
+#[derive(Debug, Default, Deserialize)]
+struct Request {
+    /// `md` (default) | `json` | `doclang` | `latex` | `html` | `pandoc`.
+    to: Option<String>,
+    /// `placeholder` (default) | `embedded` — see [`image_mode`].
+    images: Option<String>,
+    #[serde(flatten)]
+    convert: ConvertOptions,
+}
+
+/// Parse the options JSON; unknown keys are rejected (serde's
+/// `deny_unknown_fields` cannot see through the `flatten`), so a misspelled
+/// key fails loudly instead of silently doing nothing.
+fn parse_request(options_json: Option<&str>) -> Result<Request, String> {
+    let Some(json) = options_json.filter(|j| !j.trim().is_empty()) else {
+        return Ok(Request::default());
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("options: {e}"))?;
+    let Some(map) = value.as_object() else {
+        return Err("options: expected a JSON object".into());
+    };
+    let unknown = ConvertOptions::unknown_keys(map.keys().map(String::as_str), &["to", "images"]);
+    if let Some(key) = unknown.first() {
+        return Err(format!("options: unknown field `{key}`"));
+    }
+    serde_json::from_value(value).map_err(|e| format!("options: {e}"))
+}
+
+/// The positional [`convert`] arguments as a [`Request`]: `max_pages` is the
+/// window `1-N` (issue #80's window with first pinned to 1).
+fn positional_request(
+    to: Option<&str>,
+    images: Option<&str>,
+    max_pages: Option<u32>,
+    page_break_placeholder: Option<&str>,
+) -> Request {
+    Request {
+        to: to.map(str::to_owned),
+        images: images.map(str::to_owned),
+        convert: ConvertOptions {
+            pages: max_pages.filter(|&n| n > 0).map(|n| format!("1-{n}")),
+            page_break_placeholder: page_break_placeholder.map(str::to_owned),
+            ..ConvertOptions::default()
+        },
+    }
+}
+
 /// The whole conversion body, host-testable (`JsError` can only be
 /// constructed on the wasm target, so the JS boundary stays a thin shim).
 fn convert_impl(
@@ -51,22 +103,28 @@ fn convert_impl(
     max_pages: Option<u32>,
     page_break_placeholder: Option<&str>,
 ) -> Result<String, String> {
+    convert_request(
+        bytes,
+        filename,
+        positional_request(to, images, max_pages, page_break_placeholder),
+    )
+}
+
+/// Convert per a parsed [`Request`]: the shared options validated and applied
+/// by [`ConvertOptions::apply`] (the ML-only ones are inert here — the formats
+/// they affect are rejected at convert time), then the export `to` names.
+fn convert_request(bytes: &[u8], filename: &str, request: Request) -> Result<String, String> {
     let ext = filename.rsplit('.').next().unwrap_or_default();
     let format = InputFormat::from_extension(ext)
         .ok_or_else(|| format!("unknown or unsupported extension: {filename:?}"))?;
     let source = SourceDocument::from_bytes(filename.to_string(), format, bytes.to_vec());
-    let mut converter = DocumentConverter::new();
-    // "First N pages" (issue #80's window with first pinned to 1): only PDFs
-    // consume it; other formats convert whole, same as the CLI.
-    if let Some(n) = max_pages.filter(|&n| n > 0) {
-        converter = converter.page_range(1, n as usize);
-    }
-    // docling's `page_break_placeholder`: text between pages in the Markdown
-    // (slides, sheets, DjVu pages, PDF text-layer pages). Unset = no breaks.
-    converter = converter.page_break_placeholder(page_break_placeholder.map(str::to_owned));
+    let converter = request
+        .convert
+        .apply(DocumentConverter::new())
+        .map_err(|e| e.to_string())?;
     let result = converter.convert(source).map_err(|e| e.to_string())?;
-    let to = to.unwrap_or("md");
-    let image_mode = image_mode(images, to)?;
+    let to = request.to.as_deref().unwrap_or("md");
+    let image_mode = image_mode(request.images.as_deref(), to)?;
     match to {
         // `Referenced` is deliberately unreachable here: it hands the caller
         // loose image files to write next to the Markdown, which a page with no
@@ -161,6 +219,29 @@ pub fn convert(
         page_break_placeholder.as_deref(),
     )
     .map_err(|e| JsError::new(&e))
+}
+
+/// Convert with the full option set as one JSON object (#577): `to` and
+/// `images` as in [`convert`], plus every conversion option the CLI,
+/// docling-serve, the C ABI and the Python/Node bindings share — the keys of
+/// `docling::ConvertOptions` (`strict`, `compact_tables`,
+/// `page_break_placeholder`, `pages`, `encoding`, `skip_empty_cells`,
+/// `list_attachments`, `xbrl_taxonomy`, …), validated by the same rules.
+/// Options of the ML pipeline are accepted and inert in this build (the
+/// formats they apply to are rejected at convert time). Unknown keys are an
+/// error. `undefined` / `""` means defaults.
+///
+/// ```js
+/// convert_with_options(bytes, file.name, JSON.stringify({ to: "md", strict: true, pages: "1-3" }));
+/// ```
+#[wasm_bindgen]
+pub fn convert_with_options(
+    bytes: &[u8],
+    filename: &str,
+    options_json: Option<String>,
+) -> Result<String, JsError> {
+    let request = parse_request(options_json.as_deref()).map_err(|e| JsError::new(&e))?;
+    convert_request(bytes, filename, request).map_err(|e| JsError::new(&e))
 }
 
 /// The file extensions this build can convert, as a JSON string array —
@@ -305,6 +386,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("unknown images="), "{err}");
+    }
+
+    /// `convert_with_options` reads the shared option set: a `pages` window
+    /// and `strict` land, a typo is rejected, and the positional `convert`
+    /// arguments are the same request.
+    #[test]
+    fn options_json_is_the_shared_option_set() {
+        let md = b"# Title\n\nHello *world*\n";
+        let req = parse_request(Some(r#"{"to": "json", "strict": true, "pages": "1-2"}"#)).unwrap();
+        assert_eq!(req.to.as_deref(), Some("json"));
+        assert_eq!(req.convert.strict, Some(true));
+        assert_eq!(req.convert.page_range().unwrap(), Some((1, 2)));
+        let out = convert_request(md, "note.md", req).unwrap();
+        assert!(out.contains("\"schema_name\""));
+        let err = parse_request(Some(r#"{"strictness": true}"#)).unwrap_err();
+        assert!(err.contains("unknown field `strictness`"), "{err}");
+        let err = convert_request(
+            md,
+            "note.md",
+            parse_request(Some(r#"{"pages": "0-2"}"#)).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("pages"), "{err}");
+        assert_eq!(
+            positional_request(None, None, Some(3), Some("<!-- p -->"))
+                .convert
+                .pages
+                .as_deref(),
+            Some("1-3")
+        );
     }
 
     #[test]

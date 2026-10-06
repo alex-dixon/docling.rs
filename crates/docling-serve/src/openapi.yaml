@@ -70,6 +70,7 @@ paths:
         - { $ref: "#/components/parameters/fetch_images" }
         - { $ref: "#/components/parameters/skip_empty_cells" }
         - { $ref: "#/components/parameters/compact_tables" }
+        - { $ref: "#/components/parameters/page_break_placeholder" }
         - { $ref: "#/components/parameters/md_page_break_placeholder" }
         - { $ref: "#/components/parameters/pandoc_api_version" }
         - { $ref: "#/components/parameters/list_attachments" }
@@ -79,6 +80,11 @@ paths:
         - { $ref: "#/components/parameters/ocr_lang" }
         - { $ref: "#/components/parameters/ocr_mode" }
         - { $ref: "#/components/parameters/ocr_scale" }
+        - { $ref: "#/components/parameters/ocr_engine" }
+        - { $ref: "#/components/parameters/images_scale" }
+        - { $ref: "#/components/parameters/page_images" }
+        - { $ref: "#/components/parameters/document_timeout" }
+        - { $ref: "#/components/parameters/use_web_browser" }
         - { $ref: "#/components/parameters/asr_model" }
         - { $ref: "#/components/parameters/asr_lang" }
         - { $ref: "#/components/parameters/encoding" }
@@ -110,6 +116,7 @@ paths:
                 strict: { type: boolean }
                 images: { $ref: "#/components/schemas/Images" }
                 no_ocr: { type: boolean }
+                skip_ocr: { type: boolean }
                 force_full_page_ocr: { type: boolean }
                 no_table_former: { type: boolean }
                 no_text_panels: { type: boolean }
@@ -120,12 +127,20 @@ paths:
                 fetch_images: { type: boolean }
                 skip_empty_cells: { type: boolean }
                 compact_tables: { type: boolean }
-                md_page_break_placeholder: { type: string, examples: ["<!-- page break -->"] }
+                list_attachments: { type: boolean }
+                ebcdic_layout: { type: string }
+                page_break_placeholder: { type: string, examples: ["<!-- page break -->"] }
+                md_page_break_placeholder: { type: string, description: "Alias of page_break_placeholder." }
                 pandoc_api_version: { type: string, examples: ["1.23"] }
                 pages: { type: string, examples: ["2-5"] }
                 ocr_lang: { $ref: "#/components/schemas/OcrLang" }
                 ocr_mode: { $ref: "#/components/schemas/OcrMode" }
                 ocr_scale: { $ref: "#/components/schemas/OcrScale" }
+                ocr_engine: { $ref: "#/components/schemas/OcrEngine" }
+                images_scale: { $ref: "#/components/schemas/ImagesScale" }
+                page_images: { type: boolean }
+                document_timeout: { type: number, exclusiveMinimum: 0, examples: [90] }
+                use_web_browser: { type: boolean }
                 asr_model: { type: string }
                 asr_lang: { type: string, examples: ["auto", "en", "de"] }
                 encoding: { type: string, examples: ["shift_jis", "koi8-r", "windows-1251"] }
@@ -464,6 +479,22 @@ components:
         OCR render scale in pixels per PDF point (docling's
         `OcrOptions.scale`). Unset reads the pipeline's own 2.0 px/pt render;
         docling's default is 3 (216 dpi).
+    OcrEngine:
+      type: string
+      enum: [ppocr, tesseract]
+      description: >-
+        Which OCR engine reads scanned pages (#460): the built-in PP-OCR
+        recognizer (default) or the server's `tesseract` binary; under
+        Tesseract `ocr_lang` is its language list (tessdata stems such as
+        `deu+fra`, or BCP-47 tags).
+    ImagesScale:
+      type: number
+      minimum: 0.1
+      maximum: 4.0
+      description: >-
+        Picture crops (and page images) in pixels per PDF point — docling's
+        `images_scale` (#520). Unset keeps the pipeline's 2.0 px/pt render;
+        the JSON picture `dpi` is 72·scale.
     Scale:
       type: number
       minimum: 0.1
@@ -584,16 +615,18 @@ components:
             reads. Only 1.23 (pandoc-types 1.23.1.1, Pandoc 3.x) is written;
             any other version is a 400 rather than a document Pandoc would
             reject.
-        md_page_break_placeholder:
+        page_break_placeholder:
           type: string
           examples: ["<!-- page break -->"]
           description: >
-            Text inserted between pages in Markdown output (docling-serve's
-            option of the same name; docling-core's
-            `MarkdownParams.page_break_placeholder`). A break lands only
-            between two rendered blocks on different pages — never first or
-            last, empty pages collapse. Unset: no page breaks (docling's
-            default). Markdown only.
+            Text inserted between pages in Markdown output (docling-core's
+            `MarkdownParams.page_break_placeholder`; the shared option name,
+            #577). A break lands only between two rendered blocks on
+            different pages — never first or last, empty pages collapse.
+            Unset: no page breaks (docling's default). Markdown only.
+        md_page_break_placeholder:
+          type: string
+          description: Alias of `page_break_placeholder` (this server's historical spelling).
         pages:
           type: string
           pattern: '^\d+(-\d+)?$'
@@ -602,6 +635,30 @@ components:
         ocr_lang: { $ref: "#/components/schemas/OcrLang" }
         ocr_mode: { $ref: "#/components/schemas/OcrMode" }
         ocr_scale: { $ref: "#/components/schemas/OcrScale" }
+        ocr_engine: { $ref: "#/components/schemas/OcrEngine" }
+        images_scale: { $ref: "#/components/schemas/ImagesScale" }
+        page_images:
+          type: boolean
+          default: false
+          description: >-
+            Keep each page's render as the JSON `pages[n].image` (docling's
+            `generate_page_images`, #520).
+        document_timeout:
+          type: number
+          exclusiveMinimum: 0
+          examples: [90]
+          description: >-
+            Per-document budget in seconds for the PDF pipeline (docling's
+            `document_timeout`, #497), checked between pages: once spent, the
+            pages done so far are the (partial) document and the response
+            carries `x-docling-status: partial_success`. Unset = unlimited.
+        use_web_browser:
+          type: boolean
+          default: false
+          description: >-
+            Pre-render HTML with a headless browser before parsing; needs a
+            server built with the `web-browser` feature (a request on one
+            without it fails with a clear error).
         scale: { $ref: "#/components/schemas/Scale" }
         asr_model:
           type: string
@@ -849,8 +906,10 @@ components:
       { name: skip_empty_cells, in: query, schema: { type: boolean } }
     compact_tables:
       { name: compact_tables, in: query, schema: { type: boolean } }
+    page_break_placeholder:
+      { name: page_break_placeholder, in: query, schema: { type: string } }
     md_page_break_placeholder:
-      { name: md_page_break_placeholder, in: query, schema: { type: string } }
+      { name: md_page_break_placeholder, in: query, schema: { type: string }, description: "Alias of page_break_placeholder." }
     pandoc_api_version:
       { name: pandoc_api_version, in: query, schema: { type: string } }
     list_attachments:
@@ -867,6 +926,16 @@ components:
       { name: ocr_mode, in: query, schema: { $ref: "#/components/schemas/OcrMode" } }
     ocr_scale:
       { name: ocr_scale, in: query, schema: { $ref: "#/components/schemas/OcrScale" } }
+    ocr_engine:
+      { name: ocr_engine, in: query, schema: { $ref: "#/components/schemas/OcrEngine" } }
+    images_scale:
+      { name: images_scale, in: query, schema: { $ref: "#/components/schemas/ImagesScale" } }
+    page_images:
+      { name: page_images, in: query, schema: { type: boolean } }
+    document_timeout:
+      { name: document_timeout, in: query, schema: { type: number, exclusiveMinimum: 0 } }
+    use_web_browser:
+      { name: use_web_browser, in: query, schema: { type: boolean } }
     asr_model:
       { name: asr_model, in: query, schema: { type: string } }
     asr_lang:

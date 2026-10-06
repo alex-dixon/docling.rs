@@ -298,31 +298,59 @@ impl PyDocumentConverter {
         vlm_max_tokens: Option<usize>,
         document_timeout: Option<f64>,
     ) -> PyResult<Self> {
-        // `document_timeout` (docling's `PipelineOptions.document_timeout`,
-        // #497): a positive number of seconds, or None for unlimited.
-        let document_timeout = match document_timeout {
-            Some(secs) if secs.is_finite() && secs > 0.0 => {
-                Some(std::time::Duration::from_secs_f64(secs))
-            }
-            Some(secs) => {
-                return Err(PyValueError::new_err(format!(
-                    "document_timeout must be a positive number of seconds, got {secs}"
-                )))
-            }
-            None => None,
-        };
         // A malformed window (0-based, reversed) raises here instead of
         // silently selecting nothing (#518).
         let page_range = check_page_range(page_range)?;
-        let vlm = resolve_vlm(
-            pipeline.as_deref(),
+        // The kwargs as the shared option set (#577): docling's positive
+        // spellings (`do_ocr`, `do_table_structure`) and the docling.rs-only
+        // `text_layer_only` map onto the engine's switches here, `page_range`
+        // onto its `"A-B"` wire form; validation and the mapping onto the
+        // converter are then the library's — the same rules and messages as
+        // the CLI, docling-serve and the Node bindings. Markdown flavour
+        // (`strict`) and the page-break text are chosen at export time on
+        // this surface, so they stay unset.
+        let opts = docling::ConvertOptions {
+            fetch_images: Some(fetch_images),
+            list_attachments: Some(list_attachments),
+            skip_empty_cells: Some(skip_empty_cells),
+            compact_tables: Some(compact_tables),
+            ebcdic_layout,
+            encoding,
+            use_web_browser: Some(use_web_browser),
+            xbrl_taxonomy: xbrl_taxonomy.map(|p| p.to_string_lossy().into_owned()),
+            asr_model,
+            asr_lang,
+            video_frames,
+            pages: page_range.map(|(first, last)| format!("{first}-{last}")),
+            document_timeout,
+            no_ocr: Some(text_layer_only),
+            skip_ocr: Some(!do_ocr),
+            force_full_page_ocr: Some(force_full_page_ocr),
+            no_table_former: Some(!do_table_structure),
+            no_text_panels: Some(no_text_panels),
+            heading_hierarchy: Some(heading_hierarchy),
+            ocr_engine,
+            ocr_lang,
+            ocr_mode,
+            ocr_scale,
+            images_scale,
+            page_images: Some(generate_page_images),
+            do_picture_classification: Some(do_picture_classification),
+            do_code_enrichment: Some(do_code_enrichment),
+            do_formula_enrichment: Some(do_formula_enrichment),
+            pipeline,
             vlm_endpoint,
             vlm_model,
             vlm_api_key,
             vlm_prompt,
             vlm_max_tokens,
-            page_range,
-        )?;
+            ..docling::ConvertOptions::default()
+        };
+        // A rejected option is a `ValueError` at construction, not a
+        // mid-conversion failure.
+        let value_err = |e: docling::OptionsError| PyValueError::new_err(e.to_string());
+        opts.validate().map_err(value_err)?;
+        let vlm = opts.vlm_options().map_err(value_err)?;
         // `allowed_formats` (docling's converter arg) restricts which input
         // formats convert; an unknown name is an error so typos surface early.
         let base = match allowed_formats {
@@ -337,152 +365,32 @@ impl PyDocumentConverter {
             }
             None => docling::DocumentConverter::new(),
         };
-        let enrich = docling::EnrichmentOptions {
-            picture_classification: do_picture_classification,
-            code: do_code_enrichment,
-            formula: do_formula_enrichment,
-        };
-        // `video_frames` caps the frames sampled from a video input (0 =
-        // transcript only; extraction needs the ffmpeg binary at runtime).
-        let base = match video_frames {
-            Some(max) => base.video_frames(max),
-            None => base,
-        };
-        // `xbrl_taxonomy` is the directory an XBRL instance's taxonomy is read
-        // from (docling's `XBRLBackendOptions.taxonomy`); unset = the
-        // instance's own directory.
-        let base = match xbrl_taxonomy {
-            Some(dir) => base.xbrl_taxonomy(dir),
-            None => base,
-        };
-        // `page_range=(first, last)` converts only that 1-based inclusive PDF
-        // page window, docling's option of the same name (#80).
-        let base = match page_range {
-            Some((first, last)) => base.page_range(first, last),
-            None => base,
-        };
-        let base = base
-            .document_timeout(document_timeout)
-            // ZIP inputs (#557): the same `DOCLING_RS_ZIP_MAX_*` bounds the
-            // CLI and serve apply.
-            .archive_limits(docling::ArchiveLimits::from_env());
-        // `ocr_lang` / `ocr_mode` / `ocr_scale` (#254) — validated here so a
-        // typo raises instead of degrading; the parsed values also prime the
-        // warm pipeline in `initialize_pipeline`.
-        let ocr_engine_choice = match &ocr_engine {
-            Some(e) => Some(docling::OcrEngine::parse(e).ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "ocr_engine {e:?} is not {}",
-                    docling::OcrEngine::ACCEPTED
-                ))
-            })?),
-            None => None,
-        };
-        // `ocr_lang` is read against the engine (#460): en/ch (or a BCP-47
-        // tag for either) select a PP-OCR model; under Tesseract it is that
-        // engine's language list instead.
-        let engine = ocr_engine_choice.unwrap_or_else(docling::OcrEngine::from_env);
-        let ocr_lang_choice = match &ocr_lang {
-            Some(lang) => {
-                engine.validate_lang(lang).map_err(PyValueError::new_err)?;
-                match engine {
-                    docling::OcrEngine::PpOcr => docling::OcrLang::parse(lang),
-                    docling::OcrEngine::Tesseract => None,
-                }
-            }
-            None => None,
-        };
-        let tesseract_lang = match (&ocr_lang, engine) {
-            (Some(lang), docling::OcrEngine::Tesseract) => {
-                Some(docling::tesseract_lang_arg(lang).map_err(PyValueError::new_err)?)
-            }
-            _ => None,
-        };
-        let ocr_mode_choice = match &ocr_mode {
-            Some(mode) => Some(docling::OcrMode::parse(mode).ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "ocr_mode {mode:?} is not \"default\"|\"full_page\"|\
-                     \"layout_regions\"|\"pdf_aware_layout_regions\""
-                ))
-            })?),
-            None => None,
-        };
-        if let Some(s) = ocr_scale {
-            if !(s.is_finite() && s > 0.0) {
-                return Err(PyValueError::new_err(format!(
-                    "ocr_scale must be a positive number, got {s}"
-                )));
-            }
-        }
-        // `images_scale` (#520): the CLI's / serve's 0.1–4.0 window.
-        if let Some(s) = images_scale {
-            if !(0.1..=4.0).contains(&s) {
-                return Err(PyValueError::new_err(format!(
-                    "images_scale must be a number in 0.1-4.0, got {s}"
-                )));
-            }
-        }
-        let images = docling::ImageOutput {
-            scale: images_scale,
-            page_images: generate_page_images,
-        };
-        let base = match images_scale {
-            Some(s) => base.images_scale(s),
-            None => base,
-        };
-        let base = base.generate_page_images(generate_page_images);
-        let base = match ocr_lang {
-            Some(lang) => base.ocr_lang(lang),
-            None => base,
-        };
-        let base = match ocr_mode {
-            Some(mode) => base.ocr_mode(mode),
-            None => base,
-        };
-        let base = match ocr_engine {
-            Some(engine) => base.ocr_engine(engine),
-            None => base,
-        };
-        let base = match ocr_scale {
-            Some(s) => base.ocr_scale(s),
-            None => base,
-        };
+        // ZIP inputs (#557): the same `DOCLING_RS_ZIP_MAX_*` bounds the CLI
+        // and serve apply.
+        let inner = opts
+            .apply(base.archive_limits(docling::ArchiveLimits::from_env()))
+            .map_err(value_err)?;
         Ok(Self {
-            inner: base
-                .fetch_images(fetch_images)
-                .list_attachments(list_attachments)
-                .skip_empty_cells(skip_empty_cells)
-                .compact_tables(compact_tables)
-                .ebcdic_layout_opt(ebcdic_layout)
-                .asr_model(asr_model)
-                .asr_lang(asr_lang)
-                .encoding(encoding)
-                .no_ocr(text_layer_only)
-                .skip_ocr(!do_ocr)
-                .force_full_page_ocr(force_full_page_ocr)
-                .no_table_former(!do_table_structure)
-                .no_text_panels(no_text_panels)
-                .heading_hierarchy(heading_hierarchy)
-                .use_web_browser(use_web_browser)
-                .do_picture_classification(do_picture_classification)
-                .do_code_enrichment(do_code_enrichment)
-                .do_formula_enrichment(do_formula_enrichment),
+            inner,
             pdf_pipeline: std::sync::Arc::new(std::sync::Mutex::new(None)),
             no_ocr: text_layer_only,
             skip_ocr: !do_ocr,
             no_table_former: !do_table_structure,
             no_text_panels,
             heading_hierarchy,
-            enrich,
+            enrich: opts.enrichments(),
             force_full_page_ocr,
-            ocr_lang: ocr_lang_choice,
-            ocr_engine: ocr_engine_choice,
-            tesseract_lang,
-            ocr_mode: ocr_mode_choice,
+            // The typed values the warm pipeline is primed with in
+            // `initialize_pipeline` (the transient `inner` path reads the
+            // strings off the converter instead).
+            ocr_lang: opts.ocr_lang().map_err(value_err)?,
+            ocr_engine: opts.ocr_engine().map_err(value_err)?,
+            tesseract_lang: opts.tesseract_lang().map_err(value_err)?,
+            ocr_mode: opts.ocr_mode().map_err(value_err)?,
             ocr_scale,
-            images,
+            images: opts.image_output(),
             page_range,
-            document_timeout,
+            document_timeout: opts.document_timeout().map_err(value_err)?,
             vlm,
         })
     }
@@ -756,64 +664,6 @@ impl PyDocumentConverter {
                 .map_err(|e| ConversionError::new_err(e.to_string()))?;
             Ok(native_result(result))
         })
-    }
-}
-
-/// Resolve the `pipeline` / `vlm_*` kwargs (#304) into
-/// [`docling::vlm::VlmOptions`], or `None` for the standard pipeline — the
-/// same contract as the Node bindings' `resolve_vlm`: `pipeline` absent or
-/// `"standard"` intentionally ignores stray `vlm_*` kwargs, blank strings
-/// count as unset (reaching the `DOCLING_RS_VLM_*` env fallbacks), and a bad
-/// configuration is a `ValueError` at construction, not a mid-conversion
-/// failure.
-fn resolve_vlm(
-    pipeline: Option<&str>,
-    endpoint: Option<String>,
-    model: Option<String>,
-    api_key: Option<String>,
-    prompt: Option<String>,
-    max_tokens: Option<usize>,
-    page_range: Option<(usize, usize)>,
-) -> PyResult<Option<docling::vlm::VlmOptions>> {
-    let set = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
-    match pipeline {
-        None | Some("standard") => Ok(None),
-        Some("vlm") => {
-            let mut v =
-                docling::vlm::VlmOptions::resolve(set(endpoint), set(model)).map_err(|e| {
-                    // The library's message names the CLI flags; this
-                    // surface's spelling is the kwargs.
-                    PyValueError::new_err(
-                        e.to_string()
-                            .replace("pass --vlm-endpoint", "pass vlm_endpoint")
-                            .replace("pass --vlm-model", "pass vlm_model"),
-                    )
-                })?;
-            if let Some(p) = set(prompt) {
-                v.prompt = Some(p);
-            }
-            if let Some(k) = set(api_key) {
-                v.api_key = Some(k);
-            }
-            // Validated like the Node bindings' `vlmMaxTokens`: 0 would have
-            // every page come back empty and surface as a model error.
-            match max_tokens {
-                Some(0) => {
-                    return Err(PyValueError::new_err(
-                        "vlm_max_tokens must be greater than 0",
-                    ))
-                }
-                Some(n) => v.max_tokens = n,
-                None => {}
-            }
-            // `page_range` composes with the VLM exactly as with the ML
-            // pipeline — only the selected pages are rendered and sent.
-            v.page_range = page_range;
-            Ok(Some(v))
-        }
-        Some(other) => Err(PyValueError::new_err(format!(
-            "unknown pipeline {other:?} (expected: standard, vlm)"
-        ))),
     }
 }
 

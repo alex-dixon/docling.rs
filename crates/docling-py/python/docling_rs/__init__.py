@@ -211,6 +211,20 @@ class DocumentConverter:
       ``prov.page_no`` in the engine's JSON (PDF and DjVu pages, slides, sheets); the
       engine-side ``--page-break-placeholder`` of the CLI / serve / Node is
       not a kwarg of this wrapper.
+    * ``text_layer_only`` — skip the whole PDF ML stack and read the embedded
+      text layer only (the docling.rs fast path behind the CLI's ``--no-ocr``).
+    * ``list_attachments`` — email (.eml/.msg): append an Attachments section
+      with names and content types (#251; the payload is never embedded).
+    * ``ebcdic_layout`` — EBCDIC (#252): the copybook layout, inline
+      ``EbcdicLayout`` JSON or a file path (default: the ``<stem>.layout.json``
+      sidecar next to the source).
+    * ``video_frames`` — max frames sampled from a video (0 = transcript only;
+      needs the ``ffmpeg`` binary); default 8.
+    * ``xbrl_taxonomy`` — XBRL: the directory the instance's taxonomy is read
+      from (docling's ``XBRLBackendOptions.taxonomy``); default: the instance's
+      own directory.
+      These five reached the native class before but not this wrapper; every
+      surface now shares one option set (#577, ``docs/OPTIONS.md``).
     * ``allowed_formats`` — restrict conversion to these :class:`InputFormat`\\ s
       (docling's converter arg); a source of any other format raises.
     * ``asr_model`` — the speech-recognition model for audio/video, by preset
@@ -297,6 +311,11 @@ class DocumentConverter:
         page_range: Optional[Tuple[int, int]] = None,
         images_scale: Optional[float] = None,
         generate_page_images: bool = False,
+        text_layer_only: bool = False,
+        list_attachments: bool = False,
+        ebcdic_layout: Optional[str] = None,
+        video_frames: Optional[int] = None,
+        xbrl_taxonomy: Optional[Union[str, "os.PathLike[str]"]] = None,
         artifacts_path=None,
     ):
         ensure_env(artifacts_path)
@@ -451,6 +470,11 @@ class DocumentConverter:
             page_range=_page_range(page_range),
             images_scale=images_scale,
             generate_page_images=generate_page_images,
+            text_layer_only=text_layer_only,
+            list_attachments=list_attachments,
+            ebcdic_layout=ebcdic_layout,
+            video_frames=video_frames,
+            xbrl_taxonomy=xbrl_taxonomy,
             allowed_formats=(
                 [InputFormat(f).value for f in allowed_formats]
                 if allowed_formats is not None
