@@ -1014,10 +1014,15 @@ output geometry is mapped back to display coordinates, so all four
 orientations of the same scan OCR identically. Pages rotated *physically in
 the raster* (a sideways phone photo, a landscape-fed sheet — `/Rotate 0`, so
 the flag says nothing) are caught too: the recognizer probes a handful of
-line crops under each 90° hypothesis and un-rotates when a rotated reading
-clearly beats the upright one, page by page, before any inference. The pass
-runs only on pages with no text layer, degrades to a no-op when the evidence
-is thin, and can be disabled with `DOCLING_RS_OCR_ORIENTATION=off`.
+the text detector's lines under each 90° hypothesis and un-rotates when a
+rotated reading clearly beats the upright one — more confident text, not
+merely more characters (#571: on the ink-projection strips the probe once
+read, a sparse form's fields gave every hypothesis the same poor confidence
+and 9 of FUNSD's 199 upright forms were turned on their side; on the
+detector's boxes all 199 read upright at 0.97+ confidence and take the
+early exit) — page by page, before any inference. The pass runs only on
+pages with no text layer, degrades to a no-op when the evidence is thin, and
+can be disabled with `DOCLING_RS_OCR_ORIENTATION=off`.
 Note on the OCR default:
 `--ocr-lang en` (the default) uses an English PP-OCRv3 recognition model with
 good Latin word spacing; the docling conformance corpus, however, was
@@ -1057,24 +1062,31 @@ OCR, like a missing model (#244); with `--force-full-page-ocr` it is an
 error. Each crop is one process, dealt across the OCR lanes
 (`DOCLING_RS_OCR_SESSIONS`), each pinned to one OpenMP thread.
 
-OCR has two stages, like docling's engines (#429). Recognition (PP-OCRv3)
-reads the lines inside the layout regions of a scanned page or an image
-input; a **text detector** (RapidOCR's PP-OCRv6 DB model,
-`.models/ocr_det.onnx`, `DOCLING_OCR_DET_ONNX` to point elsewhere) then
-sweeps the whole bitmap and every detected line no recognized cell covers
-is recognized too and placed as orphan text — a diagram's labels, a stamp,
-a margin note, text the layout model scored below its threshold. Lines
-inside a kept picture or table stay that element's silent children, as in
-docling. The detector is optional: without the model OCR is region-scoped,
-exactly as before it shipped. It runs on bitmap pages only (a digital page
-costs nothing) and concurrently with the layout model; its network is the
-costliest OCR stage on a scan, so its input's longer side is capped at 960 px
-by default (PaddleOCR's own `det_limit_side_len`; a Letter page at the 2.0
-px/pt render goes in at 736 × 960 — about a third of the uncapped time, with
-only noise-level output differences on the snapshot corpus).
-`DOCLING_RS_OCR_DET_MAX_SIDE` moves the cap; `0` restores RapidOCR's — and so
-docling's — uncapped rule (shorter side scaled up to 736, 1216 × 1600 for
-that page).
+OCR has two stages, like docling's engines (#429): a **text detector**
+(RapidOCR's PP-OCRv6 DB model, `.models/ocr_det.onnx`, `DOCLING_OCR_DET_ONNX`
+to point elsewhere) sweeps the bitmap of a scanned page or an image input,
+and the recognizer reads its boxes. Inside the layout regions the detector's
+boxes are the recognizer's crops (#570) — one text run each, with the
+detector's margin, exactly what RapidOCR hands its recognizer; the detected
+lines no region covers are recognized too and placed as orphan text — a
+diagram's labels, a stamp, a margin note, text the layout model scored below
+its threshold (lines inside a kept picture or table stay that element's
+silent children, as in docling). A region the detector found nothing in,
+and every region when the model is not installed, is cut into lines by an
+ink-projection profile instead — the pre-#570 path, `DOCLING_RS_OCR_LINES=
+projection` forces it. The difference shows on forms: several fields on one
+baseline used to share one strip and read as `OLDCOLDMENTHOLUIGHTS&ULTRA`;
+on FUNSD's 199 scanned forms word recall against the annotations went from
+0.61 to 0.86 (see `docs/MIGRATION.md`). Recognition is **PP-OCRv6**
+(`.models/ocr_rec_v6.onnx`, RapidOCR's and docling's multilingual model) when
+installed, the PP-OCRv3 pairs otherwise, and a line whose mean character
+confidence is under RapidOCR's `text_score` (0.5, `DOCLING_RS_OCR_TEXT_SCORE`)
+is dropped — a shaded band no longer reads out as a 30-letter heading. The
+detector runs on bitmap pages only (a digital page costs nothing) and
+concurrently with the layout model; its input's longer side is capped at
+RapidOCR's `max_side_len`, 2000 px (`DOCLING_RS_OCR_DET_MAX_SIDE`; `0` lifts
+the cap, 960 — PaddleOCR's budget and the pre-#570 default — is about a third
+of the time at a cost of ~0.02 recall on FUNSD).
 
 Two more OCR knobs mirror docling 2.116+ options (#254), on every surface
 (CLI flag, `DocumentConverter`/`Pipeline` builder, serve option, Python
@@ -1091,8 +1103,12 @@ kwarg, Node option):
 - `--ocr-scale X` (`DOCLING_RS_OCR_SCALE`) — docling's `OcrOptions.scale`:
   the resolution OCR reads, in pixels per PDF point. Unset, OCR reads the
   pipeline's own 2.0 px/pt (144 dpi) page render — the pinned conformance
-  baseline; a different value resamples that render for the OCR input only
-  (layout and TableFormer pixels are untouched). docling's default is 3
+  baseline — and an **image input** at docling's effective resolution (#570):
+  3 px/pt shrunk so the longer side stays within RapidOCR's 2000 px, which is
+  what its models see after RapidOCR's `max_side_len` pass (a 754 × 1000 scan
+  reads at 2.0 — measured best on FUNSD: 0.825 / 0.856 / 0.836 word recall at
+  1 / 2 / 3 px/pt); a set value resamples the render or image for the OCR
+  input only (layout and TableFormer pixels are untouched). docling's default is 3
   (216 dpi); lower it when the source raster is already high-resolution and
   upscaling degrades recognition.
 - `--images-scale X` — docling's `images_scale` (#520): the resolution of

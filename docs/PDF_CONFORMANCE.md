@@ -246,6 +246,7 @@ diff history of each port lives in the git log of these files).
 | `_assign_cells_to_clusters`, `_find_unassigned_cells` | exclusive cell assignment: each non-empty cell goes to the single best-overlapping regular region at > 0.2 intersection-over-self; cells no regular claims become orphan text regions; orphans > 80 % inside a picture or table are that special's children (a picture's are nested under it in the JSON — `Node::PictureChildren` — and left out of the reading order, like upstream's `_set_cluster_children`) | `assemble::add_orphan_regions`, `picture_parents` |
 | `_adjust_cluster_bboxes`, `keep_empty_clusters=False`, the three merge rounds (#419) | once cells are final, every regular region is fitted to its cells' union, an empty regular region is dropped, and orphans inside a fitted box fold in — before TableFormer and the reading order, which never see the raw model boxes | `assemble::fit_regions_to_cells` |
 | OCR'd pages: `_should_prefer_cluster` / `_select_best_cluster_from_group` (union-find over IoU > 0.8 or 80 % containment) | region-scoped OCR recognizes each region's crop, so a paragraph box over its own line boxes would read the ink twice: such groups collapse to one survivor on the group's union box | `assemble::merge_overlapping_regulars` |
+| RapidOCR's crops: the recognizer reads the detector's boxes (#570) | inside each text/table region the DB detector's boxes (center in the region, taken whole) are the recognizer's line crops; a region the detector saw nothing in, or every region without the model, is split into ink-projection strips (the pre-#570 line source, `DOCLING_RS_OCR_LINES=projection`); RapidOCR's `text_score` (0.5) drops low-confidence lines. FUNSD word recall 0.57 → 0.86 on 30 forms with the PP-OCRv6 recognizer (`.models/ocr_rec_v6.onnx`, preferred when present) | `ocr_prep::prep_region_lines_det`, `prep_table_words_det`, `ocr_prep::text_score`, `ocr::resolve_rec_pair` |
 | `_sort_cells` (docling-parse index order), `PageAssembleModel.sanitize_text` (docling#4052) | a region's cells serialize in source order; lines join with a space except after an *attached* dash, which fuses the wrapped word; a detached dash is kept | `assemble::cells_text` |
 | `predict_merges` (docling#3888) | cross-column / cross-page paragraph continuations (a hard hyphen before a lowercase continuation joins without it; the head test accepts a trailing comma; tables are in the skip set) | `assemble::merge_continuations` |
 | `_init_l2r_map` / `_init_ud_map` (docling#4093, 2.124) | two elements consecutive in assembly order, left strictly of right on one row (vertical IoU > 0.8), are linked left→right and a row is read through before the paragraph below it; the assembly rank is the region's first source cell (a table's or picture's first *interior* cell) | `reading_order::init_l2r` / `init_ud`, `assemble::cluster_cids` |
@@ -255,7 +256,8 @@ diff history of each port lives in the git log of these files).
 | `ListItemMarkerProcessor` | a leading `-` / bullet / `N.` / `a)` marker is split off the item text; a compound `3.a.` rides in the text | `docling-core` list-item processing |
 | `_match_hyperlink` | the URI whose annotation rects cover ≥ 0.5 of the region, accumulated per URI, on **footnote** items only — both committed groundtruth generations carry the link into the document only there | `assemble` footnote hyperlinks |
 | forced OCR (docling#4061) | `--force-full-page-ocr` / `ocr_mode=full_page\|layout_regions` skip the text-layer decode outright | `pdfium_backend::for_each_page(extract_text = false)` |
-| RapidOCR's text detection (#429) | the `PP-OCRv6_det_small` DB detector runs over a bitmap page alongside layout and adds the lines no recognized cell covers (> 30 % overlap = covered, cumulatively) as orphan cells (confidence 1.0); input capped at 960 px a side (`DOCLING_RS_OCR_DET_MAX_SIDE`, PaddleOCR's default, ~⅓ the time); without the model OCR stays region-scoped | `ocr_det.rs`, `Worker::detect_alongside` |
+| RapidOCR's text detection (#429) | the `PP-OCRv6_det_small` DB detector runs over a bitmap page alongside layout (or ahead of the orientation probe, which reuses its boxes, #571) and adds the lines no recognized cell covers (> 30 % overlap = covered, cumulatively) as orphan cells (confidence 1.0); input capped at RapidOCR's `max_side_len`, 2000 px (`DOCLING_RS_OCR_DET_MAX_SIDE`; 960 was the pre-#570 budget, ~⅓ the time, −0.02 FUNSD recall); without the model OCR stays region-scoped on projection strips | `ocr_det.rs`, `Worker::detect_alongside` |
+| `OcrOptions.scale` = 3 + RapidOCR's `max_side_len` = 2000 on image inputs | a standalone image (its own scale-1.0 page) is read by OCR at 3 px/pt shrunk to a 2000 px longer side — docling's effective resolution (#570; a 754 × 1000 form at 2.0); rendered PDF pages keep the 2.0 px/pt render the baselines are pinned to (docling would read them at 2.52 on Letter — a deliberate divergence, kept for the baselines; `--ocr-scale` overrides either) | `page_ocr_scale` |
 | pdfium's `CPDF_Page` frame, docling#4008 | glyphs, link rects and the page size live in the `CropBox ∩ MediaBox` frame with `/Rotate` applied to the display frame, so a trimmed book page or a rotated digital page lines its cells up with the render | `textparse::page_box`, `pdfium_backend::to_display_frame` |
 | docling-parse's page-box filter (#529) | a glyph is kept only when its whole char box (advance × the font's ascent / descent) lies inside the display box — the CropBox, else the MediaBox — edges included: a FrameMaker print slug beside the CropBox or a tiled page's neighbouring text beyond the MediaBox never becomes a cell (it used to be clamped onto the page edge, often to zero width), and a line crossing the edge is cut at the last glyph that fits, as docling-parse cuts it; no corpus page changes | `textparse::on_page` |
 | docling-parse's char rect (`page_cell.h`, #528) | a glyph drawn with a non-upright text matrix — the `0 s -s 0 tx ty Tm` runs landscape `/Rotate 90` pages are built from, 180°/270°, or tilted — keeps its rotated quad, so the corner-distance contraction reads the line in its own reading order and the cell box is the quad's extent (before: zero-width boxes, every such run dropped; 180° read backwards). Upright glyphs keep the plain loose rectangle, so upright output is byte-identical. redp5110's 90° column headers (`*JOBCTL`, `QIBM_DB_SECADM`, …) now reach TableFormer and the table matches the groundtruth cell for cell (180 → 152 diff lines); the ODF-exported presentations — landscape slides drawn onto a portrait page through a 90° `cm` — get their text layer instead of OCR | `textparse::show_text`, `dp_lines::build_cells` |
@@ -530,13 +532,19 @@ display-space geometry at assembly via `PdfPage::rotation`:
    four `/Rotate` orientations of `ocr_test.pdf` OCR byte-identically.
 2. **Content-based orientation** (`orient.rs`, #225): a physically rotated
    raster (`/Rotate 0` — sideways phone photo, landscape-fed sheet) is probed
-   with the recognizer itself, the classic OSD trick: segment the page with
-   the same projection segmentation OCR uses, recognize up to 6 of the widest
-   line crops under each 90° hypothesis, score by Σ(confidence × chars). An
-   upright page early-exits after one probe round (≥20 chars at ≥0.90 mean
-   confidence); a rotated hypothesis must read real text (≥8 chars at ≥0.55)
-   *and* beat upright by 1.2× to win — thin evidence (blank/line-art pages)
-   is a no-op, and any probe failure degrades to "assume upright". Scores are
+   with the recognizer itself, the classic OSD trick: take the text
+   detector's boxes (#571; the projection strips without the model), rotate
+   them with the page into each 90° hypothesis, recognize up to 6 of the
+   widest, score by Σ(confidence × chars). An upright page early-exits after
+   one probe round (≥20 chars at ≥0.90 mean confidence); a rotated hypothesis
+   must read real text (≥8 chars at ≥0.55), beat upright by 1.2× *and* read
+   more confidently by 0.10 to win — thin evidence (blank/line-art pages) is
+   a no-op, and any probe failure degrades to "assume upright". The margin
+   is what #571 needed: on projection strips a sparse form read at the same
+   poor confidence every way round and the character count sent 9 of
+   FUNSD's 199 upright forms sideways; on detector boxes all 199 read upright
+   at ≥ 0.97 and take the early exit. The detector's boxes are kept for the
+   OCR pass of an upright page, so detection still runs once. Scores are
    deterministic (single-threaded rec, fixed probe selection), so snapshots
    hold. `DOCLING_RS_OCR_ORIENTATION=off` disables the pass;
    `DOCLING_RS_DEBUG=1` prints per-hypothesis scores. Pinned by the

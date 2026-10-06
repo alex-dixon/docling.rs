@@ -256,9 +256,9 @@ pub fn prep_region_lines(
 
 /// [`prep_region_lines`] with the text detector's boxes as the line source
 /// (#570): inside each text region, the detected lines whose center falls in
-/// the region are the crops (clipped to the region, in the detector's reading
-/// order); a region the detector found nothing in falls back to the
-/// projection segmentation. `detected` is in image pixels (the detector ran
+/// the region are the crops (whole, in the detector's reading order — see
+/// `det_boxes_inside`); a region the detector found nothing in falls back to
+/// the projection segmentation. `detected` is in image pixels (the detector ran
 /// on `img`).
 ///
 /// Why: the projection profile cuts a region into full-width strips, so on a
@@ -288,7 +288,7 @@ pub fn prep_region_lines_det(
         if r <= l || b <= t {
             continue;
         }
-        let inside = det_boxes_inside(detected, l, t, r, b);
+        let inside = det_boxes_inside(detected, l, t, r, b, iw, ih);
         if inside.is_empty() {
             let (bb, pl) = prep_region_lines(img, std::slice::from_ref(region), scale);
             bboxes.extend(bb);
@@ -408,7 +408,7 @@ pub fn prep_table_words(
 
 /// [`prep_table_words`] with the text detector's boxes as the word source
 /// (#570): inside each table region the detected boxes whose center falls in
-/// it are the crops (clipped to the region) — RapidOCR's cells, which is what
+/// it are the crops (whole) — RapidOCR's cells, which is what
 /// docling's TableFormer matcher receives on a scanned table; a table the
 /// detector found nothing in falls back to the projection line/word split.
 pub fn prep_table_words_det(
@@ -431,7 +431,7 @@ pub fn prep_table_words_det(
         if r <= l || b <= t {
             continue;
         }
-        let inside = det_boxes_inside(detected, l, t, r, b);
+        let inside = det_boxes_inside(detected, l, t, r, b, iw, ih);
         if inside.is_empty() {
             let (bb, pl) = prep_table_words(img, std::slice::from_ref(region), scale);
             bboxes.extend(bb);
@@ -456,13 +456,21 @@ pub fn prep_table_words_det(
 }
 
 /// The detected boxes whose center lies in the `l..r × t..b` image-pixel
-/// rectangle, clipped to it, in the detector's reading order.
+/// rectangle, in the detector's reading order. A box is taken whole (clipped
+/// to the image, not to the region): the layout box is often tight on the
+/// ink while the detector's unclip margin reaches past it, and cutting that
+/// margin off clips the first and last glyphs — RapidOCR recognizes the
+/// detector's box as drawn. The crop may thus poke a little outside the
+/// region; the cell keeps the box geometry and assembly assigns it by
+/// overlap, as for any cell.
 fn det_boxes_inside(
     detected: &[crate::ocr_det::DetBox],
     l: u32,
     t: u32,
     r: u32,
     b: u32,
+    iw: u32,
+    ih: u32,
 ) -> Vec<(u32, u32, u32, u32)> {
     detected
         .iter()
@@ -471,10 +479,10 @@ fn det_boxes_inside(
             cx >= l as f32 && cx < r as f32 && cy >= t as f32 && cy < b as f32
         })
         .filter_map(|d| {
-            let dl = (d.l.max(0.0) as u32).max(l);
-            let dt = (d.t.max(0.0) as u32).max(t);
-            let dr = (d.r.max(0.0) as u32).min(r);
-            let db = (d.b.max(0.0) as u32).min(b);
+            let dl = d.l.max(0.0) as u32;
+            let dt = d.t.max(0.0) as u32;
+            let dr = (d.r.max(0.0) as u32).min(iw);
+            let db = (d.b.max(0.0) as u32).min(ih);
             (dr > dl && db > dt).then_some((dl, dt, dr, db))
         })
         .collect()
@@ -624,10 +632,14 @@ mod tests {
             vec![(8.0, 18.0, 192.0, 32.0), (8.0, 58.0, 122.0, 74.0)]
         );
         assert_eq!(lines.len(), 2);
-        // A box reaching past the region is clipped to it; one centered
-        // outside the region is not its line.
+        // A box reaching past the region is taken whole (clipped only to the
+        // image); one centered outside the region is not its line.
+        let narrow = crate::layout::Region {
+            r: 150.0,
+            ..region.clone()
+        };
         let det = [bx(-10.0, 18.0, 250.0, 32.0), bx(300.0, 60.0, 400.0, 70.0)];
-        let (boxes, _) = prep_region_lines_det(&img, std::slice::from_ref(&region), 1.0, &det);
+        let (boxes, _) = prep_region_lines_det(&img, std::slice::from_ref(&narrow), 1.0, &det);
         assert_eq!(boxes, vec![(0.0, 18.0, 200.0, 32.0)]);
         // The detector split the second bar into two words.
         let det = [

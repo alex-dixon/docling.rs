@@ -71,14 +71,18 @@ pub fn det_input_size(w: u32, h: u32) -> Option<(u32, u32)> {
     det_input_size_capped(w, h, max_side_cap())
 }
 
-/// Default cap on the detector input's longer side: PaddleOCR's own
-/// `det_limit_side_len` (`limit_type: max`). RapidOCR — and so docling —
-/// runs the uncapped shorter-side rule instead; measured on the snapshot
-/// corpus the cap cuts detection to about a third of its time (a Letter page
-/// at the 2.0 px/pt render goes 1216 × 1600 → 736 × 960) and moves bitmap
-/// outputs only by noise-level amounts in both directions, so speed wins by
-/// default and `DOCLING_RS_OCR_DET_MAX_SIDE=0` restores RapidOCR's input.
-pub const DEFAULT_MAX_SIDE: u32 = 960;
+/// Default cap on the detector input's longer side: RapidOCR's
+/// `Global.max_side_len` (2000) — the longest side its whole OCR input is
+/// shrunk to before detection, and so what docling's detector sees. Until
+/// #570 this was PaddleOCR's 960 (`det_limit_side_len`, `limit_type: max`):
+/// while the detector only supplemented the region pass that cost about a
+/// third of the detection time and moved outputs by noise-level amounts;
+/// now that its boxes are the recognizer's crops the resolution is recall —
+/// 960 reads 0.834 of FUNSD's words where 2000 reads 0.856 (30 forms, same
+/// recognizer). A Letter page at the 2.0 px/pt render goes in at 1216 ×
+/// 1600; `DOCLING_RS_OCR_DET_MAX_SIDE=0` lifts the cap entirely, 960 restores
+/// the old budget.
+pub const DEFAULT_MAX_SIDE: u32 = 2000;
 
 /// `DOCLING_RS_OCR_DET_MAX_SIDE`: the cap on the detector input's longer
 /// side — [`DEFAULT_MAX_SIDE`] unless set, `0` = uncapped (RapidOCR's rule).
@@ -649,8 +653,9 @@ mod tests {
         // Already ≥ 736 on the short side: unchanged bar the /32 rounding.
         assert_eq!(det_input_size_capped(1335, 2652, 0), Some((1344, 2656)));
         assert_eq!(det_input_size(0, 10), None);
-        // The default cap (960, PaddleOCR's) applies when the env knob is unset.
-        assert_eq!(det_input_size(1224, 1584), Some((736, 960)));
+        // The default cap (2000, RapidOCR's) applies when the env knob is
+        // unset — a Letter render stays at its shorter-side-rule size.
+        assert_eq!(det_input_size(1224, 1584), Some((1216, 1600)));
         // A longer-side cap scales a big page down (1224 × 1584 → 736 × 960
         // for 960) and leaves a small image's shorter-side upscale alone
         // (445 × 884 still goes to 736 × 1472 under a 1500 cap, 480 × 960
