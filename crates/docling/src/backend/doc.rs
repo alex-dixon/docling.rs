@@ -55,9 +55,11 @@
 //! pages reached through bin tables the FIB locates with 6-byte
 //! (`fc`, `cb`) pairs. [`convert_word2`] reads the main story as
 //! paragraphs, the tables (cell marks `\r\x07`, the row-end paragraph's
-//! PAPX), and bold / italic from the CHPX — enough to match what Word's own
-//! re-save of such a file converts to; styles (headings), pictures and
-//! fast-saved (`fComplex`) files are not read.
+//! PAPX), bold / italic from the CHPX, and the headings from the style code
+//! each PAPX opens with, resolved through the Word 2.0 stylesheet
+//! ([`word2_styles`], #573) — enough to match what Word's own re-save of
+//! such a file converts to; pictures and fast-saved (`fComplex`) files are
+//! not read.
 
 use docling_core::{DoclingDocument, Node, PictureImage, Table};
 
@@ -675,6 +677,7 @@ fn convert_word2(name: &str, data: &[u8]) -> Result<DoclingDocument, ConversionE
     };
     let chpx_plc = plc(0xA0);
     let papx_plc = plc(0xA6);
+    let styles = word2_styles(data);
 
     let mut doc = DoclingDocument::new(name);
     let mut builder = NodeBuilder::new(ListTables::default());
@@ -693,15 +696,17 @@ fn convert_word2(name: &str, data: &[u8]) -> Result<DoclingDocument, ConversionE
                 1
             };
             let mut props = ParaProps::default();
+            let papx = word2_fkp(data, papx_plc, fc as u64);
+            // The PAPX opens with the paragraph's style code (`stc`); no PAPX
+            // means the default style, `stc` 0 — Word 2.0's "Normal".
+            props.istd = papx.and_then(|p| p.first()).copied().unwrap_or(0) as u16;
             if next == Some(0x07) {
-                let (in_table, ttp) = word2_fkp(data, papx_plc, fc as u64)
-                    .map(word2_table_flags)
-                    .unwrap_or((true, false));
+                let (in_table, ttp) = papx.map(word2_table_flags).unwrap_or((true, false));
                 props.in_table = in_table || !ttp;
                 props.ttp = ttp;
             }
             let mark = if next == Some(0x07) { '\u{0007}' } else { '\r' };
-            para.finish(mark, props, &[], &mut builder, &mut doc);
+            para.finish(mark, props, &styles, &mut builder, &mut doc);
             continue;
         }
         let fmt = word2_fkp(data, chpx_plc, fc as u64)
@@ -714,9 +719,82 @@ fn convert_word2(name: &str, data: &[u8]) -> Result<DoclingDocument, ConversionE
         para.push(cp1252(b), fmt);
         i += 1;
     }
-    para.finish('\r', ParaProps::default(), &[], &mut builder, &mut doc);
+    para.finish('\r', ParaProps::default(), &styles, &mut builder, &mut doc);
     builder.flush(&mut doc);
     Ok(doc)
+}
+
+/// Word 2.0's "Normal" is style code 0 — the default of a paragraph without
+/// a PAPX — and the standard styles occupy 222..=255 (the name slots Word
+/// fills in itself): 222 null, 242 footer, 243 header, 244/245 footnote
+/// reference/text, **254 heading 1 down to 246 heading 9**, 255 normal
+/// indent. (LibreOffice's `ww1` filter, `Ww1Style::ReadName`.)
+const WORD2_STC_HEADING1: u8 = 254;
+const WORD2_STC_HEADING9: u8 = 246;
+
+/// The Word 2.0 stylesheet (`fcStshf` 0x5E / `cbStshf` 0x62 in the FIB) as
+/// `stc → StyleDef`, 256 slots (#573). The STSH is `cstcStd`, then four
+/// blocks each opening with its byte count: the names, the CHPXes, the
+/// PAPXes (per style a count byte — 0xFF: slot unused, 0: defaults — then
+/// the bytes), and the ESTCPs (`iMac`, then per style `stcNext`, `stcBase`).
+/// Slot `stcp` of a block is style code `(stcp - cstcStd) & 255`, so the
+/// standard styles come first. A standard heading is `sti` 1..=9 as in the
+/// Word 97 STSH ([`parse_stsh`]), so [`NodeBuilder::paragraph`] renders it
+/// at the same Markdown level the DOCX backend gives "heading N"; a user
+/// style based on one (one hop, as the DOCX backend reads `basedOn`) is that
+/// heading too. Everything else, and a missing or unreadable stylesheet, is
+/// no style.
+fn word2_styles(data: &[u8]) -> Vec<StyleDef> {
+    let none = StyleDef {
+        sti: 0x0FFF,
+        outline: None,
+    };
+    let heading_sti = |stc: u8| {
+        (WORD2_STC_HEADING9..=WORD2_STC_HEADING1)
+            .contains(&stc)
+            .then(|| (255 - stc) as u16)
+    };
+    let mut styles = vec![none; 256];
+    for (stc, def) in styles.iter_mut().enumerate() {
+        if let Some(sti) = heading_sti(stc as u8) {
+            def.sti = sti;
+        }
+    }
+    // The based-on chain needs the ESTCP block, which follows three
+    // variable blocks: walk them.
+    let (Some(fc), Some(cb)) = (u32_at(data, 0x5E), u16_at(data, 0x62)) else {
+        return styles;
+    };
+    let Some(stsh) = data.get(fc as usize..(fc as usize).saturating_add(cb as usize)) else {
+        return styles;
+    };
+    let Some(cstc_std) = u16_at(stsh, 0) else {
+        return styles;
+    };
+    let mut pos = 2usize;
+    for _ in 0..3 {
+        let Some(cb_block) = u16_at(stsh, pos) else {
+            return styles;
+        };
+        pos = pos.saturating_add(cb_block.max(2) as usize);
+    }
+    let Some(imac) = u16_at(stsh, pos) else {
+        return styles;
+    };
+    pos += 2;
+    for stcp in 0..imac as usize {
+        let stc = stcp.wrapping_sub(cstc_std as usize) & 255;
+        let (Some(&_next), Some(&base)) = (stsh.get(pos), stsh.get(pos + 1)) else {
+            break;
+        };
+        pos += 2;
+        if styles[stc].sti == 0x0FFF && base as usize != stc {
+            if let Some(sti) = heading_sti(base) {
+                styles[stc].sti = sti;
+            }
+        }
+    }
+    styles
 }
 
 /// The PAPX / CHPX bytes (after their count byte) of the run holding `fc`,
@@ -2250,6 +2328,67 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("fast-saved"), "{err}");
+    }
+
+    /// #573: a Word 2.0 paragraph in a standard heading style (`stc` 254 =
+    /// heading 1) converts to the heading its `.docx` normalization gives
+    /// (`##`, docling's level for "heading 1"); the stylesheet's based-on
+    /// chain lifts a user style based on a heading too, and the rest stay
+    /// body text.
+    #[test]
+    fn word2_heading_styles_are_headings() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/doc/sources/word2_heading_styles.doc");
+        let bytes = std::fs::read(path).expect("fixture");
+        let styles = word2_styles(&bytes);
+        assert_eq!(styles[254].sti, 1);
+        assert_eq!(styles[253].sti, 2);
+        assert_eq!(styles[246].sti, 9);
+        for stc in [0u8, 1, 2, 222, 255] {
+            assert_eq!(styles[stc as usize].sti, 0x0FFF, "stc {stc}");
+        }
+        let src = SourceDocument::from_bytes("w2", InputFormat::Doc, bytes);
+        let md = DocBackend
+            .convert(&src)
+            .expect("converts")
+            .export_to_markdown();
+        let headings: Vec<&str> = md.lines().filter(|l| l.starts_with('#')).collect();
+        assert_eq!(
+            headings,
+            ["## HEADING NUMBER ONE TITLE", "## HEADING NUMBER"],
+            "{md}"
+        );
+        // A synthesized stylesheet: user style 7 based on heading 3 (stc 252)
+        // is a heading 3; one based on Normal (0) is not; a slot whose base
+        // is itself stays plain. Layout: cstcStd 0 → stcp == stc.
+        let mut fib = vec![0u8; 0x70];
+        fib[0..2].copy_from_slice(&0xA5DBu16.to_le_bytes());
+        let stsh_at = fib.len() as u32;
+        let mut stsh = Vec::new();
+        stsh.extend_from_slice(&0u16.to_le_bytes()); // cstcStd
+        for block in [vec![0xFFu8; 9], vec![0xFF; 9], vec![0xFF; 9]] {
+            stsh.extend_from_slice(&((block.len() + 2) as u16).to_le_bytes());
+            stsh.extend_from_slice(&block);
+        }
+        stsh.extend_from_slice(&9u16.to_le_bytes()); // iMac
+        for stc in 0u8..9 {
+            let base = match stc {
+                7 => 252,
+                8 => 0,
+                _ => stc,
+            };
+            stsh.extend_from_slice(&[0, base]); // stcNext, stcBase
+        }
+        fib[0x5E..0x62].copy_from_slice(&stsh_at.to_le_bytes());
+        fib[0x62..0x64].copy_from_slice(&(stsh.len() as u16).to_le_bytes());
+        fib.extend_from_slice(&stsh);
+        let styles = word2_styles(&fib);
+        assert_eq!(styles[7].sti, 3);
+        assert_eq!(styles[8].sti, 0x0FFF);
+        assert_eq!(styles[0].sti, 0x0FFF);
+        assert_eq!(styles[252].sti, 3);
+        // No stylesheet at all: the standard codes still read as headings.
+        assert_eq!(word2_styles(&[0xDB, 0xA5])[254].sti, 1);
     }
 
     /// The PAPX sprm patterns the sample's cells and row ends carry.
