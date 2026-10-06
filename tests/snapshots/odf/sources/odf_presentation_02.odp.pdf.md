@@ -18,7 +18,7 @@ Maecenas mauris lectus, lobortis et purus mattis, blandit dictum tellus. Maecena
 
 ## Photo
 
-BAAAB SYGOWEROYUOOPBB ASDEGHDKOBEC XZXGVBNMOBE
+<!-- image -->
 
 ## Hello
 
