@@ -657,11 +657,16 @@ impl Walker {
         let prop = |name: &str| rpr.and_then(|pr| pr.children().find(|n| n.has_tag_name(name)));
         let mut bold = prop("b").is_some_and(|b| on_off(attr(b, "val")));
         let raw_on = |n: XmlNode| !matches!(attr(n, "val"), Some("0" | "false"));
+        // `<w:bCs>` (complex-script bold) is deliberately not a bold signal
+        // here or in the paragraph mark, as in docling 2.133 (#587): Word
+        // emits it as a font-theme artefact next to `w:szCs` / `rFonts
+        // cstheme` without the user applying bold, and writes `<w:b>` even
+        // for Arabic text when they do — so `<w:b>` alone is reliable. The
+        // Markdown walk (`docx.rs`) never read `bCs`; reading it here made a
+        // plain cell a RichTableCell with a `<strong>` the document has not.
         if !bold {
-            // Any `<w:b>` / `<w:bCs>` in the run, then the paragraph mark's.
-            bold = r
-                .descendants()
-                .any(|n| (n.has_tag_name("b") || n.has_tag_name("bCs")) && raw_on(n));
+            // Any `<w:b>` in the run, then the paragraph mark's.
+            bold = r.descendants().any(|n| n.has_tag_name("b") && raw_on(n));
         }
         if !bold {
             if let Some(owner) = ppr_owner {
@@ -669,10 +674,7 @@ impl Walker {
                     .children()
                     .find(|n| n.has_tag_name("pPr"))
                     .and_then(|pr| pr.children().find(|n| n.has_tag_name("rPr")))
-                    .is_some_and(|rp| {
-                        rp.children()
-                            .any(|n| (n.has_tag_name("b") || n.has_tag_name("bCs")) && raw_on(n))
-                    });
+                    .is_some_and(|rp| rp.children().any(|n| n.has_tag_name("b") && raw_on(n)));
             }
         }
         if !bold {
