@@ -304,26 +304,35 @@ pub fn db_boxes(prob: &[f32], w: usize, h: usize, dest_w: u32, dest_h: u32) -> V
     boxes
 }
 
-/// `TextDetector.sorted_boxes`: by top edge, rows joined while consecutive
-/// tops are closer than [`BOX_SORT_Y_THRESHOLD`], then left to right in a row.
+/// `TextDetector.sorted_boxes`: by top edge, then a bubble pass that swaps
+/// *adjacent* boxes whose tops lie within [`BOX_SORT_Y_THRESHOLD`] when the
+/// lower one starts further left — RapidOCR's exact algorithm. The first
+/// port (#429) grouped boxes into rows transitively (consecutive tops within
+/// the threshold = one row) and sorted each row by `x`; on a two-column
+/// newspaper every line top is within 10 px of the next line's in the other
+/// column, the whole page chained into one "row", and the lines of a column
+/// came out ordered by their left edge — scrambled — once they became the
+/// recognizer's crops (#570). RapidOCR's local swaps only reorder boxes that
+/// genuinely share a baseline.
 pub fn sort_boxes(boxes: &mut [DetBox]) {
-    boxes.sort_by(|a, b| a.t.total_cmp(&b.t));
-    let mut row = 0usize;
-    let mut rows = Vec::with_capacity(boxes.len());
-    for i in 0..boxes.len() {
-        if i > 0 && boxes[i].t - boxes[i - 1].t >= BOX_SORT_Y_THRESHOLD {
-            row += 1;
+    boxes.sort_by(|a, b| a.t.total_cmp(&b.t).then(a.l.total_cmp(&b.l)));
+    for i in 0..boxes.len().saturating_sub(1) {
+        let mut j = i;
+        loop {
+            let (upper, lower) = (j, j + 1);
+            if (boxes[lower].t - boxes[upper].t).abs() < BOX_SORT_Y_THRESHOLD
+                && boxes[lower].l < boxes[upper].l
+            {
+                boxes.swap(upper, lower);
+            } else {
+                break;
+            }
+            if j == 0 {
+                break;
+            }
+            j -= 1;
         }
-        rows.push(row);
     }
-    let mut order: Vec<usize> = (0..boxes.len()).collect();
-    order.sort_by(|&a, &b| {
-        rows[a]
-            .cmp(&rows[b])
-            .then(boxes[a].l.total_cmp(&boxes[b].l))
-    });
-    let sorted: Vec<DetBox> = order.iter().map(|&i| boxes[i]).collect();
-    boxes.copy_from_slice(&sorted);
 }
 
 /// A candidate enclosing rectangle: its area, corners and shorter side.
@@ -812,6 +821,31 @@ mod tests {
         assert_eq!(
             order,
             vec![(30.0, 20.0), (10.0, 105.0), (50.0, 100.0), (5.0, 200.0)]
+        );
+        // Two columns whose line tops interleave within the threshold (a
+        // newspaper): each column's lines must stay top-to-bottom, and a
+        // right-column line sorts after the left-column line it shares a
+        // baseline with — RapidOCR's result, not one page-wide "row".
+        let mut cols = vec![
+            bx(97.0, 154.0),
+            bx(96.0, 173.0),
+            bx(600.0, 160.0),
+            bx(97.0, 191.0),
+            bx(601.0, 178.0),
+            bx(600.0, 197.0),
+        ];
+        sort_boxes(&mut cols);
+        let order: Vec<(f32, f32)> = cols.iter().map(|b| (b.l, b.t)).collect();
+        assert_eq!(
+            order,
+            vec![
+                (97.0, 154.0),
+                (600.0, 160.0),
+                (96.0, 173.0),
+                (601.0, 178.0),
+                (97.0, 191.0),
+                (600.0, 197.0)
+            ]
         );
     }
 }

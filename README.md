@@ -1077,7 +1077,8 @@ ink-projection profile instead — the pre-#570 path, `DOCLING_RS_OCR_LINES=
 projection` forces it. The difference shows on forms: several fields on one
 baseline used to share one strip and read as `OLDCOLDMENTHOLUIGHTS&ULTRA`;
 on FUNSD's 199 scanned forms word recall against the annotations went from
-0.61 to 0.86 (see `docs/MIGRATION.md`). Recognition is **PP-OCRv6**
+0.61 to 0.90 — Python docling 2.133 with RapidOCR reads 0.85 (see
+`docs/MIGRATION.md`). Recognition is **PP-OCRv6**
 (`.models/ocr_rec_v6.onnx`, RapidOCR's and docling's multilingual model) when
 installed, the PP-OCRv3 pairs otherwise, and a line whose mean character
 confidence is under RapidOCR's `text_score` (0.5, `DOCLING_RS_OCR_TEXT_SCORE`)
