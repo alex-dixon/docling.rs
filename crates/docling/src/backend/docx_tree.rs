@@ -1345,18 +1345,11 @@ impl Walker {
             all.extend(ps);
         }
 
-        let mut seen_text: HashSet<String> = HashSet::new();
-        let mut seen_empty: HashSet<usize> = HashSet::new();
-        for (p, pos) in all {
-            let text = py_paragraph_text(p);
-            let t = text.trim();
-            if !t.is_empty() {
-                if !seen_text.insert(t.to_string()) {
-                    continue;
-                }
-            } else if !seen_empty.insert(pos) {
-                continue;
-            }
+        // No text-keyed dedup (docling's `_handle_textbox_content` has one):
+        // it existed for the `mc:AlternateContent` duplicate of a text box,
+        // which is settled before parsing (`mc.rs`, #572), and it dropped a
+        // paragraph legitimately repeated in a box along with it.
+        for (p, _pos) in all {
             refs.extend(self.handle_text_elements(p, ctx, false));
             let blips: Vec<XmlNode> = p.descendants().filter(|n| n.has_tag_name("blip")).collect();
             let vml: Vec<XmlNode> = p
@@ -2252,6 +2245,7 @@ impl Walker {
             let Some(xml) = pkg.read(&part) else {
                 continue;
             };
+            let xml = super::mc::resolve_alternate_content(&xml);
             let Ok(dom) = Document::parse(&xml) else {
                 continue;
             };
