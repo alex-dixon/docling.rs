@@ -68,6 +68,7 @@ use docling_core::{DoclingDocument, Node, PictureImage, Table};
 use crate::backend::cfb::CompoundFile;
 use crate::backend::markdown::escape_text;
 use crate::backend::officeart;
+use crate::backend::symbol_fonts::{self, SymbolFont};
 use crate::backend::DeclarativeBackend;
 use crate::error::ConversionError;
 use crate::source::SourceDocument;
@@ -160,6 +161,7 @@ impl DeclarativeBackend for DocBackend {
         let data = cfb.stream("Data").unwrap_or_default();
         let spa = parse_plcf_spa(fib.part(&table, Fib::PLCSPA_MOM));
         let drawings = Drawings::parse(fib.part(&table, Fib::DGG_INFO), &word);
+        let fonts = parse_sttbf_ffn(fib.part(&table, Fib::STTBF_FFN));
 
         // The stories follow each other in one CP space ([MS-DOC] 2.3.1):
         // main text, footnotes, headers, comments, endnotes, text boxes.
@@ -182,6 +184,7 @@ impl DeclarativeBackend for DocBackend {
                 fib.ccp_txbx as u64,
             ),
             placed: Default::default(),
+            fonts: &fonts,
             lists: &lists,
         };
 
@@ -273,6 +276,8 @@ struct Story<'a> {
     textboxes: std::collections::HashMap<u32, (u64, u64)>,
     /// The text boxes placed at an anchor so far (shape ids).
     placed: std::cell::RefCell<std::collections::HashSet<u32>>,
+    /// The font table (`SttbfFfn`): name per `ftc` (#588).
+    fonts: &'a [String],
     lists: &'a ListTables,
 }
 
@@ -283,6 +288,39 @@ impl Story<'_> {
         let piece = self.pieces.get(k).filter(|p| p.cp_start <= cp)?;
         let i = cp - piece.cp_start;
         Some((piece_char(self.word, piece, i), piece_fc(piece, i)))
+    }
+
+    /// A text character into the paragraph, as Word shows it (#588): an
+    /// inserted symbol (`sprmCSymbol` on its `0x28` placeholder — the `(`
+    /// the text used to print) and a character set in a symbol
+    /// font (`Symbol`, `Wingdings`, … through the run's `sprmCRgFtc0`/`2`)
+    /// become the glyph's Unicode character, like the DOCX backend's `w:sym`
+    /// and symbol-font runs. A font the table does not name, or a code with
+    /// no glyph, leaves the character as it was.
+    fn push_char(&self, para: &mut ParaAccum, ch: char, fmt: CharFmt) {
+        let font = |ftc: u16| {
+            self.fonts
+                .get(ftc as usize)
+                .and_then(|name| SymbolFont::from_name(name))
+        };
+        let ch = match fmt.symbol {
+            Some((ftc, code)) if ch == '(' => font(ftc)
+                .and_then(|f| f.glyph(code as u32))
+                .or_else(|| char::from_u32(code as u32).filter(|c| !c.is_control()))
+                .unwrap_or(ch),
+            _ if symbol_fonts::is_glyph_code(ch) => {
+                let ftc = if (ch as u32) < 0x80 {
+                    fmt.ftc_ascii.or(fmt.ftc_other)
+                } else {
+                    fmt.ftc_other.or(fmt.ftc_ascii)
+                };
+                ftc.and_then(font)
+                    .and_then(|f| f.glyph(ch as u32))
+                    .unwrap_or(ch)
+            }
+            _ => ch,
+        };
+        para.push(ch, fmt);
     }
 
     /// Walk CPs `from..to` paragraph by paragraph into `doc`. Only the main
@@ -332,7 +370,7 @@ impl Story<'_> {
                         }
                     }
                 }
-                _ => para.push(ch, cache.props(self.word, self.btec, fc)),
+                _ => self.push_char(&mut para, ch, cache.props(self.word, self.btec, fc)),
             }
         }
         para.finish('\r', ParaProps::default(), self.stis, &mut builder, doc);
@@ -358,7 +396,7 @@ impl Story<'_> {
                         out.push(text);
                     }
                 }
-                _ => para.push(ch, cache.props(self.word, self.btec, fc)),
+                _ => self.push_char(&mut para, ch, cache.props(self.word, self.btec, fc)),
             }
         }
         let text = para.plain().trim().to_string();
@@ -533,6 +571,7 @@ impl<'a> Fib<'a> {
     const PLCF_HDD: usize = 11;
     const PLCF_BTE_CHPX: usize = 12;
     const PLCF_BTE_PAPX: usize = 13;
+    const STTBF_FFN: usize = 15;
     const CLX: usize = 33;
     const PLCSPA_MOM: usize = 40;
     const PLCSPA_HDR: usize = 41;
@@ -1184,6 +1223,16 @@ struct CharFmt {
     /// `sprmCPicLocation`: offset of the run's PICF in the Data stream (the
     /// run's `0x01` character is an inline-picture anchor).
     pic_fc: Option<u32>,
+    /// `sprmCRgFtc0` / `sprmCRgFtc2`: the run's font (an index into the
+    /// font table) for ASCII characters and for the "other" ones — the
+    /// 0x80–0xFF byte codes and their PUA images (#588). `None` = the style's.
+    ftc_ascii: Option<u16>,
+    ftc_other: Option<u16>,
+    /// `sprmCSymbol`: `(ftc, xchar)` — the font and glyph code the run's
+    /// `0x28` placeholder stands for (an inserted symbol, Insert ▸ Symbol).
+    /// Word also sets `sprmCFSpec` on such a run, but not in every CHPX of
+    /// a document that shares them, so the placeholder alone is the cue.
+    symbol: Option<(u16, u16)>,
 }
 
 /// FC → [`CharFmt`] through the PlcfBteChpx and CHPX FKPs, memoizing the last
@@ -1284,6 +1333,15 @@ fn apply_chp_sprms(mut sprms: &[u8], fmt: &mut CharFmt) {
         match sprm {
             0x0835 => fmt.bold = sprms[0] == 1 || sprms[0] == 0x81, // sprmCFBold
             0x0836 => fmt.italic = sprms[0] == 1 || sprms[0] == 0x81, // sprmCFItalic
+            0x4A4F => fmt.ftc_ascii = Some(u16::from_le_bytes([sprms[0], sprms[1]])), // sprmCRgFtc0
+            0x4A51 => fmt.ftc_other = Some(u16::from_le_bytes([sprms[0], sprms[1]])), // sprmCRgFtc2
+            // sprmCSymbol: the font and the glyph code of an inserted symbol.
+            0x6A09 => {
+                fmt.symbol = Some((
+                    u16::from_le_bytes([sprms[0], sprms[1]]),
+                    u16::from_le_bytes([sprms[2], sprms[3]]),
+                ))
+            }
             // sprmCPicLocation: PICF offset in the Data stream.
             0x6A03 => {
                 fmt.pic_fc = Some(u32::from_le_bytes([sprms[0], sprms[1], sprms[2], sprms[3]]))
@@ -1311,6 +1369,45 @@ fn inline_picture(data: &[u8], pic_fc: u32) -> Option<PictureImage> {
     }
     let body = data.get(start..base + lcb.max(cb_header))?;
     officeart::first_blip(body, 0)
+}
+
+/// The font table ([MS-DOC] 2.9.272 `SttbfFfn`, #588): an STTB whose
+/// strings are `FFN` records — `cData` entries, each led by its byte count,
+/// which is the FFN's own `cbFfnM1`; the 39 bytes of metrics that follow
+/// (flags, `wWeight`, `chs`, `ixchSzAlt`, `panose`, `fs`) precede the
+/// null-terminated UTF-16 face name (`xszFfn`). Names by `ftc`, the index
+/// the character sprms use; an unreadable table is empty (the text then
+/// prints as before).
+fn parse_sttbf_ffn(sttb: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let Some(&c_data) = u16_at(sttb, 0).as_ref() else {
+        return names;
+    };
+    // An extended STTB (`0xFFFF` marker) is not how Word writes this table,
+    // but read its header the same way rather than mis-parse it.
+    let (c_data, mut pos) = if c_data == 0xFFFF {
+        (u16_at(sttb, 2).unwrap_or(0) as usize, 6)
+    } else {
+        (c_data as usize, 4)
+    };
+    let cb_extra = u16_at(sttb, pos - 2).unwrap_or(0) as usize;
+    for _ in 0..c_data {
+        let Some(&cch) = sttb.get(pos) else { break };
+        let Some(ffn) = sttb.get(pos + 1..pos + 1 + cch as usize) else {
+            break;
+        };
+        let name: String = ffn
+            .get(39..)
+            .unwrap_or(&[])
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&u| u != 0)
+            .map(|u| char::from_u32(u as u32).unwrap_or('\u{FFFD}'))
+            .collect();
+        names.push(name);
+        pos += 1 + cch as usize + cb_extra;
+    }
+    names
 }
 
 /// Parse the PlcfSpa: floating-shape anchors as `(anchor CP, spid)`.

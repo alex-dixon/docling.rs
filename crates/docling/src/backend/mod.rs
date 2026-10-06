@@ -72,6 +72,7 @@ mod quattro;
 mod rtf;
 mod staroffice5;
 pub(crate) mod svg;
+mod symbol_fonts;
 // DjVu (#434): pure-Rust decode via `djvu-rs`, so it builds everywhere,
 // wasm included.
 pub(crate) mod djvu;

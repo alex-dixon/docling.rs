@@ -16,6 +16,7 @@
 //! them through LibreOffice into a single image, which serializes as the same
 //! `<!-- image -->` placeholder.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use docling_core::{DoclingDocument, InlineRun, ListItemDclx, Node, PictureImage, Script, Table};
@@ -23,6 +24,7 @@ use roxmltree::{Document, Node as XmlNode};
 
 use crate::backend::markdown::escape_text;
 use crate::backend::ooxml::{resolve, Package};
+use crate::backend::symbol_fonts::{self, SymbolFont};
 use crate::backend::DeclarativeBackend;
 use crate::error::ConversionError;
 use crate::source::SourceDocument;
@@ -1833,13 +1835,78 @@ pub(super) fn grid_span(tc: XmlNode) -> usize {
         .unwrap_or(1)
 }
 
+/// The symbol-encoded fonts a run's `w:rFonts` names (#588): the `w:ascii`
+/// font (characters below 0x80) and the `w:hAnsi` one (the rest — the
+/// 0x80–0xFF byte codes and their Private Use Area images), each `None` for
+/// an ordinary font or when the attribute is absent.
+fn run_symbol_fonts(r: XmlNode) -> (Option<SymbolFont>, Option<SymbolFont>) {
+    let Some(fonts) = r
+        .children()
+        .find(|n| n.has_tag_name("rPr"))
+        .and_then(|pr| pr.children().find(|n| n.has_tag_name("rFonts")))
+    else {
+        return (None, None);
+    };
+    let font = |name: &str| attr(fonts, name).and_then(SymbolFont::from_name);
+    (font("ascii"), font("hAnsi"))
+}
+
+/// The text of a `w:t` as Word shows it (#588): set in a symbol font
+/// (`Symbol`, `Wingdings`, …), each glyph code — a byte or its PUA image —
+/// becomes the Unicode character of that glyph; in any other font the text
+/// is returned as it is. The font is the run's own `w:rFonts` (the run the
+/// `w:t` sits in; a hyperlink's or content control's runs carry their own):
+/// a symbol font inherited from a style is not resolved here.
+pub(super) fn t_text<'a>(t: XmlNode<'a, '_>) -> Cow<'a, str> {
+    let text = t.text().unwrap_or("");
+    let Some(run) = t.parent().filter(|p| p.has_tag_name("r")) else {
+        return Cow::Borrowed(text);
+    };
+    let (ascii, hansi) = run_symbol_fonts(run);
+    if ascii.is_none() && hansi.is_none() || !text.chars().any(symbol_fonts::is_glyph_code) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        text.chars()
+            .map(|c| {
+                let font = if (c as u32) < 0x80 {
+                    ascii.or(hansi)
+                } else {
+                    hansi.or(ascii)
+                };
+                font.and_then(|f| f.glyph(c as u32)).unwrap_or(c)
+            })
+            .collect(),
+    )
+}
+
+/// A `w:sym` (Insert ▸ Symbol): the glyph `w:char` (hex, `F06C` or `6C`) of
+/// the font `w:font` as Unicode (#588). A font this reader has no table for
+/// yields the code point as Word stores it (the PUA image a reader with the
+/// font would render), so the character is never silently dropped the way
+/// python-docx's `CT_R.text` drops every `w:sym`.
+pub(super) fn sym_text(n: XmlNode) -> String {
+    let Some(code) = attr(n, "char").and_then(|c| u32::from_str_radix(c.trim(), 16).ok()) else {
+        return String::new();
+    };
+    let mapped = attr(n, "font")
+        .and_then(SymbolFont::from_name)
+        .and_then(|f| f.glyph(code));
+    mapped
+        .or_else(|| char::from_u32(code).filter(|c| !c.is_control()))
+        .map(String::from)
+        .unwrap_or_default()
+}
+
 /// The plain text of one child of a `w:r`, python-docx's `CT_R.text` — which
 /// is where docling's paragraph text comes from, so this is the parity target.
 /// Anything not in its `w:br | w:cr | w:noBreakHyphen | w:ptab | w:t | w:tab`
-/// set contributes nothing.
+/// set contributes nothing — except `w:sym`, which python-docx drops and this
+/// reader maps to the glyph's Unicode character (#588).
 pub(super) fn run_child_text(n: XmlNode) -> String {
     match n.tag_name().name() {
-        "t" => n.text().unwrap_or("").to_string(),
+        "t" => t_text(n).into_owned(),
+        "sym" => sym_text(n),
         // A *line* break is a newline; a page or column break has no text
         // equivalent at all.
         "br" => match attr(n, "type") {
@@ -1857,13 +1924,15 @@ pub(super) fn run_child_text(n: XmlNode) -> String {
 
 /// The plain text of a run inner-content element, for the places that flatten
 /// a subtree with `descendants()` rather than walking a run's own children.
-/// Only `w:t` and `w:noBreakHyphen` are safe to pick up that way — `w:tab` and
-/// `w:br` also appear in paragraph *properties* (`w:pPr/w:tabs/w:tab`), which
-/// carry no text; `collect_run_tuples` handles those from the run itself.
-pub(super) fn flat_text<'a, 'i>(n: XmlNode<'a, 'i>) -> Option<&'a str> {
+/// Only `w:t`, `w:sym` and `w:noBreakHyphen` are safe to pick up that way —
+/// `w:tab` and `w:br` also appear in paragraph *properties*
+/// (`w:pPr/w:tabs/w:tab`), which carry no text; `collect_run_tuples` handles
+/// those from the run itself.
+pub(super) fn flat_text<'a, 'i>(n: XmlNode<'a, 'i>) -> Option<Cow<'a, str>> {
     match n.tag_name().name() {
-        "t" => Some(n.text().unwrap_or("")),
-        "noBreakHyphen" => Some("-"),
+        "t" => Some(t_text(n)),
+        "sym" => Some(Cow::Owned(sym_text(n))),
+        "noBreakHyphen" => Some(Cow::Borrowed("-")),
         _ => None,
     }
 }
@@ -2175,7 +2244,7 @@ fn push_inline_text(node: XmlNode, out: &mut String) {
         }
         "sdt" => {
             for t in node.descendants().filter(|n| n.has_tag_name("t")) {
-                out.push_str(t.text().unwrap_or(""));
+                out.push_str(&t_text(t));
             }
         }
         "smartTag" | "customXml" | "ins" | "moveTo" | "fldSimple" => {
