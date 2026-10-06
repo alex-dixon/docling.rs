@@ -36,7 +36,7 @@ use super::docx::{
     attr, build_enum_marker, chart_rels, child_elements, clean_checkbox_symbols,
     detect_code_language, footnote_texts, get_list_counter, header_footer_parts, in_textbox,
     is_code_by_font, is_code_style, is_title_style, numbered_heading_text, on_off, part_rels,
-    row_cells, row_grid_offsets, run_child_text, style_numbering, Ctx, MAX_TABLE_DEPTH,
+    row_cells, row_grid_offsets, run_child_text, style_numbering, t_text, Ctx, MAX_TABLE_DEPTH,
 };
 use super::html_tree::docling_href;
 use super::ooxml::Package;
@@ -285,8 +285,7 @@ fn note_references(p: XmlNode) -> Vec<(usize, &'static str, String)> {
                         .descendants()
                         .filter(|n| n.has_tag_name("t") && !is_math(*n))
                         .filter(|n| n.ancestors().any(|a| a.has_tag_name("sdtContent")))
-                        .filter_map(|n| n.text())
-                        .map(|t| t.chars().count())
+                        .map(|t| t_text(t).chars().count())
                         .sum::<usize>();
                 }
                 _ => {}
@@ -761,7 +760,7 @@ impl Walker {
                     let text: String = child
                         .descendants()
                         .filter(|n| n.has_tag_name("t") && !is_math(*n) && in_content(*n))
-                        .filter_map(|n| n.text())
+                        .map(t_text)
                         .collect();
                     if text.is_empty() {
                         continue;
@@ -864,7 +863,7 @@ fn paragraph_elements(content: &[Part]) -> Vec<Part> {
 /// reconstruct it.
 fn equations_in_text(element: XmlNode, text: &str) -> (String, Vec<String>) {
     {
-        let mut only_texts: Vec<&str> = Vec::new();
+        let mut only_texts: Vec<String> = Vec::new();
         let mut only_equations: Vec<String> = Vec::new();
         let mut texts_and_equations: Vec<String> = Vec::new();
         let is_omath = |n: XmlNode| n.has_tag_name("oMath") && is_math(n);
@@ -886,20 +885,18 @@ fn equations_in_text(element: XmlNode, text: &str) -> (String, Vec<String>) {
                         .descendants()
                         .filter(|n| n.has_tag_name("t") && !is_math(*n))
                     {
-                        if let Some(s) = t.text() {
-                            only_texts.push(s);
-                            texts_and_equations.push(s.to_string());
-                        }
+                        let s = t_text(t);
+                        only_texts.push(s.to_string());
+                        texts_and_equations.push(s.into_owned());
                     }
                 }
             }
         } else {
             for n in element.descendants() {
                 if n.has_tag_name("t") && !is_math(n) {
-                    if let Some(s) = n.text() {
-                        only_texts.push(s);
-                        texts_and_equations.push(s.to_string());
-                    }
+                    let s = t_text(n);
+                    only_texts.push(s.to_string());
+                    texts_and_equations.push(s.into_owned());
                 } else if is_omath(n) {
                     push_eq(n, &mut only_equations, &mut texts_and_equations);
                 }
