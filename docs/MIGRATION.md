@@ -72,7 +72,7 @@ The layers mirror docling's:
 | **PDF/ML pipeline** | `docling/pipeline/*`, `docling/models/*` | `docling-pdf` — pure-Rust text layer + renderer, ONNX layout/OCR + assembly |
 | **Audio/ASR pipeline** | `docling/pipeline/asr_pipeline.py` | `docling-asr` — symphonia decode + log-mel + ONNX Whisper |
 | **Chunking** | `docling-core` chunkers (`HierarchicalChunker`/`HybridChunker`) | `docling-core::chunker`, re-exported as `docling::chunker` |
-| **CLI** | `docling/cli` | `docling-cli` (incl. warm batch mode: `SOURCE... --output DIR`, `--input GLOB --output DIR [--jobs N]`, `--abort-on-error`, #489; repeatable `--to`, #491) |
+| **CLI** | `docling/cli` | `docling-cli` (incl. warm batch mode: `SOURCE... --output DIR`, `--input GLOB --output DIR [--jobs N]`, `--abort-on-error`, #489; repeatable `--to`, #491; `--list-input-formats` / `--list-output-formats`, #603 — Pandoc's discovery flags, which Python's CLI lacks: the extensions this build converts and the `--to` values, sorted, one per line) |
 | **Beyond upstream's packages** | docling-serve (separate repo) | `docling-serve` (HTTP API), `docling-rag`, Python/Node/wasm bindings, GPU execution providers (`cuda`/`tensorrt`/`directml`/`coreml` features, `DOCLING_RS_EP`) |
 
 ```text

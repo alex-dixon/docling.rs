@@ -826,12 +826,12 @@ async fn parse_source_specs(
 /// submission fails fast instead of parking a doomed job in the queue).
 fn validate_output(options: &ConvertOptions) -> Result<(String, ImageMode), ApiError> {
     let to = options.to.clone().unwrap_or_else(|| "md".into());
-    if !matches!(
-        to.as_str(),
-        "md" | "markdown" | "json" | "html" | "dclx" | "chunks" | "images" | "latex" | "pandoc"
-    ) {
+    // The CLI's `--to` list (#603: one source, `docling::OUTPUT_FORMATS`),
+    // plus the `markdown` alias of `md`.
+    if to != "markdown" && !docling::OUTPUT_FORMATS.contains(&to.as_str()) {
         return Err(ApiError::Bad(format!(
-            "unknown to='{to}' (expected: md, json, html, dclx, chunks, images, latex, pandoc)"
+            "unknown to='{to}' (expected: {})",
+            docling::OUTPUT_FORMATS.join(", ")
         )));
     }
     if let Some(v) = &options.pandoc_api_version {
