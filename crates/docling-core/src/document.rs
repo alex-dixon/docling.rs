@@ -959,6 +959,15 @@ impl Table {
     /// a spanning `<th>` row as `row_header`, not `column_header`, so the
     /// first data row is no longer folded into the header block and the
     /// deviation this port carried for docling-core#765 is gone.
+    ///
+    /// A row also stops the block when it *carries body text* (#604,
+    /// docling-core#766, 2.97): a cell starting on it that is not a column
+    /// header, has non-blank text and does not start in the table's first
+    /// column. A scanned form flags its first-column labels `column_header`
+    /// on every row; without the check each such row folded its values into
+    /// the header, and a table labelled on every row lost its whole body.
+    /// When row 0 itself is stopped that way and no later row carries a
+    /// flag, row 0 is still the header (`1`), as for an unflagged table.
     pub fn header_row_count(&self) -> usize {
         if self.rows.is_empty() {
             return 0;
@@ -971,12 +980,31 @@ impl Table {
                 &derived
             }
         };
-        if !cells.iter().any(|c| c.column_header) {
+        let first_col = cells.iter().map(|c| c.start_col).min().unwrap_or(0);
+        let is_header_row = |r: usize| {
+            let mut flagged = false;
+            for c in cells.iter().filter(|c| c.start_row == r) {
+                if c.column_header {
+                    flagged = true;
+                } else if c.start_col != first_col && !c.text.trim().is_empty() {
+                    return false;
+                }
+            }
+            flagged
+        };
+        let count = (0..self.rows.len())
+            .take_while(|&r| is_header_row(r))
+            .count();
+        // Upstream's row-0 fallback: no flag on any grid row below the first
+        // (a spanning header cell counts on every row it covers) → row 0.
+        if count == 0
+            && !cells
+                .iter()
+                .any(|c| c.column_header && c.start_row + c.row_span.max(1) > 1)
+        {
             return 1;
         }
-        (0..self.rows.len())
-            .take_while(|&r| cells.iter().any(|c| c.column_header && c.start_row == r))
-            .count()
+        count
     }
 
     /// The first-class cell covering a grid position, if any.
