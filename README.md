@@ -448,6 +448,8 @@ fetch them on first use, the container images ship them baked in.
 docling-rs report.pdf --to md
 docling-rs --input ./docs --output ./out --to latex
 docling-rs --help        # every flag; --version reports the compiled-in features
+docling-rs --list-input-formats    # extensions this binary converts, one per line
+docling-rs --list-output-formats   # the --to values, one per line
 
 # HTTP
 curl -F file=@report.pdf 'localhost:5001/v1/convert?to=json&heading_hierarchy=true'
@@ -1377,6 +1379,21 @@ docling-rs --input '/data/reports/**/*.pdf' --output ./converted --to json
 docling-rs --input /data/reports --output ./converted
 # a directory sweeps recursively, taking every file with a convertible
 # extension (stray .log/.tmp files are ignored instead of failing the batch)
+```
+
+Which files a batch takes is the binary's own list (#603, Pandoc's
+discovery flags): `docling-rs --list-input-formats` prints every input
+extension this build converts — sorted, one per line, no dot, `zip` included —
+and `--list-output-formats` the `--to` values, so a wrapper script asks the
+binary instead of hard-coding a list that drifts from it. A format behind a
+cargo feature the build lacks (PDF and images without `pdf`, audio/video
+without `asr`, `.heic` without `heif`) is left out. The library side is
+`InputFormat::supported_extensions()` and `docling::OUTPUT_FORMATS`.
+
+```bash
+if docling-rs --list-input-formats | grep -qx rtf; then
+  docling-rs input.rtf --output out/
+fi
 ```
 
 Two sources that would write the same output file (`sub/b.docx` and

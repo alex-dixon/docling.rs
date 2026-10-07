@@ -42,6 +42,50 @@ fn version_lists_compiled_features() {
     assert!(!stdout.contains('('), "{stdout:?}");
 }
 
+/// `--list-input-formats` (#603, Pandoc's flag): one extension per line,
+/// sorted and unique, exit 0, nothing on stderr — and every listed extension
+/// is one the converter actually routes (plus the CLI's own `zip` batches).
+#[test]
+fn list_input_formats_prints_sorted_extensions() {
+    let (code, stdout, stderr) = run(&["--list-input-formats"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "stderr: {stderr:?}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    let mut sorted = lines.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(lines, sorted, "sorted and unique");
+    // The default build carries the PDF and ASR pipelines.
+    for ext in ["docx", "pdf", "rtf", "png", "mp3", "mp4", "pages", "zip"] {
+        assert!(lines.contains(&ext), "{ext} missing: {stdout}");
+    }
+    for ext in &lines {
+        assert!(
+            *ext == "zip" || docling::InputFormat::from_extension(ext).is_some(),
+            "{ext} listed but not routed"
+        );
+        assert!(!ext.starts_with('.') && *ext == ext.to_ascii_lowercase());
+    }
+    assert_eq!(lines.contains(&"heic"), cfg!(feature = "heif"));
+    // The rest of the command line is ignored, as Pandoc does.
+    let (code, again, _) = run(&["--to", "json", "--list-input-formats", "missing.pdf"]);
+    assert_eq!(code, 0);
+    assert_eq!(again, stdout);
+}
+
+/// `--list-output-formats` (#603): the `--to` values, sorted, one per line —
+/// each of which `--to` accepts.
+#[test]
+fn list_output_formats_prints_the_to_values() {
+    let (code, stdout, stderr) = run(&["--list-output-formats"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stderr.is_empty(), "stderr: {stderr:?}");
+    assert_eq!(
+        stdout,
+        "chunks\ndclx\nhtml\nimages\njson\nlatex\nmd\npandoc\n"
+    );
+}
+
 /// `--help` / `-h`: exit 0, the flag list on stdout (not stderr — it is the
 /// requested output, not a diagnostic).
 #[test]

@@ -9,7 +9,10 @@
 //!
 //! `--help` prints the full flag list and `--version` the version plus the
 //! optional features the binary carries (execution providers, `serve`,
-//! chunking) — both answer without models present.
+//! chunking) — both answer without models present. So do
+//! `--list-input-formats` / `--list-output-formats` (#603, Pandoc's flags of
+//! the same name): one identifier per line, sorted, for scripts that ask the
+//! binary what it converts instead of hard-coding a list.
 //!
 //! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
 //!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
@@ -204,6 +207,28 @@ fn version_line() -> String {
     }
 }
 
+/// `--list-input-formats` (#603): the file extensions this binary converts —
+/// the library's per-build list ([`docling::InputFormat::supported_extensions`],
+/// formats behind a missing cargo feature left out) plus `zip`, which the CLI
+/// itself expands into its documents (#557, with `--output`). Sorted, unique,
+/// lowercase, no dot: `grep -qx rtf` answers "does this binary take .rtf".
+fn input_format_list() -> Vec<&'static str> {
+    let mut list = docling::InputFormat::supported_extensions();
+    list.push("zip");
+    list.sort_unstable();
+    list.dedup();
+    list
+}
+
+/// `--list-output-formats` (#603): the `--to` values, sorted like Pandoc's
+/// list (the help text keeps its own reading order). The `markdown` alias of
+/// `md` is accepted but not listed — one identifier per format.
+fn output_format_list() -> Vec<&'static str> {
+    let mut list = docling::OUTPUT_FORMATS.to_vec();
+    list.sort_unstable();
+    list
+}
+
 /// One-line synopsis — the `usage:` prefix an argument error prints.
 const USAGE: &str = "usage: docling-rs [OPTIONS] <input-file>\n       docling-rs [OPTIONS] --output DIR SOURCE...\n       docling-rs --input GLOB|DIR --output DIR [OPTIONS]\n       docling-rs serve [SERVE OPTIONS]";
 
@@ -293,6 +318,8 @@ AUDIO / VIDEO
 OTHER
   -h, --help              print this help
   -V, --version           print the version and compiled-in features
+  --list-input-formats    print the input file extensions this binary converts, one per line
+  --list-output-formats   print the --to formats, one per line
 
 Environment knobs (execution providers, model paths, worker counts) are
 documented in the README: https://github.com/docling-project/docling.rs";
@@ -317,6 +344,21 @@ fn main() -> ExitCode {
                 println!("{USAGE}");
                 println!();
                 println!("{HELP}");
+                return ExitCode::SUCCESS;
+            }
+            // #603: Pandoc's discovery flags — machine-readable, one
+            // identifier per line, sorted, exit 0; the rest of the command
+            // line is ignored, as Pandoc does.
+            if args.iter().any(|a| a == "--list-input-formats") {
+                for ext in input_format_list() {
+                    println!("{ext}");
+                }
+                return ExitCode::SUCCESS;
+            }
+            if args.iter().any(|a| a == "--list-output-formats") {
+                for format in output_format_list() {
+                    println!("{format}");
+                }
                 return ExitCode::SUCCESS;
             }
         }
@@ -462,7 +504,8 @@ fn main() -> ExitCode {
                 Some(v) => to.extend(v.split(',').map(|f| f.trim().to_string())),
                 None => {
                     eprintln!(
-                        "error: --to needs a format (md, json, html, dclx, chunks, images, latex, pandoc)"
+                        "error: --to needs a format ({})",
+                        docling::OUTPUT_FORMATS.join(", ")
                     );
                     return ExitCode::from(2);
                 }
@@ -681,12 +724,10 @@ fn main() -> ExitCode {
     let mut formats: Vec<String> = Vec::new();
     for f in &to {
         let f = if f == "markdown" { "md" } else { f.as_str() };
-        if !matches!(
-            f,
-            "md" | "json" | "html" | "dclx" | "chunks" | "images" | "latex" | "pandoc"
-        ) {
+        if !docling::OUTPUT_FORMATS.contains(&f) {
             eprintln!(
-                "error: unknown --to '{f}' (expected: md, json, html, dclx, chunks, images, latex, pandoc)"
+                "error: unknown --to '{f}' (expected: {})",
+                docling::OUTPUT_FORMATS.join(", ")
             );
             return ExitCode::from(2);
         }

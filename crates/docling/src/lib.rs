@@ -46,7 +46,7 @@ pub use archive::{ArchiveLimits, ArchiveOutcome};
 pub use converter::{parse_page_range, DocumentConverter, DEFAULT_VIDEO_FRAMES};
 pub use email_attachments::{EmailAttachmentInfo, EmailAttachments};
 pub use error::ConversionError;
-pub use format::InputFormat;
+pub use format::{InputFormat, OUTPUT_FORMATS};
 pub use options::{
     cli_flag, merge_options, ConvertOptions, OptionInfo, OptionsError, PipelineKind, OPTIONS,
 };

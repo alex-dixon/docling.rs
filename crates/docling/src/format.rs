@@ -279,117 +279,276 @@ impl InputFormat {
     ///
     /// Ambiguous extensions (notably bare `xml`) resolve to a single default
     /// here; the converter's content sniffing does the real disambiguation.
+    /// The mapping is the [`EXTENSIONS`] table — the one list
+    /// [`supported_extensions`](Self::supported_extensions) prints too (#603).
     pub fn from_extension(ext: &str) -> Option<Self> {
-        Some(match ext.to_ascii_lowercase().as_str() {
-            "docx" | "dotx" | "docm" | "dotm" => InputFormat::Docx,
-            "pptx" | "potx" | "ppsx" | "pptm" | "potm" | "ppsm" => InputFormat::Pptx,
-            "pdf" => InputFormat::Pdf,
-            // `markdown`: docling#4306.
-            "md" | "markdown" | "txt" | "text" | "qmd" | "rmd" => InputFormat::Md,
-            "html" | "htm" | "xhtml" => InputFormat::Html,
-            "xml" | "nxml" => InputFormat::XmlJats,
-            "dclg" => InputFormat::XmlDoclang,
-            "doctags" | "dt" => InputFormat::DocTags,
-            "dclx" => InputFormat::Dclx,
-            // `.gif` decodes through the same content-sniffing `image` path as
-            // the rest (first frame of an animation), issue #208.
-            "jpg" | "jpeg" | "png" | "tif" | "tiff" | "bmp" | "webp" | "gif" | "heic" | "heif" => {
-                InputFormat::Image
-            }
-            "adoc" | "asciidoc" | "asc" => InputFormat::Asciidoc,
-            // `.tsv` rides the CSV backend, whose delimiter sniffing already
-            // prefers the tab when it dominates the first line (#208).
-            "csv" | "tsv" => InputFormat::Csv,
-            // `.xlsb` (binary Excel 2007+) parses through the same calamine
-            // engine as xlsx — the backend detects the binary workbook part
-            // and switches readers, issue #210.
-            // Excel templates (docling#4178, 2.126): the same OOXML package
-            // under the template content type.
-            "xlsx" | "xlsm" | "xlsb" | "xltx" | "xltm" => InputFormat::Xlsx,
-            // Legacy binary Office (Word/Excel/PowerPoint 97–2003), issue #127.
-            // Extension sets mirror docling's FormatToExtensions.
-            "doc" | "dot" => InputFormat::Doc,
-            "xls" | "xlt" => InputFormat::Xls,
-            "ppt" | "pot" | "pps" => InputFormat::Ppt,
-            // StarOffice / OpenOffice 1.x XML and flat ODF (#215, docling.rs
-            // extensions): the shared ODF backend parses the older namespace
-            // vocabulary through a local-name mapping layer, and the flat
-            // variants are the same XML uncompressed in a single file.
-            // Templates (`.stw`/`.sti`/`.stc`) and the Writer master document
-            // (`.sxg`) ride the same parsers as their document counterparts.
-            "odt" | "ott" | "sxw" | "stw" | "sxg" | "fodt" => InputFormat::Odt,
-            "ods" | "ots" | "sxc" | "stc" | "fods" => InputFormat::Ods,
-            "odp" | "otp" | "sxi" | "sti" | "fodp" => InputFormat::Odp,
-            "json" => InputFormat::JsonDocling,
-            // `.mpga` *is* MPEG audio (an mp3 stream) — symphonia probes the
-            // codec from the bytes, the extension is just the alias (#208).
-            "wav" | "mp3" | "mpga" | "m4a" | "aac" | "ogg" | "flac" => InputFormat::Audio,
-            // Upstream's FormatToExtensions[VIDEO] (docling v2.114, #3768):
-            // the audio track transcribes through the same ASR path.
-            // `.mpeg`/`.mpg` (#208): MPEG-PS has no symphonia demuxer, so both
-            // the audio track and the sampled frames come from the ffmpeg
-            // fallback; an audio-only `.mpeg` still decodes in-process (the
-            // probe is content-based) and converts to its transcript.
-            "mp4" | "avi" | "mov" | "mkv" | "webm" | "mpeg" | "mpg" => InputFormat::Video,
-            "vtt" => InputFormat::Vtt,
-            "tex" | "latex" => InputFormat::Latex,
-            "eml" => InputFormat::Email,
-            "ebc" | "ebcdic" => InputFormat::Ebcdic,
-            // Outlook .msg (#251): a CFB container of MAPI streams; the email
-            // backend sniffs the magic and projects it onto RFC 822.
-            "msg" => InputFormat::Email,
-            "epub" => InputFormat::Epub,
-            "mhtml" | "mht" => InputFormat::Mhtml,
-            "rtf" => InputFormat::Rtf,
-            "vsdx" | "vsdm" => InputFormat::Visio,
-            "svg" => InputFormat::Svg,
-            // Apple iWork (#213). `.heic`/`.heif` route to Image above and
-            // decode behind the opt-in `heif` cargo feature.
-            "pages" => InputFormat::Pages,
-            "numbers" => InputFormat::Numbers,
-            "key" => InputFormat::Keynote,
-            // AbiWord (#216): AWML XML; .zabw is the same file gzip-wrapped,
-            // .awt the template flavor.
-            "abw" | "zabw" | "awt" => InputFormat::Abiword,
-            // WordPerfect (#216): `.wp` was the DOS-era default (WP 5.x),
-            // `.wpd` the Windows one; `.wpt` is the template flavor. The
-            // backend reads the version from the prefix header, not the
-            // extension.
-            "wpd" | "wp" | "wp5" | "wp6" | "wpt" => InputFormat::WordPerfect,
-            // Microsoft Works word processor (#216): the backend tells the
-            // generations apart by the stream (raw 2.x header, OLE MN0 for
-            // 3/4, OLE CONTENTS for 2000+); .wks/.wdb are the spreadsheet
-            // and database and route elsewhere.
-            "wps" => InputFormat::Works,
-            // Legacy spreadsheet-interchange relics (#216): all three parse
-            // natively and content-sniff inside one backend.
-            "dbf" => InputFormat::Dbf,
-            "dif" => InputFormat::Dif,
-            "slk" | "sylk" => InputFormat::Sylk,
-            // The Lotus family (#216): .wks is ambiguous (1-2-3 rel 1A and
-            // MS Works v3 both used it) — the backend sniffs the BOF.
-            "wk1" | "wk2" | "wk3" | "wk4" | "wks" | "wrk" | "123" => InputFormat::Lotus,
-            // Quattro Pro (#216): the cell records differ per generation, so
-            // the family has its own reader (the backend sniffs the BOF /
-            // OLE stream, not the extension).
-            "wq1" | "wq2" | "wb1" | "wb2" | "wb3" | "qpw" => InputFormat::QuattroPro,
-            // MS Works 6–9 spreadsheet (#216): a BIFF8 `Workbook` stream in
-            // an OLE container — Excel 97's own layout under another
-            // extension, so the XLS reader takes it.
-            "xlr" => InputFormat::Xls,
-            // StarOffice 5 binaries (#215): .vor templates dispatch by the
-            // CFB stream inside (writer/draw/impress share the container).
-            // .sdc routes here too so StarCalc gets its targeted
-            // "save as .ods" error instead of an unknown-extension one.
-            "sdw" | "sda" | "sdd" | "sdc" | "vor" => InputFormat::StarOffice5,
-            // DjVu (#434): docling.rs extension, pure-Rust decode via `djvu-rs`.
-            "djvu" | "djv" => InputFormat::Djvu,
-            // METS/Google Books scan packages ship as `*.tar.gz`.
-            "gz" | "targz" => InputFormat::MetsGbs,
-            _ => return None,
-        })
+        let ext = ext.to_ascii_lowercase();
+        EXTENSIONS
+            .iter()
+            .find(|(known, _)| *known == ext)
+            .map(|&(_, format)| format)
+    }
+
+    /// The file extensions that route to this format (lowercase, no dot), in
+    /// [`EXTENSIONS`] order.
+    pub fn extensions(self) -> impl Iterator<Item = &'static str> {
+        EXTENSIONS
+            .iter()
+            .filter(move |(_, format)| *format == self)
+            .map(|&(ext, _)| ext)
+    }
+
+    /// Whether this build converts the format. Every format stays
+    /// *detectable* in every build, but a few need a cargo feature to
+    /// convert: PDF the `pdf` ML pipeline or the `pdf-text` text-layer path,
+    /// images and METS/GBS scan packages the `pdf` pipeline, audio and video
+    /// the `asr` pipeline — without it the converter answers "not compiled
+    /// in". Missing *runtime* assets (models, ffmpeg) are not a build
+    /// property and do not count here: those formats degrade or fail at
+    /// conversion time with a message that names what to fetch.
+    pub fn is_compiled_in(self) -> bool {
+        match self {
+            InputFormat::Pdf => cfg!(any(feature = "pdf", feature = "pdf-text")),
+            InputFormat::Image | InputFormat::MetsGbs => cfg!(feature = "pdf"),
+            InputFormat::Audio | InputFormat::Video => cfg!(feature = "asr"),
+            _ => true,
+        }
+    }
+
+    /// Every input file extension this build converts — sorted, unique,
+    /// lowercase, no dot: what `docling-rs --list-input-formats` prints
+    /// (#603, Pandoc's `--list-input-formats`), so a wrapper can ask the
+    /// binary instead of hard-coding a list that drifts from it. Formats the
+    /// build lacks ([`is_compiled_in`](Self::is_compiled_in)) are left out,
+    /// and so are two extensions that only route: `.heic`/`.heif` without the
+    /// `heif` feature (libheif — the image pipeline cannot decode them) and
+    /// StarCalc's `.sdc`, which reaches the StarOffice backend for its
+    /// targeted "save as .ods" error, never a document.
+    pub fn supported_extensions() -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = EXTENSIONS
+            .iter()
+            .filter(|(ext, format)| {
+                format.is_compiled_in()
+                    && *ext != "sdc"
+                    && (cfg!(feature = "heif") || !matches!(*ext, "heic" | "heif"))
+            })
+            .map(|&(ext, _)| ext)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 }
+
+/// The output formats a conversion can be written as — the `--to` values of
+/// the CLI and the `to` option of docling-serve, in the order the help text
+/// lists them (`markdown` is accepted as an alias of `md` on both). One list,
+/// so the validation, the error messages and `--list-output-formats` (#603)
+/// cannot drift apart.
+pub const OUTPUT_FORMATS: &[&str] = &[
+    "md", "json", "html", "dclx", "chunks", "images", "latex", "pandoc",
+];
+
+/// File extension → format, the table behind
+/// [`InputFormat::from_extension`] (lowercase, no dot; each extension once).
+/// Extension sets follow docling's `FormatToExtensions` where upstream has
+/// the format; the rest are docling.rs extensions, issue numbers inline.
+const EXTENSIONS: &[(&str, InputFormat)] = {
+    use InputFormat::*;
+    &[
+        ("docx", Docx),
+        ("dotx", Docx),
+        ("docm", Docx),
+        ("dotm", Docx),
+        ("pptx", Pptx),
+        ("potx", Pptx),
+        ("ppsx", Pptx),
+        ("pptm", Pptx),
+        ("potm", Pptx),
+        ("ppsm", Pptx),
+        ("pdf", Pdf),
+        // `markdown`: docling#4306.
+        ("md", Md),
+        ("markdown", Md),
+        ("txt", Md),
+        ("text", Md),
+        ("qmd", Md),
+        ("rmd", Md),
+        ("html", Html),
+        ("htm", Html),
+        ("xhtml", Html),
+        ("xml", XmlJats),
+        ("nxml", XmlJats),
+        ("dclg", XmlDoclang),
+        ("doctags", DocTags),
+        ("dt", DocTags),
+        ("dclx", Dclx),
+        // `.gif` decodes through the same content-sniffing `image` path as
+        // the rest (first frame of an animation), issue #208. `.heic`/`.heif`
+        // decode behind the opt-in `heif` cargo feature (#211).
+        ("jpg", Image),
+        ("jpeg", Image),
+        ("png", Image),
+        ("tif", Image),
+        ("tiff", Image),
+        ("bmp", Image),
+        ("webp", Image),
+        ("gif", Image),
+        ("heic", Image),
+        ("heif", Image),
+        ("adoc", Asciidoc),
+        ("asciidoc", Asciidoc),
+        ("asc", Asciidoc),
+        // `.tsv` rides the CSV backend, whose delimiter sniffing already
+        // prefers the tab when it dominates the first line (#208).
+        ("csv", Csv),
+        ("tsv", Csv),
+        // `.xlsb` (binary Excel 2007+) parses through the same calamine
+        // engine as xlsx — the backend detects the binary workbook part and
+        // switches readers, issue #210. Excel templates (docling#4178, 2.126):
+        // the same OOXML package under the template content type.
+        ("xlsx", Xlsx),
+        ("xlsm", Xlsx),
+        ("xlsb", Xlsx),
+        ("xltx", Xlsx),
+        ("xltm", Xlsx),
+        // Legacy binary Office (Word/Excel/PowerPoint 97–2003), issue #127.
+        // Extension sets mirror docling's FormatToExtensions.
+        ("doc", Doc),
+        ("dot", Doc),
+        ("xls", Xls),
+        ("xlt", Xls),
+        ("ppt", Ppt),
+        ("pot", Ppt),
+        ("pps", Ppt),
+        // StarOffice / OpenOffice 1.x XML and flat ODF (#215, docling.rs
+        // extensions): the shared ODF backend parses the older namespace
+        // vocabulary through a local-name mapping layer, and the flat
+        // variants are the same XML uncompressed in a single file. Templates
+        // (`.stw`/`.sti`/`.stc`) and the Writer master document (`.sxg`) ride
+        // the same parsers as their document counterparts.
+        ("odt", Odt),
+        ("ott", Odt),
+        ("sxw", Odt),
+        ("stw", Odt),
+        ("sxg", Odt),
+        ("fodt", Odt),
+        ("ods", Ods),
+        ("ots", Ods),
+        ("sxc", Ods),
+        ("stc", Ods),
+        ("fods", Ods),
+        ("odp", Odp),
+        ("otp", Odp),
+        ("sxi", Odp),
+        ("sti", Odp),
+        ("fodp", Odp),
+        ("json", JsonDocling),
+        // `.mpga` *is* MPEG audio (an mp3 stream) — symphonia probes the
+        // codec from the bytes, the extension is just the alias (#208).
+        ("wav", Audio),
+        ("mp3", Audio),
+        ("mpga", Audio),
+        ("m4a", Audio),
+        ("aac", Audio),
+        ("ogg", Audio),
+        ("flac", Audio),
+        // Upstream's FormatToExtensions[VIDEO] (docling v2.114, #3768): the
+        // audio track transcribes through the same ASR path. `.mpeg`/`.mpg`
+        // (#208): MPEG-PS has no symphonia demuxer, so both the audio track
+        // and the sampled frames come from the ffmpeg fallback; an audio-only
+        // `.mpeg` still decodes in-process (the probe is content-based) and
+        // converts to its transcript.
+        ("mp4", Video),
+        ("avi", Video),
+        ("mov", Video),
+        ("mkv", Video),
+        ("webm", Video),
+        ("mpeg", Video),
+        ("mpg", Video),
+        ("vtt", Vtt),
+        ("tex", Latex),
+        ("latex", Latex),
+        ("eml", Email),
+        // Outlook .msg (#251): a CFB container of MAPI streams; the email
+        // backend sniffs the magic and projects it onto RFC 822.
+        ("msg", Email),
+        ("ebc", Ebcdic),
+        ("ebcdic", Ebcdic),
+        ("epub", Epub),
+        ("mhtml", Mhtml),
+        ("mht", Mhtml),
+        ("rtf", Rtf),
+        ("vsdx", Visio),
+        ("vsdm", Visio),
+        ("svg", Svg),
+        // Apple iWork (#213).
+        ("pages", Pages),
+        ("numbers", Numbers),
+        ("key", Keynote),
+        // AbiWord (#216): AWML XML; .zabw is the same file gzip-wrapped, .awt
+        // the template flavor.
+        ("abw", Abiword),
+        ("zabw", Abiword),
+        ("awt", Abiword),
+        // WordPerfect (#216): `.wp` was the DOS-era default (WP 5.x), `.wpd`
+        // the Windows one; `.wpt` is the template flavor. The backend reads
+        // the version from the prefix header, not the extension.
+        ("wpd", WordPerfect),
+        ("wp", WordPerfect),
+        ("wp5", WordPerfect),
+        ("wp6", WordPerfect),
+        ("wpt", WordPerfect),
+        // Microsoft Works word processor (#216): the backend tells the
+        // generations apart by the stream (raw 2.x header, OLE MN0 for 3/4,
+        // OLE CONTENTS for 2000+); .wks/.wdb are the spreadsheet and database
+        // and route elsewhere.
+        ("wps", Works),
+        // Legacy spreadsheet-interchange relics (#216): all three parse
+        // natively and content-sniff inside one backend.
+        ("dbf", Dbf),
+        ("dif", Dif),
+        ("slk", Sylk),
+        ("sylk", Sylk),
+        // The Lotus family (#216): .wks is ambiguous (1-2-3 rel 1A and MS
+        // Works v3 both used it) — the backend sniffs the BOF.
+        ("wk1", Lotus),
+        ("wk2", Lotus),
+        ("wk3", Lotus),
+        ("wk4", Lotus),
+        ("wks", Lotus),
+        ("wrk", Lotus),
+        ("123", Lotus),
+        // Quattro Pro (#216): the cell records differ per generation, so the
+        // family has its own reader (the backend sniffs the BOF / OLE stream,
+        // not the extension).
+        ("wq1", QuattroPro),
+        ("wq2", QuattroPro),
+        ("wb1", QuattroPro),
+        ("wb2", QuattroPro),
+        ("wb3", QuattroPro),
+        ("qpw", QuattroPro),
+        // MS Works 6–9 spreadsheet (#216): a BIFF8 `Workbook` stream in an OLE
+        // container — Excel 97's own layout under another extension, so the
+        // XLS reader takes it.
+        ("xlr", Xls),
+        // StarOffice 5 binaries (#215): .vor templates dispatch by the CFB
+        // stream inside (writer/draw/impress share the container). .sdc
+        // routes here too so StarCalc gets its targeted "save as .ods" error
+        // instead of an unknown-extension one.
+        ("sdw", StarOffice5),
+        ("sda", StarOffice5),
+        ("sdd", StarOffice5),
+        ("sdc", StarOffice5),
+        ("vor", StarOffice5),
+        // DjVu (#434): docling.rs extension, pure-Rust decode via `djvu-rs`.
+        ("djvu", Djvu),
+        ("djv", Djvu),
+        // METS/Google Books scan packages ship as `*.tar.gz`.
+        ("gz", MetsGbs),
+        ("targz", MetsGbs),
+    ]
+};
 
 #[cfg(test)]
 mod tests {
@@ -414,5 +573,62 @@ mod tests {
         assert_eq!(InputFormat::from_extension("tsv"), Some(InputFormat::Csv));
         assert_eq!(InputFormat::from_extension("gif"), Some(InputFormat::Image));
         assert_eq!(InputFormat::from_extension("xlsb"), Some(InputFormat::Xlsx));
+    }
+
+    /// #603: the table is the lookup's single source — each extension once,
+    /// stored lowercase, found again case-insensitively.
+    #[test]
+    fn extension_table_round_trips() {
+        let mut seen = std::collections::HashSet::new();
+        for &(ext, format) in EXTENSIONS {
+            assert!(seen.insert(ext), "duplicate extension {ext}");
+            assert_eq!(ext, ext.to_ascii_lowercase(), "{ext} must be lowercase");
+            assert!(!ext.starts_with('.'), "{ext} must carry no dot");
+            assert_eq!(InputFormat::from_extension(ext), Some(format));
+            assert_eq!(
+                InputFormat::from_extension(&ext.to_ascii_uppercase()),
+                Some(format)
+            );
+            assert!(format.extensions().any(|e| e == ext));
+        }
+        assert_eq!(InputFormat::from_extension("unknown"), None);
+        assert_eq!(InputFormat::from_extension(""), None);
+    }
+
+    /// #603: `--list-input-formats` — sorted, unique, and exactly the
+    /// extensions this build converts.
+    #[test]
+    fn supported_extensions_follow_the_build() {
+        let list = InputFormat::supported_extensions();
+        let mut sorted = list.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(list, sorted, "sorted and unique");
+        for ext in [
+            "docx", "rtf", "html", "xlsx", "pptx", "md", "epub", "eml", "msg",
+        ] {
+            assert!(list.contains(&ext), "{ext} converts in every build");
+        }
+        for &ext in &list {
+            let format = InputFormat::from_extension(ext).expect("listed means routed");
+            assert!(format.is_compiled_in(), "{ext} listed but not compiled in");
+        }
+        assert_eq!(
+            list.contains(&"pdf"),
+            cfg!(any(feature = "pdf", feature = "pdf-text"))
+        );
+        assert_eq!(list.contains(&"png"), cfg!(feature = "pdf"));
+        assert_eq!(list.contains(&"mp3"), cfg!(feature = "asr"));
+        assert_eq!(list.contains(&"mp4"), cfg!(feature = "asr"));
+        assert_eq!(list.contains(&"heic"), cfg!(feature = "heif"));
+        // Routed for its error message only (StarCalc is not converted).
+        assert!(!list.contains(&"sdc"));
+    }
+
+    #[test]
+    fn output_formats_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(OUTPUT_FORMATS.iter().all(|f| seen.insert(*f)));
+        assert!(OUTPUT_FORMATS.contains(&"md") && OUTPUT_FORMATS.contains(&"pandoc"));
     }
 }
