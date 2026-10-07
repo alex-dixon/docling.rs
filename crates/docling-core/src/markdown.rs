@@ -1650,6 +1650,97 @@ mod tests {
         assert_eq!(render_table(&t, true), "| h |\n| - |\n| d |");
     }
 
+    /// A table with first-class 1×1 cells, `column_header` where `ched` says.
+    fn flagged_table(rows: &[&[&str]], ched: impl Fn(usize, usize) -> bool) -> Table {
+        let mut cells = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            for (c, text) in row.iter().enumerate() {
+                cells.push(TableCell {
+                    text: (*text).into(),
+                    bbox: None,
+                    start_row: r,
+                    start_col: c,
+                    row_span: 1,
+                    col_span: 1,
+                    column_header: ched(r, c),
+                    row_header: false,
+                    row_section: false,
+                });
+            }
+        }
+        Table {
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|t| (*t).to_string()).collect())
+                .collect(),
+            cells: Some(cells),
+            ..Default::default()
+        }
+    }
+
+    /// #604 (docling-core#766, 2.97): a row whose first-column label is a
+    /// `column_header` but whose other cells carry body text stops the header
+    /// block. Expected outputs are docling-core 2.99's, byte for byte.
+    #[test]
+    fn rows_with_body_text_stop_the_header_block() {
+        // The issue's form: labels flagged on every row, a real header on top.
+        let t = flagged_table(
+            &[
+                &["Item", "Q1", "Q2"],
+                &["Sales", "10", "20"],
+                &["Costs", "5", "7"],
+            ],
+            |r, c| r == 0 || c == 0,
+        );
+        assert_eq!(t.header_row_count(), 1);
+        assert_eq!(
+            render_table(&t, false),
+            "| Item   |   Q1 |   Q2 |\n\
+             |--------|------|------|\n\
+             | Sales  |   10 |   20 |\n\
+             | Costs  |    5 |    7 |"
+        );
+        // Labels on every row and no header row: row 0 stops, later rows are
+        // flagged → nothing promotable, the body keeps every row.
+        let t = flagged_table(&[&["Sales", "10", "20"], &["Costs", "5", "7"]], |_, c| {
+            c == 0
+        });
+        assert_eq!(t.header_row_count(), 0);
+        assert_eq!(
+            render_table(&t, false),
+            "|       |    |    |\n\
+             |-------|----|----|\n\
+             | Sales | 10 | 20 |\n\
+             | Costs |  5 |  7 |"
+        );
+        let t = flagged_table(
+            &[&["a", "1", "2"], &["b", "3", "4"], &["c", "5", "6"]],
+            |r, c| c == 0 && r < 2,
+        );
+        assert_eq!(t.header_row_count(), 0);
+        // Row 0 stops on its body text, but no later row carries a flag:
+        // row 0 is the header anyway, as for an unflagged table.
+        let t = flagged_table(&[&["a", "1", "2"], &["b", "3", "4"]], |r, c| {
+            r == 0 && c == 0
+        });
+        assert_eq!(t.header_row_count(), 1);
+        assert_eq!(
+            render_table(&t, false),
+            "| a   |   1 |   2 |\n\
+             |-----|-----|-----|\n\
+             | b   |   3 |   4 |"
+        );
+        // Blank cells beside a flagged label are not body text.
+        let t = flagged_table(&[&["Item", "", ""], &["x", "1", "2"]], |_, c| c == 0);
+        assert_eq!(t.header_row_count(), 1);
+        assert_eq!(
+            render_table(&t, false),
+            "| Item   |    |    |\n\
+             |--------|----|----|\n\
+             | x      |  1 |  2 |"
+        );
+    }
+
     #[test]
     fn renders_compact_table() {
         let mut doc = DoclingDocument::new("t");
