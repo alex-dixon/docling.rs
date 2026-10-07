@@ -21,6 +21,7 @@ pub mod font;
 pub mod function;
 pub mod geom;
 pub mod image;
+pub mod jpx;
 pub mod objects;
 pub mod prepass;
 
@@ -908,5 +909,84 @@ mod synthetic {
             render_page_sized(&meta, 0, 400, 200).unwrap().as_raw()
         );
         assert_eq!(a1.as_raw(), a3.as_raw());
+    }
+
+    /// #598: a `JPXDecode` image draws its pixels, not a mid-gray block. The
+    /// fixture is a lossless 12 × 9 gray gradient (`(x·21 + y·3) mod 256`):
+    /// dark at the left edge, bright at the right; with alpha from the
+    /// codestream only under `/SMaskInData`.
+    #[test]
+    fn jpx_image_renders_its_pixels() {
+        let jp2 = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/jpx/gray_12x9.jp2"),
+        )
+        .unwrap();
+        let mut doc = Document::with_version("1.5");
+        let im = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image",
+                "Width" => 12, "Height" => 9,
+                "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8,
+                "Filter" => "JPXDecode",
+            },
+            jp2.clone(),
+        ));
+        let bytes = synth(
+            &mut doc,
+            [0.0, 0.0, 200.0, 100.0],
+            Dictionary::new(),
+            dictionary! { "XObject" => dictionary! { "Im0" => Object::Reference(im) } },
+            "q 120 0 0 90 40 5 cm /Im0 Do Q",
+        );
+        let img = render(&bytes);
+        // Image column 0 (codes 0–24) lands at device x 40–50, column 11
+        // (codes 231–255) at x 150–160; the row at device y 50 is image row 4.
+        let left = px(&img, 45, 50);
+        let right = px(&img, 155, 50);
+        assert!(left[0] < 40 && left == [left[0]; 3], "left pixel {left:?}");
+        assert!(
+            right[0] > 215 && right == [right[0]; 3],
+            "right pixel {right:?}"
+        );
+        assert_eq!(px(&img, 20, 50), WHITE, "outside the image stays white");
+
+        // The RGBA fixture: alpha is ignored without `/SMaskInData` (an
+        // opaque blit) and honoured with it (the x = 0 column is fully
+        // transparent, so the page shows through).
+        let rgba = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/jpx/rgba_8x6.jp2"),
+        )
+        .unwrap();
+        for (smask_in_data, transparent_left) in [(0, false), (1, true)] {
+            let mut doc = Document::with_version("1.5");
+            let im = doc.add_object(Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Image",
+                    "Width" => 8, "Height" => 6,
+                    "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8,
+                    "Filter" => "JPXDecode", "SMaskInData" => smask_in_data,
+                },
+                rgba.clone(),
+            ));
+            let bytes = synth(
+                &mut doc,
+                [0.0, 0.0, 200.0, 100.0],
+                Dictionary::new(),
+                dictionary! { "XObject" => dictionary! { "Im0" => Object::Reference(im) } },
+                "q 160 0 0 60 20 20 cm /Im0 Do Q",
+            );
+            let img = render(&bytes);
+            // Image column 0 → device x 20–40: colour (0, y·40, 128), alpha 0
+            // (the bilinear blit lets a sliver of column 1, alpha 36, in).
+            let p = px(&img, 30, 50);
+            if transparent_left {
+                assert!(near(p, WHITE, 3), "SMaskInData {smask_in_data}: {p:?}");
+            } else {
+                assert!(
+                    p != WHITE && p[2] > 100,
+                    "SMaskInData {smask_in_data}: {p:?}"
+                );
+            }
+        }
     }
 }

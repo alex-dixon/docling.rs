@@ -83,7 +83,7 @@ the default build is a native PDF library:
 |---|---|
 | page count, geometry, `/Rotate`, link annotations | `pdf_meta.rs` — the lopdf object model, `CropBox ∩ MediaBox` with pdfium's fallbacks, rotation normalized as `CPDF_Page::GetPageRotation` does; checked identical to pdfium on every corpus page (`pdfium_backend::tests::pdf_meta_matches_pdfium_on_the_corpus`, `--features pdfium`) |
 | the text layer | `textparse.rs` — the only source since the pdfium text fallback was measured to add nothing on any page of the corpus and removed (the parser and pdfium were empty on exactly the same 38 pages) |
-| an image-only page's bitmap (scans) | `raster/` — pdfium's rendering of such a page **byte for byte** (`CStretchEngine`, libjpeg-exact `DCTDecode` incl. the reduced IDCTs, `FaxDecoder`, stencil masks, `LoadPalette`): 22/22 fixture renders and 165/165 synthesized pages identical to `FPDF_RenderPageBitmap`. It declines (and the page renderer below draws) JPX/JBIG2, CMYK/Lab/Separation/DeviceN and non-sRGB ICC images, `/SMask` and colour-key masks, 16-bit samples, non-axis-aligned placements, transparency groups, pages with drawn paths or visible text |
+| an image-only page's bitmap (scans) | `raster/` — pdfium's rendering of such a page **byte for byte** (`CStretchEngine`, libjpeg-exact `DCTDecode` incl. the reduced IDCTs, `FaxDecoder`, stencil masks, `LoadPalette`): 22/22 fixture renders and 165/165 synthesized pages identical to `FPDF_RenderPageBitmap`. It declines (and the page renderer below draws) JPX/JBIG2 (JPX decoded there, #598), CMYK/Lab/Separation/DeviceN and non-sRGB ICC images, `/SMask` and colour-key masks, 16-bit samples, non-axis-aligned placements, transparency groups, pages with drawn paths or visible text |
 | the model inputs of every other page | `render/` — the pure-Rust page renderer, docling-parse's twin (below); `DOCLING_RS_RENDERER=docling-parse` takes them from docling-parse's renderer itself through the `dlopen`ed shim |
 | a file lopdf cannot read; `DOCLING_RS_RENDERER=pdfium` | pdfium, only in a build with the opt-in `pdfium` cargo feature (`docling-pdf`, forwarded by `docling`, `docling-cli`, `docling-serve`); without it the choice warns once and renders in Rust, and an unreadable object model fails with the install hint |
 
@@ -142,8 +142,15 @@ password is required` — the `pdf_password` snapshot records it).
   docling's `render_scale`): a 300 dpi scan is decoded at a quarter through
   libjpeg's reduced IDCT and blitted *up* onto the scale-2 canvas — then
   reduced by its integer factor `fx = sw / dst_w` with premultiplied box
-  averaging before the bilinear blit; JPX and JBIG2 are placeholders, as
-  docling-parse draws them. The one bitmap that does not follow the hint is
+  averaging before the bilinear blit; a JPEG 2000 image (`JPXDecode`) is
+  decoded by `hayro-jpeg2000` (`render/jpx.rs`, #598 — within ±1 of OpenJPEG
+  on the NASA scans; the reduction hint becomes its target resolution, the
+  codestream's colour space stands in for a missing `/ColorSpace`, its alpha
+  channel is the soft mask under `/SMaskInData`), where it used to be a
+  mid-gray placeholder that left the layout model a blank rectangle: the
+  picture box lost its confidence, ran over the caption below, and two
+  stacked photos fused — docling-parse decodes JPX, so the shim run never
+  showed it. JBIG2 stays a placeholder. The one bitmap that does not follow the hint is
   a text-less page's, which goes to OCR: it decodes at full size
   (`Renderer::render_with_hint(…, 0.0)`) so the recognizer reads the scan's
   resolution, not a quarter of it blitted up — the same deliberate deviation

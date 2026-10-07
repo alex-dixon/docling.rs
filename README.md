@@ -107,8 +107,8 @@ converts every PDF, the text layer has one source (the Rust parser), and no
 native PDF library is fetched or linked. The opt-in `pdfium` cargo feature
 brings the library back for `DOCLING_RS_RENDERER=pdfium` (docling's
 pypdfium2 chain) and for a file lopdf cannot read
-(`docs/PDF_CONFORMANCE.md`, "The PDF stack"; JPX and JBIG2 images draw as
-placeholders, as docling-parse draws them). TableFormer is ported
+(`docs/PDF_CONFORMANCE.md`, "The PDF stack"; JPEG 2000 (`JPXDecode`) images
+decode in pure Rust too (#598), JBIG2 draws as a placeholder). TableFormer is ported
 to ONNX and run on every detected table region to recover its structure;
 geometric reconstruction from cell positions remains only as the fallback when
 the TableFormer graphs aren't present (see `docs/PDF_CONFORMANCE.md`).
