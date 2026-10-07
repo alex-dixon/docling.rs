@@ -323,7 +323,9 @@ pub enum Node {
     /// picture node. The JSON export writes these nodes as items parented to
     /// that picture, after its caption; docling's Markdown and LaTeX picture
     /// serializers print only the caption and the image, so every other
-    /// serializer skips it.
+    /// serializer skips it — except the Markdown export asked to
+    /// `traverse_pictures` ([`MarkdownExportOptions`], #599), which renders
+    /// them after the picture like upstream's item walk does.
     PictureChildren(Vec<Node>),
     /// A page boundary — docling's implicit page break between pages. The PPTX
     /// backend emits one between consecutive slides. DocLang renders it as
@@ -549,6 +551,64 @@ impl Default for HtmlExportOptions {
             image_mode: ImageMode::Placeholder,
             artifacts_dir: "artifacts".to_string(),
             layers: ContentLayers::BODY,
+        }
+    }
+}
+
+/// Options of the Markdown export
+/// ([`DoclingDocument::export_to_markdown_with_options`], #599): the
+/// docling-core `MarkdownParams` the port honours beyond the image mode.
+/// [`Default`] is upstream's default export — placeholder images,
+/// `artifacts` as the referenced-image directory, the body layer only, no
+/// picture traversal, HTML and underscore escaping on, `<!-- image -->` —
+/// so a document exported with it is byte-identical to
+/// [`DoclingDocument::export_to_markdown`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownExportOptions {
+    /// How pictures render (`MarkdownParams.image_mode`): the placeholder,
+    /// `data:` URIs when embedded, `![Image](<artifacts_dir>/image_NNNNNN.<ext>)`
+    /// when referenced (the bytes come back for the caller to write).
+    pub image_mode: ImageMode,
+    /// The directory referenced images are named under.
+    pub artifacts_dir: String,
+    /// The content layers rendered (`MarkdownParams.layers`,
+    /// `export_to_markdown(included_content_layers=…)`): an item on a layer
+    /// outside the set is skipped, its children still walked. The default
+    /// body-only set drops page headers/footers (`furniture`), reviewer
+    /// comments (`notes`) and hidden sheets (`invisible`), as upstream does; a
+    /// scanned form's running header reads out with
+    /// `ContentLayers::BODY.with(ContentLayer::Furniture)`. The extra items
+    /// render through the body's serializers — a page header is a paragraph.
+    pub layers: ContentLayers,
+    /// `CommonParams.traverse_pictures`: render the text items nested in a
+    /// picture (the PDF pipeline's picture children — a bordered form laid
+    /// out as one picture holds every field as a child) after the picture's
+    /// own caption and image, as upstream yields them. Off, a picture prints
+    /// only its caption and image.
+    pub traverse_pictures: bool,
+    /// `MarkdownParams.escape_html`: `&`, `<` and `>` in text as `&amp;`,
+    /// `&lt;`, `&gt;` (Python's `html.escape(quote=False)`). Off, `R&D` stays
+    /// `R&D`.
+    pub escape_html: bool,
+    /// `MarkdownParams.escape_underscores`: `_` in text as `\_`. Off, the
+    /// text keeps its underscores.
+    pub escape_underscores: bool,
+    /// `MarkdownParams.image_placeholder`: what a picture prints as when it
+    /// renders no image data (the placeholder mode, or a picture without a
+    /// payload); upstream's `<!-- image -->`.
+    pub image_placeholder: String,
+}
+
+impl Default for MarkdownExportOptions {
+    fn default() -> Self {
+        Self {
+            image_mode: ImageMode::Placeholder,
+            artifacts_dir: "artifacts".to_string(),
+            layers: ContentLayers::BODY,
+            traverse_pictures: false,
+            escape_html: true,
+            escape_underscores: true,
+            image_placeholder: "<!-- image -->".to_string(),
         }
     }
 }
@@ -1213,6 +1273,23 @@ impl DoclingDocument {
         artifacts_dir: &str,
     ) -> (String, Vec<(String, Vec<u8>)>) {
         to_markdown_images(self, self.strict_markdown, image_mode, artifacts_dir)
+    }
+
+    /// Markdown per `options` (#599) — docling-core's
+    /// `export_to_markdown(included_content_layers=…, image_mode=…,
+    /// image_placeholder=…, escape_html=…, escape_underscores=…,
+    /// traverse_pictures=…)`: the content layers rendered, whether a
+    /// picture's nested text items print, HTML and underscore escaping, the
+    /// image placeholder, and the image mode with its referenced-image
+    /// directory. [`Self::strict_markdown`] still picks the Markdown flavour.
+    /// Returns the Markdown and, for [`ImageMode::Referenced`], the
+    /// `(path, bytes)` artifacts. With [`MarkdownExportOptions::default`]
+    /// the Markdown is [`Self::export_to_markdown`]'s byte for byte.
+    pub fn export_to_markdown_with_options(
+        &self,
+        options: &MarkdownExportOptions,
+    ) -> (String, Vec<(String, Vec<u8>)>) {
+        crate::markdown::to_markdown_with_options(self, self.strict_markdown, options)
     }
 
     /// A complete HTML document — docling-core's `HTMLDocSerializer` with its

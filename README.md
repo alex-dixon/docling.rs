@@ -727,6 +727,27 @@ let (html, artifacts) = doc.export_to_html_with(&HtmlExportOptions {
 });
 ```
 
+The Markdown export takes the same kind of struct (#599 — docling-core's
+`MarkdownParams`): `MarkdownExportOptions` carries the content `layers`, whether
+to `traverse_pictures` (the text items the PDF pipeline nests in a picture — a
+bordered form laid out as one picture holds every field there, and the default
+export prints only the image placeholder), `escape_html` / `escape_underscores`
+(off, `R&D` and `snake_case` stay as written instead of `R&amp;D` and
+`snake\_case`), the `image_placeholder` and the image mode. Its defaults are
+upstream's, so `export_to_markdown_with_options(&Default::default())` is
+`export_to_markdown()` byte for byte; `MarkdownStreamer::with_export_options`
+gives the streaming path the same settings.
+
+```rust
+use docling::{ContentLayer, ContentLayers, MarkdownExportOptions};
+let (md, _) = doc.export_to_markdown_with_options(&MarkdownExportOptions {
+    layers: ContentLayers::BODY.with(ContentLayer::Furniture),
+    traverse_pictures: true,
+    escape_html: false,
+    ..MarkdownExportOptions::default()
+});
+```
+
 `--to html` on the CLI prints it (batch mode writes `<stem>.html`, pictures
 per `--images`), serve answers `to=html` as `text/html` (inline under `html`
 in a batch), the Node bindings take `to: 'html'`, wasm `"html"`. The Python

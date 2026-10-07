@@ -93,10 +93,9 @@ regex = "1.11"
 # SVG → PNG rasterization for the image ML pipeline (#212). Pure Rust
 # (usvg + tiny-skia); gated behind `pdf` since without ML the raster has
 # no consumer — the wasm/pdf-text SVG path extracts <text> directly.
-# Pinned to 0.47 when 0.48's font stack (font-types 0.12.2+) required rustc
-# 1.89, above the then 1.88 MSRV; the floor is 1.92 now (#598), so the pin
-# can lift with the next dependency refresh.
-resvg = { version = "0.47", optional = true }
+# 0.48 brought the harfrust/skrifa font stack (font-types 0.12.2+, rustc
+# 1.89+), which the 1.88 MSRV once pinned out; the floor is 1.92 since #598.
+resvg = { version = "0.48", optional = true }
 roxmltree = "0.20"
 scraper = "0.27.0"
 # scraper's DOM arena, for naming its node references in the HTML item-tree
