@@ -62,7 +62,8 @@ pub use docling_core::chunker;
 pub use docling_core::pandoc;
 pub use docling_core::{
     ConfidenceReport, ContentLayer, ContentLayers, DocItemLabel, DoclingDocument,
-    HtmlExportOptions, ImageMode, MarkdownStreamer, Node, PictureImage, QualityGrade, Table,
+    HtmlExportOptions, ImageMode, MarkdownExportOptions, MarkdownStreamer, Node, PictureImage,
+    QualityGrade, Table,
 };
 
 // The reusable PDF/image pipeline (models loaded once, reused across documents),
