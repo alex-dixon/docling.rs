@@ -40,6 +40,7 @@ impl DeclarativeBackend for DocxBackend {
             .ok_or_else(|| ConversionError::Parse("docx: no document.xml".into()))?;
         let styles = pkg.read("word/styles.xml").unwrap_or_default();
         let numbering = pkg.read("word/numbering.xml").unwrap_or_default();
+        let even_and_odd_headers = even_and_odd_headers(&mut pkg);
         // Hyperlink relationship ids → target URLs.
         let rels = part_rels(&mut pkg, "word/document.xml");
 
@@ -66,6 +67,7 @@ impl DeclarativeBackend for DocxBackend {
             rels: &rels,
             images: &images,
             charts: &charts,
+            even_and_odd_headers,
             table_depth: std::cell::Cell::new(0),
             orphan_inline_groups: std::cell::Cell::new(0),
         };
@@ -111,7 +113,8 @@ impl DeclarativeBackend for DocxBackend {
         // (docling's `_add_header_footer`): the first section always
         // contributes, later sections only when they define a distinct first
         // page (`<w:titlePg/>`), which also switches both to the first-page
-        // parts.
+        // parts; the even-page parts come too when the document uses them
+        // (`<w:evenAndOddHeaders/>`, #590 — docling never reads those).
         add_header_footer(&mut pkg, body, &ctx, &mut doc);
         // Footnote / endnote bodies follow as furniture too (docling#4374):
         // a `w:footnoteReference` in the body carries no text of its own, so
@@ -162,7 +165,10 @@ impl DeclarativeBackend for DocxBackend {
 /// inheritance case) is skipped by part name so it isn't duplicated. A section
 /// with `<w:titlePg/>` contributes both its first-page **and** its regular
 /// header/footer, since both are actually used — headers first, then footers,
-/// first-page before regular within each.
+/// first-page before regular within each; with `<w:evenAndOddHeaders/>` in
+/// the settings, the even-page part follows the regular one (#590: Word
+/// shows it on every even page, docling leaves it out — python-docx's
+/// `Section` exposes `even_page_header`, `_add_header_footer` never asks).
 fn add_header_footer(pkg: &mut Package, body: XmlNode, ctx: &Ctx, doc: &mut DoclingDocument) {
     for (_, part) in header_footer_parts(body, ctx) {
         emit_header_footer_part(pkg, &part, ctx, doc);
@@ -199,10 +205,15 @@ pub(super) fn header_footer_parts(body: XmlNode, ctx: &Ctx) -> Vec<(&'static str
                 && attr(n, "val") != Some("0")
         });
         for kind in ["hdr", "ftr"] {
-            let types: &[&str] = if title_pg {
-                &["first", "default"]
-            } else {
-                &["default"]
+            // A part Word actually shows: the first page's with `titlePg`,
+            // the regular (odd) one, and the even pages' when the document
+            // distinguishes them — without `evenAndOddHeaders` an `even`
+            // reference is a leftover Word ignores, so it is skipped here too.
+            let types: &[&str] = match (title_pg, ctx.even_and_odd_headers) {
+                (true, true) => &["first", "default", "even"],
+                (true, false) => &["first", "default"],
+                (false, true) => &["default", "even"],
+                (false, false) => &["default"],
             };
             for ty in types {
                 let Some(rid) = effective.get(&(kind, ty.to_string())) else {
@@ -224,6 +235,21 @@ pub(super) fn header_footer_parts(body: XmlNode, ctx: &Ctx) -> Vec<(&'static str
         }
     }
     out
+}
+
+/// `word/settings.xml`'s `<w:evenAndOddHeaders/>` (#590): whether the
+/// document shows different headers/footers on even pages — only then do the
+/// sections' `w:type="even"` references mean anything to Word.
+fn even_and_odd_headers(pkg: &mut Package) -> bool {
+    let Some(xml) = pkg.read("word/settings.xml") else {
+        return false;
+    };
+    let Ok(dom) = Document::parse(&xml) else {
+        return false;
+    };
+    dom.descendants()
+        .find(|n| n.has_tag_name("evenAndOddHeaders"))
+        .is_some_and(|n| on_off(attr(n, "val")))
 }
 
 /// One footnote / endnote body ([`footnote_texts`]).
@@ -459,6 +485,9 @@ pub(super) struct Ctx<'a> {
     /// Native charts by relationship id: `(classified kind, title, data grid)`
     /// parsed from the `word/charts/*.xml` parts (docling PR #3809).
     pub(super) charts: &'a HashMap<String, (String, Option<String>, docling_core::Table)>,
+    /// `word/settings.xml` has `<w:evenAndOddHeaders/>`: the sections' even-page
+    /// headers/footers are in use (#590).
+    pub(super) even_and_odd_headers: bool,
     /// Nesting depth of the table being parsed (a table inside a cell inside a
     /// table …), bounded by [`MAX_TABLE_DEPTH`]: `parse_table_with` recurses
     /// per level, and a 35 KB file with 2 000 tables nested one inside the next
@@ -490,6 +519,7 @@ impl<'a> Ctx<'a> {
             rels,
             images,
             charts,
+            even_and_odd_headers: self.even_and_odd_headers,
             table_depth: std::cell::Cell::new(0),
             orphan_inline_groups: std::cell::Cell::new(0),
         }
