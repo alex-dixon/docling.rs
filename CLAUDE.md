@@ -237,7 +237,7 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   with real conformance numbers and the deliberate divergences from docling)
   — update both with behavior changes;
   `docs/PDF_CONFORMANCE.md` for pipeline/model changes.
-- MSRV 1.88 (1.85 for docling-core), edition 2021; CI lints on the 1.96
+- MSRV 1.92 (1.85 for docling-core), edition 2021; CI lints on the 1.96
   toolchain — `cargo fmt` + clippy clean; comments explain *why*
   (docling parity or a deliberate divergence from it, perf tradeoffs),
   matching the existing dense doc-comment

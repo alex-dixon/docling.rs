@@ -167,11 +167,11 @@ jobs:
   # manifests — a weekly dependency-update PR that pulls a dep with a higher
   # floor turns this job red, forcing a conscious pin or floor bump.
   msrv:
-    name: msrv (1.85 core · 1.88 workspace)
+    name: msrv (1.85 core · 1.92 workspace)
     runs-on: ubuntu-latest
     env:
       MSRV_CORE: "1.85"
-      MSRV_WORKSPACE: "1.88"
+      MSRV_WORKSPACE: "1.92"
     steps:
       - uses: actions/checkout@v7
 

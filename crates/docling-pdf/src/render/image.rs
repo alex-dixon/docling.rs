@@ -3,8 +3,9 @@
 //! `/Decode` ranges, stencil masks painted in the fill colour, `/SMask` soft
 //! masks, stencil and colour-key `/Mask`s. The sample data comes through the
 //! raster's filter chain, its libjpeg-exact JPEG decoder and its CCITT
-//! decoder; JPX and JBIG2 have no decoder here and come out as a mid-gray
-//! block (the picture the layout model should see is "a picture").
+//! decoder, and JPEG 2000 through [`super::jpx`] (#598); JBIG2 has no
+//! decoder here and comes out as a mid-gray block (the picture the layout
+//! model should see is "a picture").
 //!
 //! Loading ([`load`]: filters, codec, colour space, alpha plane) is separate
 //! from rasterizing ([`rasterize`]: the RGBA pixmap for one destination
@@ -20,6 +21,7 @@ use lopdf::{Dictionary, Document, Object};
 use tiny_skia::Pixmap;
 
 use super::color::{to_u8, CmykCache, ColorSpace};
+use super::jpx;
 use super::objects::{as_stream, get2, get_bool, get_bool2, get_int, get_int2, nums};
 use crate::raster::{fax, filters, jpeg};
 
@@ -40,6 +42,9 @@ struct Samples {
     stride: usize,
     /// A four-component JPEG with an Adobe APP14 marker.
     adobe: bool,
+    /// An opacity channel the codec carried inside the image data (a JPX
+    /// codestream's alpha under `/SMaskInData`, #598), at the image size.
+    inline_alpha: Option<Vec<u8>>,
 }
 
 impl Samples {
@@ -241,7 +246,12 @@ pub fn load(
             } else {
                 cs
             };
-            let alpha = alpha_plane(doc, d, res, s, w, h)?;
+            // `/SMask` / `/Mask` first; else the alpha the codec carried
+            // inside the data (a JPX codestream's, under `/SMaskInData`).
+            let alpha = match alpha_plane(doc, d, res, s, w, h)? {
+                Some(a) => Some(a),
+                None => s.inline_alpha.take(),
+            };
             (Some(cs), alpha)
         }
     };
@@ -518,6 +528,7 @@ fn load_samples(
                 data,
                 stride,
                 adobe: false,
+                inline_alpha: None,
             }))
         }
         Some(codec) if codec.name == "DCTDecode" => {
@@ -538,6 +549,7 @@ fn load_samples(
                         ncomp,
                         stride: img.width * ncomp,
                         adobe: img.adobe_inverted,
+                        inline_alpha: None,
                         data: img.data,
                     }))
                 }
@@ -584,7 +596,40 @@ fn load_samples(
                 data: out,
                 stride,
                 adobe: false,
+                inline_alpha: None,
             }))
+        }
+        Some(codec) if codec.name == "JPXDecode" => {
+            // 7.4.9: an `Indexed` colour space makes the samples palette
+            // indices, so the codestream's own palette must not be applied;
+            // `/SMaskInData` says whether the codestream's alpha is the soft
+            // mask (1, or 2 premultiplied) or to be ignored (0, default).
+            let indexed = !is_mask
+                && matches!(
+                    get2(doc, d, b"ColorSpace", b"CS").and_then(|o| ColorSpace::parse(doc, o, res)),
+                    Some(ColorSpace::Indexed { .. })
+                );
+            let smask_in_data = get_int(doc, d, b"SMaskInData").unwrap_or(0);
+            let target = (reduction_shift > 0 && w > 0 && h > 0).then(|| {
+                let shift = reduction_shift.min(3);
+                ((w >> shift).max(1) as u32, (h >> shift).max(1) as u32)
+            });
+            match jpx::decode(&data, indexed, target) {
+                Ok(img) => Ok(Loaded::Samples(Samples {
+                    width: img.width,
+                    height: img.height,
+                    bpc: 8,
+                    ncomp: img.ncomp,
+                    stride: img.width * img.ncomp,
+                    adobe: false,
+                    inline_alpha: if smask_in_data > 0 { img.alpha } else { None },
+                    data: img.data,
+                })),
+                Err(e) => {
+                    docling_core::debug_log!("docling-pdf render: JPX not decoded ({e})");
+                    Ok(Loaded::Placeholder)
+                }
+            }
         }
         Some(codec) => {
             docling_core::debug_log!(

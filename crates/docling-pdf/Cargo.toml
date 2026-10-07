@@ -47,6 +47,7 @@ ml = [
     "dep:libloading",
     "dep:tiny-skia",
     "dep:ttf-parser",
+    "dep:hayro-jpeg2000",
 ]
 # GPU execution providers (#74). Each feature makes `ort` link/download an
 # ONNX Runtime binary that contains that provider; which provider actually
@@ -89,8 +90,8 @@ lopdf = "0.44"
 # (added in time 0.3.48) while declaring only `time = "0.3"`. The MSRV-aware
 # resolver (.cargo/config.toml) caps versions at docling-core's 1.85 floor
 # and would otherwise select time 0.3.45, which doesn't compile lopdf. Drop
-# when lopdf raises its own minimum. (time 0.3.48+ wants rustc 1.88 — the
-# workspace MSRV; it never enters docling-core's 1.85-only tree.)
+# when lopdf raises its own minimum. (time 0.3.48+ wants rustc 1.88, under
+# the workspace MSRV; it never enters docling-core's 1.85-only tree.)
 time = { version = "0.3.48", default-features = false }
 fast_image_resize = { version = "5.1.4", optional = true }
 # `/LZWDecode` image data for the pure-Rust raster of image-only pages
@@ -104,6 +105,12 @@ weezl = { version = "0.2", optional = true }
 # OpenType / bare-CFF glyph outlines ttf-parser's; Type 1 programs are read in
 # `render/font/type1.rs`.
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"], optional = true }
+# `JPXDecode` images for the page renderer (`render/jpx.rs`, #598): a photo
+# stored as JPEG 2000 used to draw as a mid-gray block, and the layout model
+# then saw a blank rectangle where docling(-parse) shows it the picture.
+# Memory-safe (`forbid(unsafe_code)`), within ±1 of OpenJPEG on the NASA
+# scans; the `image` feature (its own PNG/ICC glue) is not needed.
+hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = ["simd"], optional = true }
 ttf-parser = { version = "0.25", default-features = false, features = ["std", "glyph-names", "opentype-layout"], optional = true }
 # CodeFormula enrichment decodes its VLM output with the HF tokenizer
 # (.models/code_formula/tokenizer.json) — same crate/features as docling-core's

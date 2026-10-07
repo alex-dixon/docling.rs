@@ -35,7 +35,7 @@ a release tag to (re-)publish that; versions already on npm are skipped.
 
 This package lives in the docling.rs Cargo workspace and can also build the
 addon from Rust source — needed for local development or an unsupported
-platform. You need a Rust toolchain (1.88+) and Node.js 14+ (or Bun).
+platform. You need a Rust toolchain (1.92+) and Node.js 14+ (or Bun).
 
 ```bash
 cd crates/docling-node
