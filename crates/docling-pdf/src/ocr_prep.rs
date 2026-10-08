@@ -530,10 +530,16 @@ pub fn prep_page_lines(img: &RgbImage) -> Vec<PrepLine> {
 pub fn text_score() -> f32 {
     static SCORE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *SCORE.get_or_init(|| {
-        docling_core::env::parse::<f32>("DOCLING_RS_OCR_TEXT_SCORE")
-            .filter(|s| s.is_finite() && (0.0..=1.0).contains(s))
-            .unwrap_or(0.5)
+        text_score_from(docling_core::env::nonempty("DOCLING_RS_OCR_TEXT_SCORE").as_deref())
     })
+}
+
+/// [`text_score`] for one raw `DOCLING_RS_OCR_TEXT_SCORE` value: a score in
+/// 0–1, else RapidOCR's 0.5.
+fn text_score_from(raw: Option<&str>) -> f32 {
+    raw.and_then(|r| r.trim().parse::<f32>().ok())
+        .filter(|s| s.is_finite() && (0.0..=1.0).contains(s))
+        .unwrap_or(0.5)
 }
 
 /// Deterministic recognition batching: page-order line indices grouped by
@@ -676,7 +682,12 @@ mod tests {
     /// `0`, and garbage values ignored.
     #[test]
     fn text_score_default_is_rapidocrs() {
-        assert_eq!(text_score(), 0.5);
+        assert_eq!(text_score_from(None), 0.5);
+        assert_eq!(text_score_from(Some("0")), 0.0);
+        assert_eq!(text_score_from(Some("0.7")), 0.7);
+        for garbage in ["1.5", "-0.1", "NaN", "high", ""] {
+            assert_eq!(text_score_from(Some(garbage)), 0.5, "{garbage:?}");
+        }
     }
 
     #[test]

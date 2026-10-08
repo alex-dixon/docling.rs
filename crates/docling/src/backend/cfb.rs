@@ -554,9 +554,12 @@ mod tests {
             "/../../tests/data/doc/sources/docx_lists.doc"
         ))
         .unwrap();
-        // Every truncation point must fail cleanly, never panic.
+        // Every truncation point must fail cleanly — `None`, never a panic.
         for cut in [8, 76, 512, 700] {
-            let _ = CompoundFile::open(&data[..cut.min(data.len())]);
+            assert!(
+                CompoundFile::open(&data[..cut.min(data.len())]).is_none(),
+                "cut at {cut}"
+            );
         }
     }
 }

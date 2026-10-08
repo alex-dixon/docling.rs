@@ -1,12 +1,13 @@
-//! #244: `skip_ocr` — layout + TableFormer without OCR (docling's independent
-//! `do_ocr=False`) — and the missing-OCR-model degradation.
+//! #244: `no_ocr` — layout + TableFormer without OCR (docling's independent
+//! `do_ocr=False`; `skip_ocr` is its pre-2.0 name, #611) — and the
+//! missing-OCR-model degradation.
 //!
 //! A **separate integration-test file on purpose**: these tests point
-//! `DOCLING_OCR_REC_ONNX` at a nonexistent path to prove the recognition
-//! model is never loaded (or degrades when it can't be), and env vars are
-//! process-global — `pages.rs` sets the same vars to *real* paths for its OCR
-//! tests. Each tests/ file is its own binary and process, so the sabotage
-//! can't race a sibling suite.
+//! `DOCLING_OCR_REC_ONNX` at a nonexistent path (a missing model must
+//! degrade, not fail), and env vars are process-global — `pages.rs` sets the
+//! same vars to *real* paths for its OCR tests, including the proof that
+//! `no_ocr` never runs OCR on a scan. Each tests/ file is its own binary and
+//! process, so the sabotage can't race a sibling suite.
 
 use std::path::{Path, PathBuf};
 
@@ -48,12 +49,11 @@ fn layout_ready_ocr_sabotaged() -> bool {
 }
 
 /// A digital page with a real table: `no_ocr` — docling's `--no-ocr` since
-/// 2.0 (#611), `skip_ocr` its pre-2.0 name — must keep the layout + table
-/// structure that `text_layer_only` throws away, with the OCR model
-/// unloadable, which also proves it never touches it. Both spellings give
-/// the same document.
+/// 2.0 (#611) — must keep the layout + table structure that
+/// `text_layer_only` throws away, and convert with the OCR model
+/// unloadable. `skip_ocr`, its pre-2.0 name, gives the same document.
 #[test]
-fn skip_ocr_keeps_layout_and_tables() {
+fn no_ocr_keeps_layout_and_tables() {
     if !layout_ready_ocr_sabotaged() {
         eprintln!("skipping: the layout model is not present");
         return;
@@ -61,9 +61,9 @@ fn skip_ocr_keeps_layout_and_tables() {
     let path = repo_root().join("tests/data/pdf/sources/2305.03393v1-pg9.pdf");
     let src = SourceDocument::from_file(&path).expect("table fixture");
     let doc = DocumentConverter::new()
-        .skip_ocr(true)
+        .no_ocr(true)
         .convert(src)
-        .expect("skip_ocr conversion succeeds")
+        .expect("no_ocr conversion succeeds")
         .document;
     let md = doc.export_to_markdown();
     // Structure survived: the fixture's table serializes as a Markdown grid
@@ -74,32 +74,13 @@ fn skip_ocr_keeps_layout_and_tables() {
     );
     // ...and its digital text layer still reads out.
     assert!(!md.trim().is_empty());
-    let no_ocr = DocumentConverter::new()
-        .no_ocr(true)
+    let alias = DocumentConverter::new()
+        .skip_ocr(true)
         .convert(SourceDocument::from_file(&path).expect("table fixture"))
-        .expect("no_ocr conversion succeeds")
+        .expect("skip_ocr conversion succeeds")
         .document
         .export_to_markdown();
-    assert_eq!(no_ocr, md, "no_ocr and skip_ocr are one switch");
-}
-
-/// A scanned page (no text layer) with `skip_ocr`: converts cleanly to a
-/// document whose regions are empty of text — not an error.
-#[test]
-fn skip_ocr_scanned_page_converts_empty() {
-    if !layout_ready_ocr_sabotaged() {
-        eprintln!("skipping: the layout model is not present");
-        return;
-    }
-    let path = repo_root().join("tests/data/scanned/sources/ocr_test_raster.pdf");
-    let src = SourceDocument::from_file(&path).expect("scanned fixture");
-    let doc = DocumentConverter::new()
-        .skip_ocr(true)
-        .convert(src)
-        .expect("skip_ocr on a scanned page must not error")
-        .document;
-    // The page's only text exists as pixels; without OCR nothing reads out.
-    assert!(doc.export_to_markdown().trim().is_empty());
+    assert_eq!(alias, md, "no_ocr and skip_ocr are one switch");
 }
 
 /// The degradation half of #244: OCR *wanted* (no flag) but the model is

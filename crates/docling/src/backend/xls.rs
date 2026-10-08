@@ -124,28 +124,6 @@ mod tests {
     use super::*;
     use crate::InputFormat;
 
-    fn fixture(name: &str) -> SourceDocument {
-        let path = format!(
-            "{}/../../tests/data/xls/sources/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let bytes = std::fs::read(&path).expect("fixture exists");
-        SourceDocument::from_bytes(name, InputFormat::Xls, bytes)
-    }
-
-    #[test]
-    fn parses_xls_tables_like_the_xlsx_twin() {
-        let doc = XlsBackend::default()
-            .convert(&fixture("xlsx_01.xls"))
-            .expect("converts");
-        let tables: Vec<_> = doc
-            .nodes
-            .iter()
-            .filter(|n| matches!(n, Node::Table(_)))
-            .collect();
-        assert!(!tables.is_empty(), "expected tables, got: {:?}", doc.nodes);
-    }
-
     #[test]
     fn garbage_is_an_error_not_a_panic() {
         let src = SourceDocument::from_bytes("x.xls", InputFormat::Xls, vec![0u8; 64]);

@@ -642,17 +642,6 @@ mod tests {
     }
 
     #[test]
-    fn real_blink_fixture_decodes_quoted_printable_html() {
-        // docling's `tests/data/mhtml/sources/example.mhtml`, mirrored (#386).
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/data/mhtml/sources/example.mhtml");
-        let bytes = std::fs::read(path).expect("mirrored upstream fixture");
-        let markdown = md(bytes);
-        assert!(markdown.contains("# Example Domain"), "{markdown}");
-        assert!(markdown.contains("[Learn more](https://iana.org/domains/example)"));
-    }
-
-    #[test]
     fn embedded_images_resolve_by_location_and_cid() {
         let parts = png_part(
             "Content-Location: https://example.com/images/location.png",

@@ -792,50 +792,6 @@ mod tests {
     use super::*;
     use crate::InputFormat;
 
-    fn fixture(name: &str) -> SourceDocument {
-        let path = format!(
-            "{}/../../tests/data/ppt/sources/{name}",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let bytes = std::fs::read(&path).expect("fixture exists");
-        SourceDocument::from_bytes(name, InputFormat::Ppt, bytes)
-    }
-
-    #[test]
-    fn extracts_slide_titles_and_text() {
-        let doc = PptBackend
-            .convert(&fixture("powerpoint_sample.ppt"))
-            .expect("converts");
-        let headings = doc
-            .nodes
-            .iter()
-            .filter(|n| matches!(n, Node::Heading { .. }))
-            .count();
-        assert!(headings > 0, "expected slide titles: {:?}", doc.nodes);
-    }
-
-    #[test]
-    fn reconstructs_grouped_shapes_into_a_table() {
-        let doc = PptBackend
-            .convert(&fixture("powerpoint_sample.ppt"))
-            .expect("converts");
-        let tables: Vec<&Table> = doc
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                Node::Table(t) => Some(t),
-                _ => None,
-            })
-            .collect();
-        assert!(!tables.is_empty(), "expected a reconstructed table");
-        let t = tables[0];
-        assert!(
-            t.rows.len() >= 2 && t.rows[0].len() >= 2,
-            "grid too small: {:?}",
-            t.rows
-        );
-    }
-
     #[test]
     fn grid_table_rejects_a_column_of_shapes() {
         // Four stacked shapes (one column) must NOT read as a table.

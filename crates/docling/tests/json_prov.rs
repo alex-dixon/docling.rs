@@ -9,7 +9,7 @@
 //! — one text block to the layout model — is four checkbox items, one per
 //! drawn square.
 //!
-//! Needs the layout model only (`--skip-ocr`), so it skips on a checkout
+//! Needs the layout model only (`--no-ocr`), so it skips on a checkout
 //! without `.models/`.
 
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ fn every_text_item_has_prov_and_axis_ticks_keep_their_boxes() {
     }
     let path = repo_root().join("crates/docling/tests/fixtures/prov/issue609_sample.pdf");
     let doc = DocumentConverter::new()
-        .skip_ocr(true)
+        .no_ocr(true)
         .convert(SourceDocument::from_file(&path).expect("fixture"))
         .expect("conversion")
         .document;
@@ -125,7 +125,7 @@ fn ballot_box_glyphs_set_checkbox_state_and_leave_the_label() {
     }
     let path = repo_root().join("crates/docling/tests/fixtures/prov/checkbox_glyphs.pdf");
     let doc = DocumentConverter::new()
-        .skip_ocr(true)
+        .no_ocr(true)
         .convert(SourceDocument::from_file(&path).expect("fixture"))
         .expect("conversion")
         .document;

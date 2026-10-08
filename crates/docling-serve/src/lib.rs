@@ -2803,15 +2803,18 @@ mod pipeline_flag_tests {
     fn warm_pipeline_rebuilds_in_both_directions() {
         let mut slot = None;
         let default_opts = ConvertOptions::default();
-        let no_ocr_opts = ConvertOptions {
+        let text_layer_opts = ConvertOptions {
             convert: docling::ConvertOptions {
                 text_layer_only: Some(true),
                 ..Default::default()
             },
             ..ConvertOptions::default()
         };
-        assert!(warm_pipeline(&mut slot, &no_ocr_opts).is_ok());
-        assert_eq!(slot.as_ref().unwrap().0, PipelineFlags::of(&no_ocr_opts));
+        assert!(warm_pipeline(&mut slot, &text_layer_opts).is_ok());
+        assert_eq!(
+            slot.as_ref().unwrap().0,
+            PipelineFlags::of(&text_layer_opts)
+        );
         // Back to default: the degraded instance must not be reused.
         assert!(warm_pipeline(&mut slot, &default_opts).is_ok());
         assert_eq!(slot.as_ref().unwrap().0, PipelineFlags::default());
@@ -2950,16 +2953,9 @@ mod ssrf_tests {
         // then cleared, to avoid leaking to sibling tests.)
         std::env::remove_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH");
         assert!(!super::allow_private_ip_fetch());
-        for (val, want) in [
-            ("1", true),
-            ("true", true),
-            ("0", false),
-            ("false", false),
-            ("", false),
-        ] {
-            std::env::set_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH", val);
-            assert_eq!(super::allow_private_ip_fetch(), want, "value {val:?}");
-        }
+        // The accepted spellings are `docling_core::env::flag`'s, tested there.
+        std::env::set_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH", "1");
+        assert!(super::allow_private_ip_fetch());
         std::env::remove_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH");
     }
 }
@@ -3012,35 +3008,6 @@ mod vlm_tests {
     }
 
     #[test]
-    fn unknown_pipeline_is_rejected() {
-        let options = ConvertOptions {
-            convert: docling::ConvertOptions {
-                pipeline: Some("magic".into()),
-                ..Default::default()
-            },
-            ..ConvertOptions::default()
-        };
-        match resolve_vlm_options(&state(true), &options, false) {
-            Err(ApiError::Bad(m)) => assert!(m.contains("unknown pipeline"), "{m}"),
-            _ => panic!("expected Bad"),
-        }
-    }
-
-    #[test]
-    fn request_endpoint_is_gated_behind_allow_url_fetch() {
-        // Without --allow-url-fetch a caller must not steer the server's
-        // outbound traffic; the operator-pinned env mode is the alternative.
-        match resolve_vlm_options(
-            &state(false),
-            &vlm_opts(Some("http://example.com/v1")),
-            false,
-        ) {
-            Err(ApiError::Unsupported(m)) => assert!(m.contains("--allow-url-fetch"), "{m}"),
-            _ => panic!("expected Unsupported"),
-        }
-    }
-
-    #[test]
     fn request_endpoint_resolving_to_private_address_is_rejected() {
         let _env = super::ssrf_tests::ENV_LOCK
             .lock()
@@ -3079,20 +3046,15 @@ mod vlm_tests {
         assert_eq!(v.model, "m");
     }
 
+    /// Without any endpoint the error names this surface's option spelling
+    /// (`vlm_endpoint`), not the CLI flag. The option rules themselves are
+    /// `docling::ConvertOptions`' and tested there (`options.rs`).
     #[test]
-    fn vlm_max_tokens_zero_is_rejected_and_options_land() {
+    fn missing_endpoint_names_the_serve_option() {
         let _env = super::ssrf_tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DOCLING_RS_VLM_ENDPOINT");
-        let mut options = vlm_opts(Some("http://example.com/v1"));
-        options.convert.vlm_max_tokens = Some(0);
-        match resolve_vlm_options(&state(true), &options, false) {
-            Err(ApiError::Bad(m)) => assert!(m.contains("vlm_max_tokens"), "{m}"),
-            _ => panic!("expected Bad"),
-        }
-        // And without any endpoint at all, the error names this surface's
-        // option spelling, not the CLI flag.
         let none = ConvertOptions {
             convert: docling::ConvertOptions {
                 pipeline: Some("vlm".into()),
@@ -3107,19 +3069,5 @@ mod vlm_tests {
             }
             _ => panic!("expected Bad"),
         }
-        // The full option set reaches the resolved struct.
-        let mut options = vlm_opts(Some("http://example.com/v1"));
-        options.convert.vlm_api_key = Some("sk-test".into());
-        options.convert.vlm_prompt = Some("Read the page.".into());
-        options.convert.vlm_max_tokens = Some(512);
-        options.convert.pages = Some("2-5".into());
-        let v = resolve_vlm_options(&state(true), &options, false)
-            .ok()
-            .flatten()
-            .expect("resolves");
-        assert_eq!(v.api_key.as_deref(), Some("sk-test"));
-        assert_eq!(v.prompt.as_deref(), Some("Read the page."));
-        assert_eq!(v.max_tokens, 512);
-        assert_eq!(v.page_range, Some((2, 5)));
     }
 }

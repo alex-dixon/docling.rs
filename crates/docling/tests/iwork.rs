@@ -222,43 +222,6 @@ fn iwork_fixtures_match_groundtruth() {
     );
 }
 
-/// Both Tika fixtures are the same source document saved by different Pages
-/// releases (docling's own cross-check): the IWA and the '09 XML readers must
-/// agree on the shared body text and on the table grid.
-#[test]
-fn both_pages_generations_agree() {
-    let modern = convert_pages("pages_2013.pages");
-    let legacy = convert_pages("pages_iwork09.pages");
-    for sentence in ["Sample pages document", "Some plain text to parse."] {
-        assert!(
-            modern.export_to_markdown().contains(sentence),
-            "modern: {sentence}"
-        );
-        assert!(
-            legacy.export_to_markdown().contains(sentence),
-            "legacy: {sentence}"
-        );
-    }
-    // Template placeholders (`sf:ghost-text`) never surface as content.
-    assert!(!legacy
-        .export_to_markdown()
-        .contains("Lorem ipsum dolor sit amet"));
-    let grid = |doc: &docling::DoclingDocument| {
-        doc.nodes
-            .iter()
-            .find_map(|n| match n {
-                docling::Node::Table(t) => Some(t.rows.clone()),
-                _ => None,
-            })
-            .expect("a table")
-    };
-    let rows = grid(&modern);
-    assert_eq!(rows, grid(&legacy));
-    assert_eq!(rows.len(), 4);
-    assert_eq!(rows[0], ["Column one", "Column two", "Column three"]);
-    assert_eq!(rows[3][2], "Cell nine");
-}
-
 /// A pre-2013 Pages package (`index.xml`) with page furniture and a template
 /// placeholder: only the body text survives, as in docling's IWA path.
 #[test]

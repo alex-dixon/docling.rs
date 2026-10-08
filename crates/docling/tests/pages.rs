@@ -231,6 +231,42 @@ fn force_full_page_ocr_discards_the_text_layer() {
     );
 }
 
+/// `no_ocr` (#244 / #611, docling's `do_ocr=False`) never runs OCR — proven
+/// with the OCR models *present*: a scanned page, whose only text is pixels,
+/// converts to an empty document without an OCR score, while the same page
+/// without the switch is read by OCR.
+#[test]
+fn no_ocr_never_runs_ocr_on_a_scan() {
+    if !ocr_models_ready() {
+        eprintln!("skipping: the OCR models are not present");
+        return;
+    }
+    let src = || {
+        SourceDocument::from_file(
+            repo_root().join("tests/data/scanned/sources/ocr_test_raster.pdf"),
+        )
+        .expect("scanned fixture")
+    };
+    let ocr_score =
+        |doc: &docling_core::DoclingDocument| doc.confidence.as_ref().and_then(|r| r.ocr_score());
+    let read = DocumentConverter::new()
+        .convert(src())
+        .expect("default convert")
+        .document;
+    assert!(
+        !read.export_to_markdown().trim().is_empty(),
+        "OCR reads the scan"
+    );
+    assert!(ocr_score(&read).is_some());
+    let skipped = DocumentConverter::new()
+        .no_ocr(true)
+        .convert(src())
+        .expect("no_ocr on a scan must not error")
+        .document;
+    assert!(skipped.export_to_markdown().trim().is_empty());
+    assert_eq!(ocr_score(&skipped), None, "no_ocr ran OCR");
+}
+
 /// #183: the PDF pipeline attaches a per-page confidence report to the
 /// converted document. On a digital page the layout model scores real
 /// clusters (well above the 0.3 label floor), the text layer parses cleanly

@@ -9,7 +9,7 @@
 //! and prints, and the two photos stay two pictures — what docling (and the
 //! docling-parse renderer) give on these pages.
 //!
-//! Needs the layout model only (`--skip-ocr`), so it skips on a checkout
+//! Needs the layout model only (`--no-ocr`), so it skips on a checkout
 //! without `.models/`.
 
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ fn convert(name: &str) -> (serde_json::Value, String) {
         .join("crates/docling/tests/fixtures/jpx")
         .join(name);
     let doc = DocumentConverter::new()
-        .skip_ocr(true)
+        .no_ocr(true)
         .convert(SourceDocument::from_file(&path).expect("fixture"))
         .expect("conversion")
         .document;

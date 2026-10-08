@@ -153,33 +153,15 @@ async fn serves_its_logo_and_openapi_description() {
     for schema in ["TaskStatus", "ConfidenceReport", "X-Docling-Confidence"] {
         assert!(spec.contains(schema), "{schema} missing from openapi.yaml");
     }
-    for opt in [
-        "to:",
-        "strict:",
-        "images:",
-        "no_ocr:",
-        "skip_ocr:",
-        "text_layer_only:",
-        "pdf_password:",
-        "force_full_page_ocr:",
-        "no_table_former:",
-        "fetch_images:",
-        "skip_empty_cells:",
-        "compact_tables:",
-        "list_attachments:",
-        "ebcdic_layout:",
-        "pages:",
-        "ocr_lang:",
-        "ocr_mode:",
-        "ocr_scale:",
-        "scale:",
-        "asr_model:",
-        "encoding:",
-        "video_frames:",
-        "xbrl_taxonomy:",
-        "pandoc_api_version:",
-    ] {
-        assert!(spec.contains(opt), "option {opt} missing from openapi.yaml");
+    // The options only this server has; every shared `ConvertOptions` field
+    // is checked (query parameter and multipart key) by
+    // `crates/docling/tests/options_inventory.rs`. Anchored on the
+    // parameter definition, so `scale` is not satisfied by `ocr_scale`.
+    for opt in ["to", "images", "scale", "pandoc_api_version"] {
+        assert!(
+            spec.contains(&format!("\n    {opt}:\n")),
+            "parameter {opt} missing from openapi.yaml"
+        );
     }
 }
 
@@ -288,8 +270,12 @@ async fn converts_csv_to_docling_json() {
     let (ct, body) = multipart("t.csv", b"a,b\n1,2\n", &[("to", "json")]);
     let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // A declarative conversion carries no confidence report (#183): no
+    // header, no `confidence` key.
+    assert!(response.headers().get("x-docling-confidence").is_none());
     let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
     assert_eq!(v["schema_name"], "DoclingDocument");
+    assert!(v.get("confidence").is_none());
 }
 
 #[tokio::test]
@@ -391,16 +377,8 @@ async fn images_output_requires_a_pdf_input() {
 /// neither.
 #[tokio::test]
 async fn ocr_engine_and_lang_are_validated_together() {
-    let (ct, body) = multipart("x.md", b"# hi", &[("ocr_engine", "easyocr")]);
-    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(body_string(response).await.contains("ocr_engine"));
-
-    let (ct, body) = multipart("x.md", b"# hi", &[("ocr_lang", "deu")]);
-    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(body_string(response).await.contains("ocr_lang"));
-
+    // The rules are `ConvertOptions::validate`'s (options.rs); here: the
+    // cross-field check reaches the request as a 400 naming the field…
     let (ct, body) = multipart(
         "x.md",
         b"# hi",
@@ -468,9 +446,9 @@ async fn document_timeout_is_validated() {
     assert!(response.headers().get("x-docling-status").is_none());
 }
 
-/// A `scale` outside 0.1–4.0 is rejected before any page is rendered.
+/// `--to images`' `scale` outside 0.1–4.0 is rejected before any page is rendered.
 #[tokio::test]
-async fn images_scale_is_validated() {
+async fn to_images_scale_is_validated() {
     let (ct, body) = multipart("x.pdf", b"%PDF-1.4", &[("to", "images"), ("scale", "9")]);
     let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -572,7 +550,7 @@ async fn both_ocr_spellings_in_one_json_body_convert() {
         r#"{{"no_ocr": false, "skip_ocr": true, "text_layer_only": false,
             "sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "t.csv"}}]}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let text = body_string(response).await;
     assert!(text.contains("|   1 |   2 |"), "{text}");
@@ -674,16 +652,16 @@ async fn strict_field_changes_markdown_dialect() {
     assert_ne!(legacy, strict, "strict flag had no effect");
 }
 
-/// `fetch_images` is outbound fetch (SSRF surface), so it's gated behind the
-/// same `--allow-url-fetch` as URL inputs: honored only when the flag is on,
-/// silently ignored otherwise. Proven against a local image server that counts
-/// the requests it receives — the gate must let *zero* through when off.
 /// Serializes the tests that toggle `DOCLING_RS_ALLOW_PRIVATE_IP_FETCH`
 /// (process-global): without it, one test's `remove_var` can strip the escape
 /// hatch out from under another's in-flight loopback fetch/PUT. Tokio's mutex
 /// because the guard is held across the tests' awaits.
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// `fetch_images` is outbound fetch (SSRF surface), so it's gated behind the
+/// same `--allow-url-fetch` as URL inputs: honored only when the flag is on,
+/// silently ignored otherwise. Proven against a local image server that counts
+/// the requests it receives — the gate must let *zero* through when off.
 #[tokio::test]
 async fn fetch_images_is_gated_behind_allow_url_fetch() {
     use std::io::{Read, Write};
@@ -945,20 +923,6 @@ async fn async_rejects_bad_requests_and_full_queue() {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
-/// Declarative conversions have no ML stages, so no confidence surfaces
-/// (#183): no `X-Docling-Confidence` header, no `confidence` key in JSON.
-/// (The positive case — real scores from the PDF pipeline — is covered by the
-/// docling-pdf tests; here the router-level suite stays model-free.)
-#[tokio::test]
-async fn declarative_conversions_carry_no_confidence() {
-    let (ct, body) = multipart("t.csv", b"a,b\n1,2\n", &[("to", "json")]);
-    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.headers().get("x-docling-confidence").is_none());
-    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
-    assert!(v.get("confidence").is_none());
-}
-
 #[tokio::test]
 async fn index_serves_docs_and_form() {
     let response = app()
@@ -967,7 +931,8 @@ async fn index_serves_docs_and_form() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let body = body_string(response).await;
-    assert!(body.contains("/v1/convert") && body.contains("<form") || body.contains("Convert"));
+    assert!(body.contains(r#"<input type="file""#), "the test form");
+    assert!(body.contains("/v1/convert"), "the API docs");
 }
 
 #[tokio::test]
@@ -1046,8 +1011,7 @@ async fn explicit_hybrid_without_tokenizer_is_a_400() {
 
 // --- #139: docling sources/target passthrough ------------------------------
 
-fn json_convert(body: &str, allow_fetch: bool) -> Request<Body> {
-    let _ = allow_fetch;
+fn json_convert(body: &str) -> Request<Body> {
     convert_request("application/json", body.as_bytes().to_vec(), "")
 }
 
@@ -1061,7 +1025,7 @@ async fn file_sources_convert_without_any_gate() {
             {{"kind": "file", "base64_string": "{b64}", "filename": "two.csv"}}
         ], "to": "json"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
     let results = v["results"].as_array().expect("batch shape");
@@ -1070,31 +1034,7 @@ async fn file_sources_convert_without_any_gate() {
 }
 
 fn docling_b64(text: &str) -> String {
-    // Tiny local base64 (no test dep): RFC 4648 standard alphabet.
-    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = text.as_bytes();
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
-        out.push(A[(n >> 18) as usize & 63] as char);
-        out.push(A[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            A[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            A[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
+    docling::base64::encode(text.as_bytes())
 }
 
 #[tokio::test]
@@ -1104,14 +1044,14 @@ async fn url_and_sources_together_is_a_400() {
         r#"{{"url": "https://example.com/a.md",
             "sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "a.csv"}}]}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn unknown_source_kind_is_a_400() {
     let body = r#"{"sources": [{"kind": "google_drive", "document_id": "x"}]}"#;
-    let response = app().oneshot(json_convert(body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let msg = body_string(response).await;
     assert!(
@@ -1126,7 +1066,7 @@ async fn cloud_source_and_target_are_gated_behind_allow_url_fetch() {
     let s3 = r#"{"kind": "s3", "endpoint": "s3.us-east-2.amazonaws.com",
                  "access_key": "k", "secret_key": "s", "bucket": "b"}"#;
     let body = format!(r#"{{"sources": [{s3}]}}"#);
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     let b64 = docling_b64("a,b\n1,2\n");
@@ -1134,7 +1074,7 @@ async fn cloud_source_and_target_are_gated_behind_allow_url_fetch() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "a.csv"}}],
             "target": {s3}}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
@@ -1149,7 +1089,7 @@ async fn cloud_kind_without_the_feature_names_the_rebuild() {
     };
     let body = r#"{"sources": [{"kind": "s3", "endpoint": "s3.us-east-2.amazonaws.com",
                    "access_key": "k", "secret_key": "s", "bucket": "b"}]}"#;
-    let response = router(cfg).oneshot(json_convert(body, true)).await.unwrap();
+    let response = router(cfg).oneshot(json_convert(body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let msg = body_string(response).await;
     assert!(msg.contains("--features cloud"), "{msg}");
@@ -1162,7 +1102,7 @@ async fn explicit_inbody_target_answers_in_the_body() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "a.csv"}}],
             "target": {{"kind": "inbody"}}, "to": "json"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
     assert_eq!(v["schema_name"], "DoclingDocument");
@@ -1440,10 +1380,7 @@ async fn vlm_options_ride_the_json_body_and_zero_max_tokens_is_a_400() {
         allow_url_fetch: true,
         ..ServeConfig::default()
     };
-    let response = router(cfg)
-        .oneshot(json_convert(&body, true))
-        .await
-        .unwrap();
+    let response = router(cfg).oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(body_string(response).await.contains("vlm_max_tokens"));
 }
@@ -1461,7 +1398,7 @@ async fn zip_target_answers_with_an_archive_of_rendered_outputs() {
             {{"kind": "file", "base64_string": "{b64}", "filename": "two.csv"}}
         ], "target": {{"kind": "zip"}}, "to": "md"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let content_type = response
         .headers()
@@ -1495,7 +1432,7 @@ async fn zip_target_single_source_names_the_archive_and_propagates_errors() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "sheet.csv"}}],
             "target": {{"kind": "zip"}}, "to": "json"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let disposition = response
         .headers()
@@ -1512,7 +1449,7 @@ async fn zip_target_single_source_names_the_archive_and_propagates_errors() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "wat.unknown"}}],
             "target": {{"kind": "zip"}}, "to": "md"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert!(response.status().is_client_error(), "{}", response.status());
 }
 
@@ -1525,7 +1462,7 @@ async fn zip_target_batch_converts_around_a_bad_item() {
             {{"kind": "file", "base64_string": "{b64}", "filename": "bad.unknown"}}
         ], "target": {{"kind": "zip"}}, "to": "md"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
@@ -1540,7 +1477,7 @@ async fn zip_target_does_not_combine_with_to_images() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "s.csv"}}],
             "target": {{"kind": "zip"}}, "to": "images"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(body_string(response).await.contains("output target"));
 }
@@ -1552,7 +1489,7 @@ async fn put_target_is_gated_behind_allow_url_fetch() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "s.csv"}}],
             "target": {{"kind": "put", "url": "http://127.0.0.1:9/up"}}, "to": "md"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert!(body_string(response).await.contains("--allow-url-fetch"));
 }
@@ -1607,10 +1544,7 @@ async fn put_target_uploads_each_output_and_acknowledges() {
         allow_url_fetch: true,
         ..ServeConfig::default()
     };
-    let response = router(cfg)
-        .oneshot(json_convert(&body, true))
-        .await
-        .unwrap();
+    let response = router(cfg).oneshot(json_convert(&body)).await.unwrap();
     let status = response.status();
     let out = body_string(response).await;
     std::env::remove_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH");
@@ -1643,10 +1577,7 @@ async fn put_target_refuses_a_private_address_without_the_escape_hatch() {
         allow_url_fetch: true,
         ..ServeConfig::default()
     };
-    let response = router(cfg)
-        .oneshot(json_convert(&body, true))
-        .await
-        .unwrap();
+    let response = router(cfg).oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(body_string(response).await.contains("private/loopback"));
 }
@@ -1747,7 +1678,7 @@ async fn latex_batch_items_and_zip_target_carry_tex() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "one.csv"}}],
             "target": {{"kind": "zip"}}, "to": "latex"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(
@@ -1785,7 +1716,7 @@ async fn text_output_is_undecorated_plain_text() {
         r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "one.csv"}}],
             "target": {{"kind": "zip"}}, "to": "text"}}"#
     );
-    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    let response = app().oneshot(json_convert(&body)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(
