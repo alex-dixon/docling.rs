@@ -65,6 +65,8 @@ struct Ctx {
     escape_underscores: bool,
     /// What a picture prints as without image data.
     image_placeholder: String,
+    /// The plain-text export ([`MarkdownExportOptions::plain_text`], #613).
+    plain: bool,
 }
 
 impl Ctx {
@@ -88,6 +90,7 @@ impl Ctx {
             escape_html: options.escape_html,
             escape_underscores: options.escape_underscores,
             image_placeholder: options.image_placeholder.clone(),
+            plain: options.plain_text,
         }
     }
 
@@ -122,7 +125,83 @@ impl Ctx {
     /// A text item's inline text: the strict-mode cleanup, then the
     /// escaping the options turn off undone.
     fn text(&self, text: &str) -> String {
-        self.unescape(&strict_text(text, self.strict))
+        let text = strict_text(text, self.strict);
+        if self.plain {
+            self.unescape(&plain_inline(&self.drop_image_markers(&text)))
+        } else {
+            self.unescape(&text)
+        }
+    }
+
+    /// A caption's text (the backends escape it, but strict mode leaves it
+    /// alone): the escaping the options turn off undone, and, for the plain
+    /// export, its inline markup dropped.
+    fn caption(&self, text: &str) -> String {
+        if self.plain {
+            self.unescape(&plain_inline(text))
+        } else {
+            self.unescape(text)
+        }
+    }
+
+    /// docling-core's `_md_line_breaks` for the Markdown export; the plain
+    /// export's `PlainTextTextSerializer` keeps the text's own newlines.
+    fn breaks(&self, text: &str) -> String {
+        if self.plain {
+            text.to_string()
+        } else {
+            md_line_breaks(text)
+        }
+    }
+
+    /// A table for the plain export: a rich cell's text is its Markdown
+    /// serialization in our model (bold runs, links, hard line breaks),
+    /// where upstream serializes the cell with the plain serializer — so
+    /// the markup goes before the grid is laid out, which also lets a
+    /// once-bold number right-align like a plain one. A simple cell holds
+    /// raw text and passes through unchanged.
+    fn plain_table(&self, table: &Table) -> Table {
+        let mut plain = table.clone();
+        for cell in plain.rows.iter_mut().flatten() {
+            if cell.contains(['*', '~', '`', '[', '\n', '<']) {
+                let text = self.drop_image_markers(&strip_hard_breaks(cell));
+                *cell = plain_inline(&text);
+            }
+        }
+        plain
+    }
+
+    /// Pictures some backends fold into an item's text (an HTML `<img>`
+    /// inside a `<li>`, a LaTeX figure in a paragraph) arrive as baked
+    /// `<!-- image -->` lines — docling's picture *children* of the item,
+    /// which its serializer prints with the active image placeholder. The
+    /// plain export's placeholder is empty, so such a line goes, as a
+    /// picture item would.
+    fn drop_image_markers(&self, text: &str) -> String {
+        const MARKER: &str = "<!-- image -->";
+        if !text.contains(MARKER) && !text.contains("```") {
+            return text.to_string();
+        }
+        // Block by block (`\n\n`, the serializer's part delimiter): a block
+        // left empty goes with its delimiter, as docling joins only the parts
+        // that carry text.
+        text.split("\n\n")
+            .filter_map(|block| {
+                let lines: Vec<String> = block
+                    .split('\n')
+                    .filter_map(|line| {
+                        // A folded code block's fences go too: the plain
+                        // export prints code unfenced.
+                        if line.trim() == MARKER || line.trim() == "```" {
+                            return None;
+                        }
+                        Some(line.replace(MARKER, &self.image_placeholder))
+                    })
+                    .collect();
+                (!lines.is_empty()).then(|| lines.join("\n"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 }
 
@@ -170,7 +249,7 @@ pub fn to_markdown_with_options(
     // Strict mode only: turn recovered source hyperlinks into Markdown links.
     // docling's standard pipeline drops them, so doing this in legacy mode would
     // diverge from docling — hence strict-only, leaving conformance output intact.
-    if strict && !doc.links.is_empty() {
+    if strict && !options.plain_text && !doc.links.is_empty() {
         body = apply_links(&body, &doc.links);
     }
     let md = if body.is_empty() {
@@ -317,6 +396,7 @@ pub struct MarkdownStreamer {
     escape_html: bool,
     escape_underscores: bool,
     image_placeholder: String,
+    plain: bool,
 }
 
 impl MarkdownStreamer {
@@ -359,6 +439,7 @@ impl MarkdownStreamer {
             escape_html: true,
             escape_underscores: true,
             image_placeholder: "<!-- image -->".to_string(),
+            plain: false,
         }
     }
 
@@ -376,6 +457,7 @@ impl MarkdownStreamer {
         self.escape_html = options.escape_html;
         self.escape_underscores = options.escape_underscores;
         self.image_placeholder = options.image_placeholder.clone();
+        self.plain = options.plain_text;
         self
     }
 
@@ -419,6 +501,7 @@ impl MarkdownStreamer {
             escape_html: self.escape_html,
             escape_underscores: self.escape_underscores,
             image_placeholder: std::mem::take(&mut self.image_placeholder),
+            plain: self.plain,
         };
         let mut blocks: Vec<String> = Vec::new();
         render(nodes, &mut blocks, &mut ctx);
@@ -433,7 +516,7 @@ impl MarkdownStreamer {
             return String::new();
         }
         let mut body = blocks.join("\n\n");
-        if self.strict && !self.links.is_empty() {
+        if self.strict && !self.plain && !self.links.is_empty() {
             body = apply_links_chunk(&body, &mut self.links);
         }
         let chunk = if self.emitted_any {
@@ -475,6 +558,124 @@ fn strict_text(text: &str, strict: bool) -> String {
         .replace("( ", "(")
         .replace(" ]", "]")
         .replace("[ ", "[")
+}
+
+/// The plain export's inline text (#613): the Markdown markers docling-core's
+/// `PlainTextDocSerializer` never writes — `serialize_bold` / `_italic` /
+/// `_strikethrough` return the text, `serialize_hyperlink` the label, and
+/// `format_code_blocks=False` drops inline code's backticks. The backends
+/// bake those markers into an item's Markdown text (`***x***`, `**x**`,
+/// `*x*`, `~~x~~`, `` `x` ``, `[label](url)`, the set DocLang's run parser
+/// reads too), so they are taken out here, nested ones included. A marker
+/// counts only when it closes and its content is tight against both
+/// markers (CommonMark's flanking rule): `2 * 3 * 4` is arithmetic and IBM
+/// i's `*USE … have *OBJMGT` are special values, not emphasis, and stay as
+/// they are — docling's own emphasis around a space (WebVTT's `* *`) stays
+/// literal too. Inline `$…$` formulas pass through untouched.
+pub(crate) fn plain_inline(text: &str) -> String {
+    if !text.contains(['*', '~', '`', '[']) {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    plain_inline_into(&chars, &mut out);
+    out
+}
+
+fn plain_inline_into(chars: &[char], out: &mut String) {
+    let find = |open: usize, pat: &[char]| -> Option<usize> {
+        chars
+            .get(open..)?
+            .windows(pat.len())
+            .position(|w| w == pat)
+            .map(|p| open + p)
+    };
+    // An emphasis span opening at `i` with marker `pat`: its closing index
+    // when the content is non-empty and tight against both markers.
+    let span = |i: usize, pat: &[char]| -> Option<usize> {
+        if !chars[i..].starts_with(pat) {
+            return None;
+        }
+        let open = i + pat.len();
+        let end = find(open, pat)?;
+        (end > open && !chars[open].is_whitespace() && !chars[end - 1].is_whitespace())
+            .then_some(end)
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        let mut matched = false;
+        for pat in [&['*', '*', '*'][..], &['*', '*'], &['~', '~'], &['*']] {
+            if let Some(end) = span(i, pat) {
+                plain_inline_into(&chars[i + pat.len()..end], out);
+                i = end + pat.len();
+                matched = true;
+                break;
+            }
+        }
+        if matched {
+            continue;
+        }
+        // Inline code: content tight against both backticks, as docling
+        // writes it — a backtick opening a quotation (`` `like this’ ``,
+        // JATS prose) stays.
+        if chars[i] == '`' {
+            if let Some(end) = find(i + 1, &['`']).filter(|&e| {
+                e > i + 1 && !chars[i + 1].is_whitespace() && !chars[e - 1].is_whitespace()
+            }) {
+                out.extend(&chars[i + 1..end]);
+                i = end + 1;
+                continue;
+            }
+        }
+        // An inline formula is LaTeX, printed as it is — its brackets and
+        // stars are not Markdown.
+        if chars[i] == '$' {
+            if let Some(end) = find(i + 1, &['$']) {
+                out.extend(&chars[i..=end]);
+                i = end + 1;
+                continue;
+            }
+        }
+        // A link: the `]` closing this `[` (brackets nest) directly followed
+        // by `(` — a citation `[23,24]` before a later link is no anchor.
+        if chars[i] == '[' {
+            if let Some(close) = closing_bracket(chars, i) {
+                if chars.get(close + 1) == Some(&'(') {
+                    if let Some(endp) = crate::doclang::link_dest_end(chars, close + 2) {
+                        plain_inline_into(&chars[i + 1..close], out);
+                        i = endp + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        // A run of the same marker that opened nothing stays literal as a
+        // whole, so `***` before a lone `*` is not re-read from its middle.
+        let c = chars[i];
+        out.push(c);
+        i += 1;
+        if matches!(c, '*' | '~') {
+            while i < chars.len() && chars[i] == c {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+}
+
+/// The index of the `]` matching the `[` at `open`, nested brackets
+/// balanced; `None` when it never closes.
+fn closing_bracket(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, c) in chars.iter().enumerate().skip(open + 1) {
+        match c {
+            '[' => depth += 1,
+            ']' if depth == 0 => return Some(k),
+            ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// docling-core 2.92's `_md_line_breaks` (docling-core#721): a single `\n`
@@ -666,6 +867,9 @@ fn render_list_run(items: &[Node], blocks: &mut Vec<String>, ctx: &Ctx) {
 /// an image marker or an alt caption directly followed by one.
 fn list_item_text(text: &str, ctx: &Ctx) -> String {
     let escaped = ctx.text(text);
+    if ctx.plain {
+        return escaped;
+    }
     if let Some((own, tail)) = escaped.split_once('\n') {
         if is_folded_child_tail(tail) {
             return format!("{}\n{tail}", md_line_breaks(own));
@@ -736,6 +940,12 @@ fn render_one(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
 fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
     match node {
         Node::Heading { level, text } => {
+            if ctx.plain {
+                // `PlainTextTextSerializer`: the heading's text as it is —
+                // no `#`, its newlines kept.
+                blocks.push(ctx.text(text));
+                return;
+            }
             let text = heading_line_breaks(&ctx.text(text));
             if ctx.in_table_cell {
                 // docling-core#540: no `#` markers inside a table cell.
@@ -748,20 +958,20 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         // An empty body paragraph (docling's blank-line text item) contributes
         // nothing to Markdown — only DocLang/JSON keep it.
         Node::Paragraph { text } if text.is_empty() => {}
-        Node::Paragraph { text } => blocks.push(md_line_breaks(&ctx.text(text))),
+        Node::Paragraph { text } => blocks.push(ctx.breaks(&ctx.text(text))),
         // A standalone caption item renders like a text item; its hyperlink
         // annotation becomes a Markdown link around the whole caption.
         Node::Caption { text, .. } if text.is_empty() => {}
         Node::Caption { text, href } => {
-            let body = md_line_breaks(&ctx.text(text));
+            let body = ctx.breaks(&ctx.text(text));
             blocks.push(match href {
-                Some(url) => format!("[{body}]({url})"),
-                None => body,
+                Some(url) if !ctx.plain => format!("[{body}]({url})"),
+                _ => body,
             });
         }
         Node::CheckboxItem { checked, text } => {
             let mark = if *checked { "- [x] " } else { "- [ ] " };
-            blocks.push(md_line_breaks(&ctx.text(&format!("{mark}{text}"))));
+            blocks.push(ctx.breaks(&ctx.text(&format!("{mark}{text}"))));
         }
         Node::Code {
             language,
@@ -780,7 +990,13 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
                 Some(p) if ctx.strict => p.as_str(),
                 _ => text.as_str(),
             };
-            blocks.push(format!("```{lang}\n{body}\n```"));
+            // The plain export (`format_code_blocks=False`) prints the code
+            // as it is.
+            blocks.push(if ctx.plain {
+                body.to_string()
+            } else {
+                format!("```{lang}\n{body}\n```")
+            });
         }
         // A CodeFormula-decoded display formula renders as docling's `$$…$$`
         // (the un-enriched pipeline emits a placeholder paragraph instead).
@@ -790,10 +1006,14 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
             // `caption` is already escaped (backend convention), like a paragraph.
             if let Some(cap) = &table.caption {
                 if !cap.is_empty() {
-                    blocks.push(md_line_breaks(&ctx.text(cap)));
+                    blocks.push(ctx.breaks(&ctx.text(cap)));
                 }
             }
-            let rendered = render_table(table, ctx.compact_tables);
+            let rendered = if ctx.plain {
+                render_table(&ctx.plain_table(table), ctx.compact_tables)
+            } else {
+                render_table(table, ctx.compact_tables)
+            };
             if !rendered.is_empty() {
                 blocks.push(rendered);
             }
@@ -802,7 +1022,7 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         Node::Picture { caption, image, .. } => {
             if let Some(cap) = caption {
                 if !cap.is_empty() {
-                    blocks.push(md_line_breaks(&ctx.unescape(cap)));
+                    blocks.push(ctx.breaks(&ctx.caption(cap)));
                 }
             }
             blocks.push(picture_marker(image.as_ref(), ctx));
@@ -818,12 +1038,16 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         } => {
             if let Some(cap) = caption {
                 if !cap.is_empty() {
-                    blocks.push(md_line_breaks(&ctx.unescape(cap)));
+                    blocks.push(ctx.breaks(&ctx.caption(cap)));
                 }
             }
             blocks.push(picture_marker(None, ctx));
             blocks.push(humanize_label(kind));
-            let rendered = render_table(table, false);
+            let rendered = if ctx.plain {
+                render_table(&ctx.plain_table(table), false)
+            } else {
+                render_table(table, false)
+            };
             if !rendered.is_empty() {
                 blocks.push(rendered);
             }
@@ -851,7 +1075,7 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
             // only an item's marker/key/value appear, as separate paragraphs.
             for item in items {
                 for part in [&item.marker, &item.key, &item.value].into_iter().flatten() {
-                    blocks.push(md_line_breaks(&ctx.text(part)));
+                    blocks.push(ctx.breaks(&ctx.text(part)));
                 }
             }
         }
@@ -860,7 +1084,7 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         Node::KeyValueGraph { .. } => blocks.push(MISSING_KEY_VALUE_ITEM.to_string()),
         // A rich inline group renders exactly like a paragraph of its Markdown
         // text — the structured runs are DocLang-only.
-        Node::InlineGroup { md_text, .. } => blocks.push(md_line_breaks(&ctx.text(md_text))),
+        Node::InlineGroup { md_text, .. } => blocks.push(ctx.breaks(&ctx.text(md_text))),
         // A plain-text backend dump renders verbatim as a single block.
         Node::TextDump(text) => {
             if !text.is_empty() {
@@ -880,7 +1104,7 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         // paragraph when the furniture layer renders.
         Node::PageFurniture { text, .. } | Node::FurnitureText { text, .. } => {
             if ctx.layers.furniture && !text.is_empty() {
-                blocks.push(md_line_breaks(&ctx.text(text)));
+                blocks.push(ctx.breaks(&ctx.text(text)));
             }
         }
         // A picture's contained text: docling's Markdown picture serializer
@@ -898,7 +1122,7 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         // the item.
         Node::CommentSection { text, .. } => {
             if ctx.layers.notes && !text.is_empty() {
-                blocks.push(md_line_breaks(&ctx.text(text)));
+                blocks.push(ctx.breaks(&ctx.text(text)));
             }
         }
         Node::Commented { inner, .. } => render_one(inner, blocks, ctx),
@@ -2427,5 +2651,111 @@ mod tests {
             "{buffered}"
         );
         let _ = ContentLayer::Notes;
+    }
+
+    /// #613: the plain export of a document holding every decoration the
+    /// Markdown export writes, and the streamer agreeing with it.
+    #[test]
+    fn plain_text_drops_the_markdown_decoration() {
+        let item = |text: &str, ordered: bool, number: u64, level: u8| Node::ListItem {
+            ordered,
+            number,
+            first_in_list: number == 1 && level == 0,
+            text: text.into(),
+            level,
+            marker: None,
+            location: None,
+            dclx: None,
+            href: None,
+            layer: None,
+        };
+        let mut doc = DoclingDocument::new("plain");
+        doc.add_heading(1, "Title with **bold**");
+        doc.add_heading(2, "Section");
+        doc.add_paragraph("Some **bold**, *italic*, ~~gone~~ and `code` with a [link](https://x.org).\nNext line.");
+        doc.push(item("*one*", false, 1, 0));
+        doc.push(item("[two](https://y.org)", false, 2, 0));
+        doc.push(item("nested", true, 1, 1));
+        doc.push(Node::CheckboxItem {
+            checked: true,
+            text: "done".into(),
+        });
+        doc.push(Node::Code {
+            language: Some("rust".into()),
+            text: "let x = **y**;".into(),
+            orig: None,
+            pretty: None,
+        });
+        doc.push(Node::Picture {
+            caption: Some("Figure *1*".into()),
+            caption_href: None,
+            image: None,
+            classification: None,
+            caption_parent: Default::default(),
+            caption_location: None,
+        });
+        doc.push(Node::Caption {
+            text: "Linked caption".into(),
+            href: Some("https://z.org".into()),
+        });
+        doc.push(Node::Table(Table {
+            rows: vec![
+                vec!["**n**".into(), "rich".into()],
+                vec!["**2**".into(), "a  \nb".into()],
+            ],
+            ..Default::default()
+        }));
+        doc.add_paragraph("R&amp;D \\_ x");
+        let text = doc.export_to_text();
+        assert_eq!(
+            text,
+            "Title with bold\n\n\
+             Section\n\n\
+             Some bold, italic, gone and code with a link.\nNext line.\n\n\
+             - one\n- two\n    1. nested\n\n\
+             - [x] done\n\n\
+             let x = **y**;\n\n\
+             Figure 1\n\n\
+             Linked caption\n\n\
+             |   n | rich   |\n\
+             |-----|--------|\n\
+             |   2 | a b    |\n\n\
+             R&D _ x"
+        );
+
+        let options = MarkdownExportOptions::plain_text();
+        let (buffered, _) = doc.export_to_markdown_with_options(&options);
+        assert_eq!(buffered, format!("{text}\n"));
+        let mut streamer = MarkdownStreamer::new(false, ImageMode::Placeholder, false)
+            .with_export_options(&options);
+        let mut out = String::new();
+        for chunk in doc.nodes.chunks(3) {
+            out.push_str(&streamer.push(chunk, &[]));
+        }
+        out.push_str(&streamer.finish());
+        assert_eq!(out, buffered);
+    }
+
+    /// #613: text that only looks like Markdown stays as it is.
+    #[test]
+    fn plain_inline_keeps_literal_markers() {
+        for (input, want) in [
+            ("**bold** and *it* and ***both***", "bold and it and both"),
+            ("**[label](https://a.b/c_(d))** end", "label end"),
+            (
+                "grant *USE and *OBJMGT authority",
+                "grant *USE and *OBJMGT authority",
+            ),
+            ("2 * 3 * 4", "2 * 3 * 4"),
+            ("a ** b", "a ** b"),
+            ("the `quoted’ and `x` term", "the `quoted’ and x term"),
+            ("see [12] and [docs](u)", "see [12] and docs"),
+            ("formula $[a](b)$ stays", "formula $[a](b)$ stays"),
+            ("price $5 and **bold**", "price $5 and bold"),
+            ("[outer [inner] text](u)", "outer [inner] text"),
+            ("unclosed **bold", "unclosed **bold"),
+        ] {
+            assert_eq!(plain_inline(input), want, "{input}");
+        }
     }
 }

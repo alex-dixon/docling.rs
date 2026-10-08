@@ -603,6 +603,31 @@ pub struct MarkdownExportOptions {
     /// renders no image data (the placeholder mode, or a picture without a
     /// payload); upstream's `<!-- image -->`.
     pub image_placeholder: String,
+    /// docling-core's `PlainTextDocSerializer` (#613, `export_to_text`,
+    /// docling's `--to text`): the Markdown walk with the decoration turned
+    /// off — headings without `#`, bold/italic/strikethrough markers and
+    /// inline code backticks dropped, a hyperlink reduced to its label, code
+    /// blocks unfenced, no GFM hard line breaks. List bullets/numbers,
+    /// checkbox marks and table grids stay. [`Self::plain_text`] pairs it
+    /// with upstream's `PlainTextParams` (no escaping, an empty image
+    /// placeholder).
+    pub plain_text: bool,
+}
+
+impl MarkdownExportOptions {
+    /// docling-core's `PlainTextParams` defaults (#613): [`Self::plain_text`]
+    /// on, HTML and underscore escaping off, pictures print nothing (their
+    /// captions still do), body layer only, no picture traversal — what
+    /// `DoclingDocument.export_to_text()` and docling's `--to text` write.
+    pub fn plain_text() -> Self {
+        Self {
+            escape_html: false,
+            escape_underscores: false,
+            image_placeholder: String::new(),
+            plain_text: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for MarkdownExportOptions {
@@ -615,6 +640,7 @@ impl Default for MarkdownExportOptions {
             escape_html: true,
             escape_underscores: true,
             image_placeholder: "<!-- image -->".to_string(),
+            plain_text: false,
         }
     }
 }
@@ -1328,6 +1354,24 @@ impl DoclingDocument {
         options: &MarkdownExportOptions,
     ) -> (String, Vec<(String, Vec<u8>)>) {
         crate::markdown::to_markdown_with_options(self, self.strict_markdown, options)
+    }
+
+    /// Plain text — docling-core's `DoclingDocument.export_to_text()` with
+    /// its defaults (#613, docling's `--to text` / `<stem>.txt`): the
+    /// Markdown export without decoration ([`MarkdownExportOptions::plain_text`]).
+    /// Lists keep their bullets and numbers, tables their `|` grid. No
+    /// trailing newline: upstream's `serialize().text`, which its CLI
+    /// writes verbatim to `<stem>.txt`.
+    pub fn export_to_text(&self) -> String {
+        let (mut text, _) = crate::markdown::to_markdown_with_options(
+            self,
+            self.strict_markdown,
+            &MarkdownExportOptions::plain_text(),
+        );
+        if text.ends_with('\n') {
+            text.pop();
+        }
+        text
     }
 
     /// A complete HTML document — docling-core's `HTMLDocSerializer` with its

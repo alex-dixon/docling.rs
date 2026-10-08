@@ -42,7 +42,7 @@ use serde::Deserialize;
 /// The request: output selection plus the shared conversion options.
 #[derive(Default, Deserialize)]
 struct Options {
-    /// Output format: `md` (default) | `json` | `dclx` | `latex` | `html` |
+    /// Output format: `md` (default) | `json` | `text` | `dclx` | `latex` | `html` |
     /// `pandoc` (Pandoc's JSON AST, #515).
     to: Option<String>,
     /// Picture rendering in Markdown: `placeholder` (default) | `embedded`
@@ -137,6 +137,8 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
         // C string.
         "dclx" => Ok(docling::dclx::to_dclx_bytes(&document)),
         "latex" => Ok(document.export_to_latex().into_bytes()),
+        // #613: docling's plain text (`export_to_text`).
+        "text" => Ok(document.export_to_text().into_bytes()),
         "html" => Ok(document.export_to_html().into_bytes()),
         // #515: pictures follow `images` like Markdown.
         "pandoc" => document
@@ -147,7 +149,7 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
             .map(|(json, _)| json.into_bytes())
             .map_err(|e| e.to_string()),
         other => Err(format!(
-            "unknown to={other:?} (expected: md, json, dclx, latex, html, pandoc)"
+            "unknown to={other:?} (expected: md, json, text, dclx, latex, html, pandoc)"
         )),
     }
 }
@@ -218,7 +220,7 @@ pub unsafe extern "C" fn docling_convert(
 }
 
 /// The converted output, or NULL when the conversion failed. NUL-terminated
-/// (readable as a C string for `to` = `md` / `json` / `latex` / `html` /
+/// (readable as a C string for `to` = `md` / `json` / `text` / `latex` / `html` /
 /// `pandoc`); for binary output
 /// (`dclx`) pair it with [`docling_result_output_len`]. Owned by the result —
 /// valid until [`docling_result_free`].
@@ -344,6 +346,9 @@ mod tests {
         let tex = output_string(r);
         assert!(tex.starts_with("\\documentclass"), "{tex}");
         assert!(tex.ends_with("\\end{document}"), "{tex}");
+        unsafe { docling_result_free(r) };
+        let r = convert(md, "note.md", r#"{"to":"text"}"#);
+        assert_eq!(output_string(r), "Title\n\nHello world");
         unsafe { docling_result_free(r) };
         let r = convert(md, "note.md", r#"{"to":"pandoc"}"#);
         let ast = output_string(r);

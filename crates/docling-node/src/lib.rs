@@ -194,7 +194,8 @@ pub struct ConverterOptions {
 #[derive(Clone, Default)]
 pub struct OutputOptions {
     /// `"markdown"` (default), `"json"` (docling-core DoclingDocument wire
-    /// format), `"latex"` (a complete LaTeX document, #317), `"html"` (a
+    /// format), `"text"` (plain text, docling's `export_to_text`, #613),
+    /// `"latex"` (a complete LaTeX document, #317), `"html"` (a
     /// complete HTML document, docling-core's `HTMLDocSerializer`, #492 —
     /// pictures follow `imageMode` like Markdown) or `"pandoc"` (Pandoc's
     /// JSON AST for `pandoc -f json`, #515 — pictures follow `imageMode`).
@@ -455,6 +456,8 @@ enum OutputKind {
     Json,
     /// A complete LaTeX document (docling 2.124's `--to latex`, #317).
     Latex,
+    /// Plain text (docling's `--to text`, `export_to_text`, #613).
+    Text,
     /// A complete HTML document (docling-core's `HTMLDocSerializer`, #492);
     /// pictures follow `imageMode` like the Markdown export.
     Html,
@@ -590,6 +593,7 @@ fn render_doc(
     let (content, images) = match cfg.to {
         OutputKind::Json => (doc.export_to_json(), Vec::new()),
         OutputKind::Latex => (doc.export_to_latex(), Vec::new()),
+        OutputKind::Text => (doc.export_to_text(), Vec::new()),
         OutputKind::Html => match cfg.image_mode {
             ImageMode::Placeholder => (doc.export_to_html(), Vec::new()),
             mode => doc.export_to_html_with_images(mode, &cfg.artifacts_dir),
@@ -2230,11 +2234,12 @@ fn parse_output_kind(to: Option<&str>) -> Result<OutputKind> {
         None | Some("md") | Some("markdown") => Ok(OutputKind::Markdown),
         Some("json") => Ok(OutputKind::Json),
         Some("latex") => Ok(OutputKind::Latex),
+        Some("text") => Ok(OutputKind::Text),
         Some("html") => Ok(OutputKind::Html),
         Some("pandoc") => Ok(OutputKind::Pandoc),
         Some(other) => Err(Error::new(
             Status::InvalidArg,
-            format!("unknown `to` '{other}' (expected: markdown, json, html, latex, pandoc)"),
+            format!("unknown `to` '{other}' (expected: markdown, json, html, text, latex, pandoc)"),
         )),
     }
 }

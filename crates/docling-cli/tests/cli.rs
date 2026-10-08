@@ -82,7 +82,7 @@ fn list_output_formats_prints_the_to_values() {
     assert!(stderr.is_empty(), "stderr: {stderr:?}");
     assert_eq!(
         stdout,
-        "chunks\ndclx\nhtml\nimages\njson\nlatex\nmd\npandoc\n"
+        "chunks\ndclx\nhtml\nimages\njson\nlatex\nmd\npandoc\ntext\n"
     );
 }
 
@@ -489,6 +489,34 @@ fn repeated_to_writes_every_format_from_one_conversion() {
         std::fs::read_to_string(out.0.join("duck.json"))
             .unwrap()
             .trim_end()
+    );
+}
+
+/// `--to text` (#613): docling's plain text — on stdout for one file (a
+/// newline appended, as for LaTeX), `<stem>.txt` verbatim in batch mode.
+#[test]
+fn to_text_prints_plain_text_and_writes_txt() {
+    let dir = Scratch::new("to-text");
+    let src = dir.path("note.md");
+    std::fs::write(
+        &src,
+        "# Title\n\nSome **bold** and *italic* text.\n\n- one\n- two\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = run(&["--to", "text", &src]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "Title\n\nSome bold and italic text.\n\n- one\n- two\n"
+    );
+
+    let (code, stdout, stderr) = run(&["--to", "text", "--output", &dir.path("out"), &src]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let written = dir.0.join("out/note.txt");
+    assert_eq!(stdout.trim(), written.to_string_lossy());
+    assert_eq!(
+        std::fs::read_to_string(&written).unwrap(),
+        "Title\n\nSome bold and italic text.\n\n- one\n- two"
     );
 }
 

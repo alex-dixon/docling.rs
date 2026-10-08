@@ -434,12 +434,16 @@ components:
   schemas:
     To:
       type: string
-      enum: [md, json, html, dclx, chunks, latex, pandoc, images]
+      enum: [md, json, html, text, dclx, chunks, latex, pandoc, images]
       default: md
       description: |
         `md` — Markdown, streamed as it converts.
         `json` — docling `DoclingDocument` JSON.
         `html` — a complete HTML page (docling-core's HTML serializer, #492).
+        `text` — plain text (docling's `--to text`, `export_to_text`, #613):
+        the Markdown without `#`, emphasis, link URLs, code fences or image
+        placeholders; lists and tables stay. `text/plain`; in a batch, inline
+        under `text`.
         `pandoc` — Pandoc's AST as JSON (#515), `application/json`, for
         `pandoc -f json -t docx|odt|rst|typst|…`; pictures per `images`; in a
         batch, inline under `pandoc` as an object.

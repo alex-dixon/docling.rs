@@ -1748,6 +1748,44 @@ async fn latex_batch_items_and_zip_target_carry_tex() {
     );
 }
 
+// --- #613: plain-text output --------------------------------------------
+
+#[tokio::test]
+async fn text_output_is_undecorated_plain_text() {
+    let (ct, body) = multipart(
+        "note.md",
+        b"# Title\n\nSome **bold** and [a link](https://example.com)\n\n- one\n- two\n",
+        &[("to", "text")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+    let out = body_string(response).await;
+    assert_eq!(out, "Title\n\nSome bold and a link\n\n- one\n- two");
+
+    // Batch items carry it under `text`; a zip target names it `<stem>.txt`.
+    let (ct, body) = multipart_files(&[("a.md", b"# A\n"), ("b.md", b"*B*\n")], &[("to", "text")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert_eq!(v["results"][0]["text"], "A", "{v}");
+    assert_eq!(v["results"][1]["text"], "B", "{v}");
+    let b64 = docling_b64("a,b\n1,2\n");
+    let body = format!(
+        r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "one.csv"}}],
+            "target": {{"kind": "zip"}}, "to": "text"}}"#
+    );
+    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        bytes.windows(7).any(|w| w == b"one.txt"),
+        "txt entry missing"
+    );
+}
+
 /// A `.zip` upload converts every document inside as a batch (#557): one
 /// results item per convertible entry, a broken one failing only itself, an
 /// unsupported one left out.

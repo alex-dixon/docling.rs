@@ -377,7 +377,7 @@ fn parse_md_runs(chars: &[char], style: InlineRun, out: &mut Vec<InlineRun>) {
 /// closed. Parentheses inside the destination nest, per CommonMark: Wikipedia's
 /// interwiki links (`/wiki/Houad_(evn)`) are exactly this case, and stopping at
 /// the first `)` used to cut the URI in half and leak the tail into the text.
-fn link_dest_end(chars: &[char], start: usize) -> Option<usize> {
+pub(crate) fn link_dest_end(chars: &[char], start: usize) -> Option<usize> {
     let mut depth = 0usize;
     for (offset, c) in chars.get(start..)?.iter().enumerate() {
         match c {

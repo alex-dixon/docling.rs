@@ -25,7 +25,8 @@
 //! Options ride along as multipart text parts, JSON fields, or query
 //! parameters (body wins over query):
 //!
-//! - `to` — `md` (default) | `json` | `html` (#492) | `dclx` | `chunks` | `latex` (#317) |
+//! - `to` — `md` (default) | `json` | `html` (#492) | `text` (#613: docling's plain
+//!   text, `export_to_text`) | `dclx` | `chunks` | `latex` (#317) |
 //!   `pandoc` (#515: Pandoc's AST as JSON, for `pandoc -f json`) | `images` (#243:
 //!   rasterize a PDF's pages to PNG — no conversion, no models;
 //!   the JSON response is `{"pages": [{"page", "width", "height",
@@ -1354,6 +1355,7 @@ impl OutputNames {
             "chunks" => "chunks.json",
             "dclx" => "dclx",
             "latex" => "tex",
+            "text" => "txt",
             "pandoc" => "pandoc.json",
             _ => unreachable!("validated above"),
         };
@@ -1756,6 +1758,14 @@ fn render_stored(
             confidence,
             body: document.export_to_latex().into_bytes(),
         },
+        // #613: docling's `--to text`, a text body like Markdown.
+        "text" => StoredResponse {
+            errors: Vec::new(),
+            content_type: "text/plain; charset=utf-8",
+            disposition: None,
+            confidence,
+            body: text_string(state, document, options).into_bytes(),
+        },
         // #515: Pandoc's AST, for `pandoc -f json`; pictures follow
         // `images` like HTML.
         "pandoc" => StoredResponse {
@@ -1841,6 +1851,7 @@ fn batch_item(
             )));
         }
         "latex" => item["latex"] = json!(document.export_to_latex()),
+        "text" => item["text"] = json!(text_string(state, document, options)),
         "html" => item["html"] = json!(html_string(document, image_mode)),
         // #515: the AST inline as an object, like the docling JSON document.
         "pandoc" => {
@@ -1876,6 +1887,18 @@ fn markdown_string(
                 .0
         }
     }
+}
+
+/// The plain-text body for `to=text` (#613): docling-core's
+/// `export_to_text()`, with the request's `strict` and
+/// `page_break_placeholder` applied as for Markdown (`export_to_text` takes
+/// a `page_break_placeholder` upstream too). Pictures print nothing in any
+/// `images` mode, as upstream's plain serializer has no image output.
+fn text_string(state: &AppState, document: &DoclingDocument, options: &ConvertOptions) -> String {
+    let mut doc = document.clone();
+    doc.strict_markdown = options.convert.strict.unwrap_or(state.cfg.strict);
+    doc.page_break_placeholder = options.convert.page_break_placeholder.clone();
+    doc.export_to_text()
 }
 
 /// The HTML body for `to=html` (#492): the page carries its pictures per

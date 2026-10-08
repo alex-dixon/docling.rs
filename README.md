@@ -58,7 +58,7 @@ Developed with **Claude Code** and _[TENET](https://github.com/artiz/tenet/tree/
 The public API works end to end across **Markdown, CSV, HTML, AsciiDoc, DOCX,
 PPTX, XLSX, legacy DOC/XLS/PPT, Apple iWork, EPUB, ODF, RTF, WebVTT, Email, MHTML, JATS, USPTO,
 XBRL, LaTeX, JSON, PDF, images, METS, audio and video** — with Markdown, docling-JSON,
-DocLang `.dclx`, LaTeX, HTML, Pandoc AST and chunk output, plus image extraction. The full extension map (`InputFormat::from_extension`, mirroring
+plain text, DocLang `.dclx`, LaTeX, HTML, Pandoc AST and chunk output, plus image extraction. The full extension map (`InputFormat::from_extension`, mirroring
 docling's `FormatToExtensions`) picks the backend; a file whose conversion
 fails under its extension is checked by content and, when it is evidently
 another format (an RTF, DOCX or HTML file saved as `.doc`, …), converted once
@@ -316,7 +316,7 @@ honoring `pages=A-B` and a `scale` of 0.1–4.0 pixels per PDF point (default
 2.0 = 144 dpi). Capped at 100 pages per request
 (`DOCLING_RS_MAX_RASTER_PAGES`); narrow big documents with `pages`.
 
-Options per request: `to=md|json|html|dclx|chunks|latex|pandoc|images` (`pandoc_api_version` checks the Pandoc API a `to=pandoc` caller expects), `strict`, `images=placeholder|embedded`,
+Options per request: `to=md|json|html|text|dclx|chunks|latex|pandoc|images` (`pandoc_api_version` checks the Pandoc API a `to=pandoc` caller expects), `strict`, `images=placeholder|embedded`,
 `skip_empty_cells`, `compact_tables`, `md_page_break_placeholder` (text between pages in Markdown),
 `no_ocr` (docling's `--no-ocr`; `skip_ocr` its pre-2.0 name), `text_layer_only`, `pdf_password`, `no_table_former`, `no_text_panels`, `heading_hierarchy`, `force_full_page_ocr`, `pages`,
 `do_picture_classification`, `do_code_enrichment`, `do_formula_enrichment` (#423: the
@@ -618,6 +618,33 @@ Conformance against docling's own `.dclx` output is tracked by
 `scripts/conformance/gen_dclx.py` (generates the groundtruth) and
 `scripts/conformance/dclx_conformance.sh` (line-diffs the extracted
 `document.xml`).
+
+### Plain-text (`.txt`) output
+
+`export_to_text()` — docling's `--to text` (#613), the Rust counterpart of
+docling-core's `DoclingDocument.export_to_text()` / `PlainTextDocSerializer` —
+is the Markdown export with the decoration turned off: headings without `#`,
+no bold / italic / strikethrough markers, a link reduced to its label, code
+without fences or backticks, no image placeholders (captions stay) and no
+escaping (`R&D`, not `R&amp;D`). List bullets and numbers, checkbox marks and
+table grids are kept, as upstream keeps them. Text for indexing, embeddings
+and search without Markdown noise:
+
+```bash
+docling-rs report.docx --to text                         # stdout
+docling-rs --input ./docs --output ./out --to text       # <stem>.txt per file
+```
+
+Serve answers `to=text` as `text/plain` (inline under `text` in a batch,
+`<stem>.txt` in a zip), Node / wasm / the C ABI take `to: "text"`, and
+`--page-break-placeholder` applies like for Markdown. The Python bindings need
+nothing: their `result.document` *is* docling-core's `DoclingDocument`, so
+`result.document.export_to_text()` is upstream's own. Measured against
+`export_to_text()` on the upstream groundtruth JSON: identical on 134 of the
+135 declarative fixtures whose Markdown already matches (the one left is a
+WebVTT cue where docling wraps italics around a bare space — `* *` — which the
+port keeps literal; see `docs/MIGRATION.md`). `crates/docling/tests/plain_text.rs`
+pins 15 of them against docling-core's output.
 
 ### LaTeX (`.tex`) output
 
