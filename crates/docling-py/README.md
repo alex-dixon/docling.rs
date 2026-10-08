@@ -209,14 +209,16 @@ remaining `PdfPipelineOptions` fields (`table_structure_options.mode`, …) are
 accepted for API compatibility but do not change the pipeline. `InputFormat`,
 `DocumentStream` and `ImageRefMode` are re-exported too (the last straight from
 `docling_core`, for `export_to_markdown(image_mode=…)`). A GPU
-`accelerator_options.device` (`CUDA`/`MPS`) is accepted but warns and falls back
-to CPU: the prebuilt PyPI wheels ship ONNX Runtime with the CPU execution
-provider only. The engine itself supports CUDA / TensorRT / DirectML / CoreML
-behind cargo features (issue #74) — build the wheel from source with e.g.
-`maturin build --features cuda` (or `--features docling/coreml` on macOS) and
-select the provider per process with `DOCLING_RS_EP=cuda` (see the workspace
-README). CoreML is opt-in (#602): a CoreML wheel converts on CPU until
-`DOCLING_RS_EP=coreml` is set. Under a GPU provider the engine picks the fp32 models over the int8
+`accelerator_options.device` (`CUDA`/`MPS`) on a wheel without that provider
+warns and falls back to CPU: the prebuilt PyPI wheels ship ONNX Runtime with
+the CPU execution provider only (`docling-rs-cuda` adds CUDA). The engine
+itself supports CUDA / TensorRT / DirectML / CoreML behind cargo features
+(issue #74) — build the wheel from source with e.g. `maturin build --features
+cuda` (or `--features coreml` on macOS) and select the provider per process
+with `DOCLING_RS_EP=cuda` (see the workspace README). CoreML is opt-in (#602):
+a CoreML wheel converts on CPU until `DOCLING_RS_EP=coreml` is set or
+`accelerator_options.device` is `MPS`, which maps to it (an explicit
+`DOCLING_RS_EP` still wins). Under a GPU provider the engine picks the fp32 models over the int8
 ones on its own: `ensure_env()` hands the model cache over as
 `DOCLING_RS_MODELS_DIR` and pins no file (#602).
 

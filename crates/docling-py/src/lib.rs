@@ -1051,6 +1051,14 @@ fn email_attachments<'py>(
         .collect())
 }
 
+/// The ONNX Runtime execution providers compiled into this build, by their
+/// `DOCLING_RS_EP` names — lets `AcceleratorDevice.MPS` select CoreML only
+/// where it exists (#602). Does not resolve the provider choice itself.
+#[pyfunction]
+fn compiled_providers() -> Vec<&'static str> {
+    docling_onnx::compiled_providers()
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDocumentConverter>()?;
@@ -1060,6 +1068,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(chunk_document, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(pandoc_from_json, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(email_attachments, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(compiled_providers, m)?)?;
     m.add("ConversionError", m.py().get_type::<ConversionError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

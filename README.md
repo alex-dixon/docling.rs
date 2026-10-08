@@ -2037,7 +2037,9 @@ one-shot CLI conversion the CPU provider is usually as fast or faster.
 That, and a gain of only ~6% with the CPU-identical defaults, is why CoreML
 is **opt-in** (#602): a `coreml` build leaves it unregistered until
 `DOCLING_RS_EP=coreml` (or a named `auto`) asks for it — before, it was
-registered whenever `DOCLING_RS_EP` was unset. `DOCLING_RS_DEBUG=1` notes
+registered whenever `DOCLING_RS_EP` was unset. In Python,
+`AcceleratorOptions(device="mps")` maps to `coreml` on a wheel built with
+it (`maturin build --features coreml`). `DOCLING_RS_DEBUG=1` notes
 the compiled-in-but-unused provider; registration prints the setup-cost
 notice once.
 The `xnnpack` feature adds the XNNPACK provider

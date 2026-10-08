@@ -58,7 +58,9 @@ class AcceleratorDevice(str, enum.Enum):
     in place: GPU-when-usable with CPU fallback on the ``docling-rs-cuda``
     wheel, plain CPU on the CPU wheel. ``CUDA`` requires the GPU wheel and
     fails loudly when the GPU can't initialize; ``CPU`` forces CPU. ``MPS``
-    has no ONNX Runtime provider here and warns."""
+    selects the CoreML provider (opt-in in the engine, #602) in a wheel built
+    with it (``maturin build --features coreml`` on macOS) and warns
+    elsewhere — the PyPI macOS wheels are CPU-only."""
 
     AUTO = "auto"
     CPU = "cpu"

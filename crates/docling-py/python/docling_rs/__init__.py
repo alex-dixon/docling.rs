@@ -66,6 +66,7 @@ from . import chunking
 # ORT symbols process-wide and segfaulted at session creation in testing.)
 from ._native import ConversionError, __version__
 from ._native import DocumentConverter as _NativeDocumentConverter
+from ._native import compiled_providers as _compiled_providers
 from ._native import email_attachments as _email_attachments
 
 __all__ = [
@@ -436,12 +437,20 @@ class DocumentConverter:
                 elif acc.device == AcceleratorDevice.CPU:
                     os.environ.setdefault("DOCLING_RS_EP", "cpu")
                 elif acc.device == AcceleratorDevice.MPS:
-                    warnings.warn(
-                        "docling.rs has no MPS execution provider; device "
-                        "'mps' is ignored (CoreML exists behind the `coreml` "
-                        "cargo feature for native macOS builds).",
-                        stacklevel=2,
-                    )
+                    # docling's Apple-GPU device → the CoreML provider, which
+                    # the engine keeps opt-in (#602): this is how
+                    # docling-shaped code asks for it. Only where the build
+                    # has it — the PyPI macOS wheels are CPU-only.
+                    if "coreml" in _compiled_providers():
+                        os.environ.setdefault("DOCLING_RS_EP", "coreml")
+                    else:
+                        warnings.warn(
+                            "docling.rs has no MPS execution provider and this "
+                            "build has no CoreML; device 'mps' is ignored (build "
+                            "the wheel on macOS with `maturin build --features "
+                            "coreml` for CoreML).",
+                            stacklevel=2,
+                        )
                 if acc.num_threads:
                     # Process-wide ONNX Runtime intra-op threads; don't clobber an
                     # explicit environment override.

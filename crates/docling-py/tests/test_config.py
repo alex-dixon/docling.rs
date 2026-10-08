@@ -140,7 +140,8 @@ def test_conversion_error_type():
 def test_accelerator_device_maps_to_ep_env(monkeypatch):
     # device=cuda/cpu maps to DOCLING_RS_EP (setdefault — an explicit env
     # override wins); AUTO leaves the engine default alone (auto on the GPU
-    # wheel, CPU otherwise); MPS has no provider here and warns.
+    # wheel, CPU otherwise); MPS maps to CoreML where the build has it
+    # (#602) and warns elsewhere.
     import os
 
     from docling_rs import (
@@ -174,8 +175,30 @@ def test_accelerator_device_maps_to_ep_env(monkeypatch):
     convert_with(AcceleratorDevice.AUTO)
     assert "DOCLING_RS_EP" not in os.environ
 
+    import docling_rs
+
+    monkeypatch.delenv("DOCLING_RS_EP", raising=False)
+    monkeypatch.setattr(docling_rs, "_compiled_providers", lambda: ["cpu"])
     with pytest.warns(UserWarning, match="mps"):
         convert_with(AcceleratorDevice.MPS)
+    assert "DOCLING_RS_EP" not in os.environ
+
+    # A CoreML build: MPS is how docling-shaped code opts into CoreML.
+    monkeypatch.setattr(docling_rs, "_compiled_providers", lambda: ["cpu", "coreml"])
+    convert_with(AcceleratorDevice.MPS)
+    assert os.environ["DOCLING_RS_EP"] == "coreml"
+
+    monkeypatch.setenv("DOCLING_RS_EP", "cpu")
+    convert_with(AcceleratorDevice.MPS)  # explicit env wins over the option
+    assert os.environ["DOCLING_RS_EP"] == "cpu"
+
+
+def test_native_reports_compiled_providers():
+    from docling_rs import _native
+
+    providers = _native.compiled_providers()
+    assert providers[0] == "cpu"
+    assert set(providers) <= {"cpu", "cuda", "tensorrt", "directml", "coreml", "xnnpack"}
 
 
 def test_initialize_pipeline_noop_for_non_ml_format():

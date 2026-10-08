@@ -188,6 +188,27 @@ pub fn parse(v: &str) -> Option<Ep> {
     }
 }
 
+/// The providers compiled into this binary, by their `DOCLING_RS_EP` names
+/// (`cpu` first). For the bindings that map a device option onto
+/// `DOCLING_RS_EP` (Python's `AcceleratorDevice.MPS` → `coreml`, #602) and
+/// must only name a provider the build has. Reads no environment and leaves
+/// [`choice`] unresolved, so the caller may still set `DOCLING_RS_EP` after
+/// asking.
+pub fn compiled_providers() -> Vec<&'static str> {
+    [
+        (Ep::Cpu, "cpu"),
+        (Ep::Cuda, "cuda"),
+        (Ep::TensorRt, "tensorrt"),
+        (Ep::DirectMl, "directml"),
+        (Ep::CoreMl, "coreml"),
+        (Ep::Xnnpack, "xnnpack"),
+    ]
+    .into_iter()
+    .filter(|&(ep, _)| compiled(ep))
+    .map(|(_, name)| name)
+    .collect()
+}
+
 /// Is this provider compiled into the binary (cargo feature enabled)?
 fn compiled(ep: Ep) -> bool {
     match ep {
@@ -1019,6 +1040,22 @@ mod tests {
         assert!(!auto_member(Ep::Cuda, mac, true));
         assert!(!auto_member(Ep::Cpu, mac, true));
         assert!(!auto_member(Ep::Auto, mac, true));
+    }
+
+    /// The binding-facing list names exactly the compiled-in providers, by
+    /// the names [`parse`] reads back.
+    #[test]
+    fn compiled_providers_round_trip_through_parse() {
+        let names = compiled_providers();
+        assert_eq!(names.first(), Some(&"cpu"));
+        for name in &names {
+            assert!(
+                compiled(parse(name).expect("a DOCLING_RS_EP name")),
+                "{name}"
+            );
+        }
+        assert_eq!(names.contains(&"coreml"), cfg!(feature = "coreml"));
+        assert_eq!(names.contains(&"cuda"), cfg!(feature = "cuda"));
     }
 
     /// #602: NeuralNetwork is the CoreML default (CPU-identical output);
