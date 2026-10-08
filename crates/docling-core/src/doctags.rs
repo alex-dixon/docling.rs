@@ -582,6 +582,7 @@ fn parse_otsl(toks: &[Tok], i: &mut usize, out: &mut Vec<Node>) {
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     }));
 }
 
@@ -625,6 +626,7 @@ fn parse_picture(toks: &[Tok], i: &mut usize, out: &mut Vec<Node>, close: &str) 
             image: None,
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         },
         (locs.len() == 4).then(|| [locs[0], locs[1], locs[2], locs[3]]),
     ));

@@ -1500,6 +1500,7 @@ mod tests {
             }),
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
         let (md, files) = doc
             .export_to_markdown_with_images(ImageMode::Referenced, "My Report (final)_artifacts");
@@ -1774,6 +1775,7 @@ mod tests {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         let md = doc.export_to_markdown();
         assert_eq!(md, "| a | b |\n| - | - |\n| 1 | 2 |\n");
@@ -1790,6 +1792,7 @@ mod tests {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         let md = doc.export_to_markdown();
         // Numeric data columns are right-aligned; columns padded to header+2.
@@ -1911,6 +1914,7 @@ mod tests {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         doc.push(Node::Picture {
             caption: Some("Fig 1".into()),
@@ -1924,6 +1928,7 @@ mod tests {
             }),
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
         doc.add_paragraph("Last paragraph.");
         // A second embedded picture, so referenced mode must keep numbering
@@ -1940,6 +1945,7 @@ mod tests {
             }),
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
 
         // A run of list items must never straddle a split, so try splits that fall
@@ -2099,6 +2105,7 @@ mod tests {
             image: None,
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
         doc.push(Node::PictureChildren(vec![
             Node::Paragraph {
@@ -2290,6 +2297,7 @@ mod tests {
                 image: None,
                 classification: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             }
         }
         fn page(no: usize) -> Node {

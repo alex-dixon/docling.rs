@@ -170,6 +170,7 @@ fn emit_paragraph(
             image,
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
     }
 

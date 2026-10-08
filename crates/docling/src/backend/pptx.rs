@@ -656,6 +656,7 @@ fn handle_shape(shape: XmlNode, ctx: &SlideCtx, out: &mut SlideOut) {
                         image: image.cloned(),
                         classification: None,
                         caption_parent: Default::default(),
+                        caption_location: None,
                     },
                 );
             }
@@ -1273,6 +1274,7 @@ fn parse_table(tbl: XmlNode) -> Option<Table> {
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 

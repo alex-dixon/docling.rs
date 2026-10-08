@@ -2998,6 +2998,11 @@ pub fn assemble_page(
             let caption = caption_for[i]
                 .map(|ci| md_escape(&region_texts[ci]))
                 .filter(|t| !t.is_empty());
+            // The caption's own region box (#609): docling gives every caption
+            // the cluster it came from as its `prov`, not the picture's.
+            let caption_location = caption_for[i]
+                .filter(|_| caption.is_some())
+                .map(|ci| norm_loc(&regions[ci], page.width, page_h));
             let classification = match &enrichments[i] {
                 Some(Enrichment::PictureClasses(classes)) => Some(classes.clone()),
                 _ => None,
@@ -3019,6 +3024,7 @@ pub fn assemble_page(
                     // docling's layout pipeline parents a figure's caption to
                     // the picture itself (#390) — the one backend that does.
                     caption_parent: CaptionParent::Item,
+                    caption_location,
                 },
             ));
             let children: Vec<Node> = picture_children[i]
@@ -3043,10 +3049,15 @@ pub fn assemble_page(
             // cells are the option label, e.g. right_to_left_03's بلی/خير)
             // and its Markdown serializer renders them as task-list lines
             // (`- [x] …`) — mirrored by [`Node::CheckboxItem`].
-            "checkbox_selected" | "checkbox_unselected" => nodes.push(Node::CheckboxItem {
-                checked: region.label == "checkbox_selected",
-                text: md_escape(&text),
-            }),
+            // Located like every other text item, so the JSON item carries
+            // its page and box (#609) — a chunk of checkboxes has a page.
+            "checkbox_selected" | "checkbox_unselected" => nodes.push(located(
+                loc,
+                Node::CheckboxItem {
+                    checked: region.label == "checkbox_selected",
+                    text: md_escape(&text),
+                },
+            )),
             // docling renders both the document title and section headers as
             // `##` (it never emits a top-level `#` for PDFs), so match that.
             "title" | "section_header" => nodes.push(located(
@@ -3096,6 +3107,10 @@ pub fn assemble_page(
                 let caption = table_caption_for[i]
                     .map(|ci| md_escape(&region_texts[ci]))
                     .filter(|t| !t.is_empty());
+                // Its own region box becomes the caption item's `prov` (#609).
+                let caption_location = table_caption_for[i]
+                    .filter(|_| caption.is_some())
+                    .map(|ci| norm_loc(&regions[ci], page.width, page_h));
                 // Rich cells (docling#3906): the covering cell's blocks are its
                 // text followed by the nested picture(s). docling's Markdown
                 // renders a `RichTableCell` through the serializer — the
@@ -3140,6 +3155,7 @@ pub fn assemble_page(
                                     image,
                                     classification,
                                     caption_parent: Default::default(),
+                                    caption_location: None,
                                 },
                             ));
                         }
@@ -3164,6 +3180,7 @@ pub fn assemble_page(
                         caption,
                         // As for pictures: the caption is the table's child.
                         caption_parent: CaptionParent::Item,
+                        caption_location,
                     }),
                 ));
             }
@@ -3232,7 +3249,11 @@ pub fn assemble_page(
                 if let Some(ci) = code_caption_for[i] {
                     let cap = md_escape(&region_texts[ci]);
                     if !cap.is_empty() {
-                        nodes.push(Node::Paragraph { text: cap });
+                        // With its own region box, like every caption (#609).
+                        nodes.push(located(
+                            norm_loc(&regions[ci], page.width, page_h),
+                            Node::Paragraph { text: cap },
+                        ));
                     }
                 }
             }
@@ -4595,6 +4616,7 @@ mod tests {
                 image: None,
                 classification: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             },
             para("Fig. 1. a diagram"),
             para("the most common kind"),

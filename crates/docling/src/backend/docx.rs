@@ -666,6 +666,7 @@ fn handle_paragraph_inner(
                         image,
                         classification: None,
                         caption_parent: Default::default(),
+                        caption_location: None,
                     });
                 }
             }
@@ -687,6 +688,7 @@ fn handle_paragraph_inner(
             image,
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
     }
     // Native charts anchored in this paragraph (docling PR #3809): classified
@@ -1857,6 +1859,7 @@ fn parse_table_inner(tbl: XmlNode, ctx: &Ctx, nested: bool) -> Option<Table> {
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 

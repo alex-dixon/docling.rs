@@ -148,6 +148,12 @@ pub enum Node {
         /// Where the caption item hangs in the JSON tree (#390); see
         /// [`CaptionParent`]. Markdown, DocLang and LaTeX ignore it.
         caption_parent: CaptionParent,
+        /// The caption's own box on the picture's page (0–511 grid, like
+        /// [`Node::Located`]) — the PDF pipeline's caption layout region. The
+        /// JSON export writes it as the caption item's `prov` (#609), as
+        /// docling's `ReadingOrderModel._add_caption_or_footnote` does; `None`
+        /// (every declarative backend) leaves the caption without one.
+        caption_location: Option<[u16; 4]>,
     },
     /// A display-math formula item decoded by the CodeFormula enrichment:
     /// `latex` is the model's LaTeX (no `$$` wrapping), `orig` the raw glyph
@@ -837,6 +843,10 @@ pub struct Table {
     /// Where the caption item hangs in the JSON tree (#390); see
     /// [`CaptionParent`]. Only the JSON export reads it.
     pub caption_parent: CaptionParent,
+    /// The caption's own box on the table's page (0–511 grid) — the PDF
+    /// pipeline's caption layout region, written as the caption item's
+    /// `prov` (#609); see [`Node::Picture`]'s field of the same name.
+    pub caption_location: Option<[u16; 4]>,
     /// Optional per-cell bounding boxes, same shape as [`Self::rows`]: `[l, t,
     /// r, b]` in page points with a **top-left** origin (the PDF pipeline's
     /// native space). Set by the ML pipeline's TableFormer paths — a spanned

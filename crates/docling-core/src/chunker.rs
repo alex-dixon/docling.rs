@@ -2252,6 +2252,7 @@ mod tests {
                 image: None,
                 classification: None,
                 caption_parent: crate::CaptionParent::Item,
+                caption_location: None,
             },
             Node::PictureChildren(vec![
                 Node::Paragraph {

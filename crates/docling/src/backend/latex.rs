@@ -443,6 +443,7 @@ impl Builder {
             image,
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
     }
 
@@ -1646,6 +1647,7 @@ impl Converter {
             cells: Some(cells),
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         })
     }
 }

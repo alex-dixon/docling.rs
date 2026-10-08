@@ -296,6 +296,7 @@ pub fn chart_table_from_columns(
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 

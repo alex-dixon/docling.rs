@@ -602,6 +602,7 @@ fn walk_block(
                         image: img_src(e).and_then(|s| images.resolve(&s)),
                         classification: None,
                         caption_parent: Default::default(),
+                        caption_location: None,
                     });
                 } else if name == "signature" || name == "stamp" {
                     // docling turns these into an image annotated with the kind.
@@ -612,6 +613,7 @@ fn walk_block(
                         image: None,
                         classification: None,
                         caption_parent: Default::default(),
+                        caption_location: None,
                     });
                     let mut label = name.to_string();
                     label[..1].make_ascii_uppercase();
@@ -639,6 +641,7 @@ fn walk_block(
                             image: src.as_deref().and_then(|s| images.resolve(s)),
                             classification: None,
                             caption_parent: Default::default(),
+                            caption_location: None,
                         });
                     } else if has_descendant(cref, "img") || contains_block(cref) {
                         // An anchor with an image among other content (docling
@@ -834,6 +837,7 @@ fn handle_block(
                                 image: img_src(e).and_then(|s| images.resolve(&s)),
                                 classification: None,
                                 caption_parent: Default::default(),
+                                caption_location: None,
                             });
                         } else if is_block(name) {
                             flush_inline(&mut inline, nodes);
@@ -2209,6 +2213,7 @@ fn parse_table_cells(
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 

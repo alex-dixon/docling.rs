@@ -1407,6 +1407,7 @@ fn empty_table() -> Table {
         cells: Some(Vec::new()),
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     }
 }
 
@@ -1432,5 +1433,6 @@ pub(super) fn table_from_cells(cells: Vec<TableCell>, num_rows: usize, num_cols:
         cells: Some(cells),
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     }
 }

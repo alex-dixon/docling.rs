@@ -399,7 +399,13 @@ pointed at the wrong item).
   comment back-refs and — for a backend with page geometry — their exact
   `prov` (a `TreeProv`: the backend's own box, origin tag and charspan),
   serialized as they are — which is how the HTML, DOCX and PPTX JSON are
-  structurally identical to upstream's (see those rows).
+  structurally identical to upstream's (see those rows). In the PDF/image
+  JSON every text item carries its page and box (#609): a picture's, table's
+  or code block's caption its own caption region — not the item's, as
+  docling's `ReadingOrderModel._add_caption_or_footnote` assigns it, within
+  1.5 pt of upstream's boxes on the groundtruth corpus (the 0–511 grid's step) — and a
+  checkbox item its region, so chunks made of captions or checkboxes have a
+  page.
 - **Image extraction** is wired for PDF/image (figure-region crops) and DOCX/PPTX
   (embedded blobs) by default, and — opt-in via
   `DocumentConverter::fetch_images` (`--fetch-images`) — for HTML/EPUB `<img src>`:
