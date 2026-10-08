@@ -1970,13 +1970,17 @@ DirectML outside Windows, no CUDA for macOS) — an impossible pairing now
 fails at compile time with a message naming the alternatives, instead of a
 linker error at the end of the build.
 
-A GPU build defaults to `auto`: it converts on the GPU when one is usable
-and falls back to CPU when not — you chose a GPU build, so it uses the GPU.
+A CUDA / TensorRT / DirectML build defaults to `auto`: it converts on the
+GPU when one is usable and falls back to CPU when not — you chose a GPU
+build, so it uses the GPU. CoreML is the exception: it is **opt-in** (#602),
+so a `coreml` build converts on CPU until `DOCLING_RS_EP=coreml` (or `auto`,
+set by name) asks for it — see the CoreML notes below for why.
 `DOCLING_RS_EP` overrides:
 
 ```bash
-DOCLING_RS_EP=cuda docling-rs input.pdf   # this provider or fail loudly
-DOCLING_RS_EP=cpu  docling-rs input.pdf   # force CPU (the default-build behavior)
+DOCLING_RS_EP=cuda   docling-rs input.pdf   # this provider or fail loudly
+DOCLING_RS_EP=coreml docling-rs input.pdf   # CoreML (a coreml build; opt-in)
+DOCLING_RS_EP=cpu    docling-rs input.pdf   # force CPU (the default-build behavior)
 ```
 
 An explicitly named provider that can't initialize (no device, missing
@@ -2029,11 +2033,13 @@ CoreML defaults (#324, #602), measured on an M4 Max:
 **When CoreML pays off** (#324 follow-up): session creation costs **~2 s
 per worker and does not parallelize**, so the fixed setup only amortizes
 over long-lived processes (`docling-serve`) and large batches — for a
-one-shot CLI conversion the CPU provider is usually as fast or faster. A
-`coreml`/`auto` build prints this once at registration so the trade-off is
-visible when it is incurred; `DOCLING_RS_EP=cpu` opts a short run out
-without rebuilding. Note that a `coreml` build registers CoreML even with
-`DOCLING_RS_EP` unset (the default is `auto` in any GPU build).
+one-shot CLI conversion the CPU provider is usually as fast or faster.
+That, and a gain of only ~6% with the CPU-identical defaults, is why CoreML
+is **opt-in** (#602): a `coreml` build leaves it unregistered until
+`DOCLING_RS_EP=coreml` (or a named `auto`) asks for it — before, it was
+registered whenever `DOCLING_RS_EP` was unset. `DOCLING_RS_DEBUG=1` notes
+the compiled-in-but-unused provider; registration prints the setup-cost
+notice once.
 The `xnnpack` feature adds the XNNPACK provider
 (`DOCLING_RS_EP=xnnpack`, thread pool sized by `DOCLING_RS_XNNPACK_THREADS`)
 — a CPU-class accelerator for machines without a usable GPU provider; note

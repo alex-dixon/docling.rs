@@ -1231,10 +1231,10 @@ provider in; `DOCLING_RS_EP` selects one at runtime:
 
 | `DOCLING_RS_EP` | behavior |
 |---|---|
-| unset | `auto` in a build with any GPU feature compiled in (a GPU build should use the GPU); CPU in a default build |
+| unset | `auto` in a build with a CUDA-class (or XNNPACK) feature compiled in (a GPU build should use the GPU); CPU in a default build. CoreML is opt-in (#602): a `coreml` build stays on CPU, and the implicit `auto` leaves CoreML out |
 | `cpu` | CPU, byte-for-byte the pre-#74 code path (no EP registered) |
 | `cuda` \| `tensorrt` \| `directml` \| `coreml` | that provider, **error-on-failure**: an explicitly requested accelerator that can't initialize fails the conversion instead of silently degrading to a 10×-slower CPU run; requesting one that isn't compiled in warns once and stays on CPU |
-| `auto` | every compiled-in provider registered in order TensorRT → CUDA → CoreML → DirectML; ONNX Runtime falls back down the list to CPU at session creation (for images deployed on mixed fleets) |
+| `auto` | every compiled-in provider registered in order TensorRT → CUDA → CoreML → DirectML; ONNX Runtime falls back down the list to CPU at session creation (for images deployed on mixed fleets). CoreML only when `auto` is set by name |
 
 When a GPU provider is selected the model resolution skips the int8 defaults
 in favor of fp32 (`decoder_kv.onnx` stays preferred): the int8 exports are

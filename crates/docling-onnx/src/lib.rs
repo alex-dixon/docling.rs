@@ -12,9 +12,12 @@
 //! binary that contains that EP); which provider actually runs is chosen at
 //! startup from `DOCLING_RS_EP`:
 //!
-//! * unset — `auto` in a build that compiled any GPU provider in (you chose
-//!   a GPU build or installed the GPU wheel: use the GPU when one is usable,
-//!   fall back to CPU when not); plain CPU in a default build
+//! * unset — `auto` in a build that compiled a CUDA-class provider (or
+//!   XNNPACK) in (you chose a GPU build or installed the GPU wheel: use the
+//!   GPU when one is usable, fall back to CPU when not); plain CPU in a
+//!   default build. CoreML is opt-in (#602): a `coreml` build stays on CPU,
+//!   and that `auto` leaves CoreML out, until `DOCLING_RS_EP=coreml` (or
+//!   `auto`, by name) asks for it
 //! * `cpu` — force CPU, exactly the pre-#74 behavior
 //! * `cuda` / `tensorrt` (`trt`) / `directml` (`dml`) / `coreml` /
 //!   `xnnpack` — that provider, registered with error-on-failure: an *explicitly requested*
@@ -26,7 +29,8 @@
 //! * `auto` — every compiled-in provider is registered in performance order
 //!   (TensorRT, CUDA, CoreML, DirectML, then XNNPACK) and ONNX Runtime falls
 //!   back down the list — ultimately to CPU — at session creation. The "try GPU if there is
-//!   one" mode for images built once and deployed on mixed fleets.
+//!   one" mode for images built once and deployed on mixed fleets. CoreML
+//!   joins the list only when `auto` was set by name, not as the default.
 //!
 //! CoreML registers with the `NeuralNetwork` model format by default (#602):
 //! measured on Apple silicon it reproduces the CPU provider's output byte
@@ -197,49 +201,95 @@ fn compiled(ep: Ep) -> bool {
     }
 }
 
-fn any_gpu_compiled() -> bool {
-    any_gpu(compiled)
-}
-
-/// Any GPU provider among the compiled ones — [`compiled`] in production,
-/// a stand-in set in the tests (the features differ per build).
-fn any_gpu(compiled: impl Fn(Ep) -> bool) -> bool {
+/// Any GPU provider among `members` — the providers `auto` registers
+/// ([`in_auto`]) in production, a stand-in set in the tests (the features
+/// differ per build).
+fn any_gpu(members: impl Fn(Ep) -> bool) -> bool {
     [Ep::Cuda, Ep::TensorRt, Ep::DirectMl, Ep::CoreMl]
         .into_iter()
-        .any(compiled)
+        .any(members)
 }
 
 /// The choice when `DOCLING_RS_EP` is unset (or empty): a build that
-/// compiled a GPU provider in defaults to `auto` — whoever built with
+/// compiled a CUDA-class provider in defaults to `auto` — whoever built with
 /// `--features cuda` (or installed the `docling-rs-cuda` wheel) wants the
 /// GPU used when one is usable, and `auto`'s per-session registration
 /// falls back to CPU when not. A default build has nothing to register and
 /// stays on the exact pre-#74 CPU path.
-fn default_choice() -> Ep {
+///
+/// CoreML does not count (#602): on Apple silicon it is no clear win — with
+/// its CPU-identical defaults it measured ~6% faster than the CPU provider on
+/// a 25-page manual, while session setup costs ~2 s per worker and does not
+/// parallelize, so a short one-shot run is a net loss — and a `coreml` build
+/// that quietly registered it surprised the issue's reporter. A `coreml`
+/// build therefore converts on CPU until `DOCLING_RS_EP=coreml` (or `auto`)
+/// asks for CoreML by name.
+fn default_choice_for(compiled: impl Fn(Ep) -> bool) -> Ep {
     // XNNPACK counts here (whoever built with it wants it used) but not in
     // [`prefers_fp32`] — it runs the same CPU-calibrated graphs as the CPU EP.
-    if any_gpu_compiled() || cfg!(feature = "xnnpack") {
+    if [Ep::Cuda, Ep::TensorRt, Ep::DirectMl, Ep::Xnnpack]
+        .into_iter()
+        .any(compiled)
+    {
         Ep::Auto
     } else {
         Ep::Cpu
     }
 }
 
+/// `DOCLING_RS_EP` resolved once per process: the provider choice, and
+/// whether `auto` may register CoreML — only when `auto` was asked for by
+/// name, never as the unset default ([`default_choice_for`]).
+#[derive(Clone, Copy)]
+struct Resolved {
+    ep: Ep,
+    coreml_in_auto: bool,
+}
+
+/// Is `ep` among the providers `auto` registers? Compiled in, and for
+/// CoreML also requested (`coreml_in_auto`). Pure for the tests;
+/// [`in_auto`] is the production form.
+fn auto_member(ep: Ep, compiled: impl Fn(Ep) -> bool, coreml_in_auto: bool) -> bool {
+    !matches!(ep, Ep::Cpu | Ep::Auto) && compiled(ep) && (ep != Ep::CoreMl || coreml_in_auto)
+}
+
+/// The providers this process's `auto` registers.
+fn in_auto(ep: Ep) -> bool {
+    auto_member(ep, compiled, resolved().coreml_in_auto)
+}
+
 /// The effective provider choice for this process, resolved once. Invalid or
 /// not-compiled-in requests degrade to CPU with a single stderr warning —
 /// same convention as a missing model file.
 pub fn choice() -> Ep {
-    static CHOICE: OnceLock<Ep> = OnceLock::new();
-    *CHOICE.get_or_init(|| {
+    resolved().ep
+}
+
+fn resolved() -> Resolved {
+    static RESOLVED: OnceLock<Resolved> = OnceLock::new();
+    *RESOLVED.get_or_init(|| {
+        let cpu = Resolved {
+            ep: Ep::Cpu,
+            coreml_in_auto: false,
+        };
         let Some(raw) = docling_core::env::nonempty("DOCLING_RS_EP") else {
-            return default_choice();
+            if compiled(Ep::CoreMl) {
+                docling_core::debug_log!(
+                    "docling-rs: CoreML is compiled in but opt-in — set \
+                     DOCLING_RS_EP=coreml to use it"
+                );
+            }
+            return Resolved {
+                ep: default_choice_for(compiled),
+                coreml_in_auto: false,
+            };
         };
         let Some(ep) = parse(&raw) else {
             eprintln!(
                 "docling-rs: DOCLING_RS_EP={raw:?} names no known execution provider \
                  (cpu|cuda|tensorrt|directml|coreml|xnnpack|auto); using CPU"
             );
-            return Ep::Cpu;
+            return cpu;
         };
         if !compiled(ep) {
             eprintln!(
@@ -254,15 +304,18 @@ pub fn choice() -> Ep {
                     Ep::Cpu | Ep::Auto => unreachable!("always compiled"),
                 }
             );
-            return Ep::Cpu;
+            return cpu;
         }
-        ep
+        Resolved {
+            ep,
+            coreml_in_auto: ep == Ep::Auto,
+        }
     })
 }
 
 /// True when the int8 model defaults should be skipped in favor of fp32
 /// because inference is (or may be) leaving the CPU. `Auto` counts as GPU as
-/// soon as any GPU provider is compiled in: whether registration succeeds is
+/// soon as it registers any GPU provider: whether registration succeeds is
 /// only known per-session, and a CPU fall-back running fp32 is merely the
 /// pre-int8 speed, while a GPU running the CPU-calibrated int8 graph is a
 /// conformance risk.
@@ -270,16 +323,17 @@ pub fn choice() -> Ep {
 /// A no-op for ASR: the Whisper exports ship without int8 variants, so there
 /// is no model selection for this to influence on that path.
 pub fn prefers_fp32() -> bool {
-    prefers_fp32_for(choice(), compiled)
+    prefers_fp32_for(choice(), in_auto)
 }
 
-fn prefers_fp32_for(ep: Ep, compiled: impl Fn(Ep) -> bool) -> bool {
+/// [`prefers_fp32`] for a given choice; `members` = what `auto` registers.
+fn prefers_fp32_for(ep: Ep, members: impl Fn(Ep) -> bool) -> bool {
     match ep {
         // XNNPACK is CPU-class: the int8 QDQ graphs were calibrated for CPU
         // kernels and stay valid on it.
         Ep::Cpu | Ep::Xnnpack => false,
         Ep::Cuda | Ep::TensorRt | Ep::DirectMl | Ep::CoreMl => true,
-        Ep::Auto => any_gpu(compiled),
+        Ep::Auto => any_gpu(members),
     }
 }
 
@@ -292,20 +346,21 @@ fn prefers_fp32_for(ep: Ep, compiled: impl Fn(Ep) -> bool) -> bool {
 /// allowed to run (0% GPU; fp32 heron 8.4 s vs 3.7 s on the CPU provider for
 /// the issue's 25-page manual, M4 Max), while per-page mode pins the axis to
 /// 1 and the same model runs on the GPU. Nor the CPU-class providers, where
-/// per-page measured faster (#338). `Auto` batches only when a CUDA-class
-/// provider is compiled in — a CoreML-only `auto` build registers CoreML
-/// first and wants the static graph.
+/// per-page measured faster (#338). `Auto` batches only when it registers
+/// a CUDA-class provider — a CoreML-only `auto` registers CoreML first and
+/// wants the static graph.
 pub fn prefers_batching() -> bool {
-    prefers_batching_for(choice(), compiled)
+    prefers_batching_for(choice(), in_auto)
 }
 
-fn prefers_batching_for(ep: Ep, compiled: impl Fn(Ep) -> bool) -> bool {
+/// [`prefers_batching`] for a given choice; `members` = what `auto` registers.
+fn prefers_batching_for(ep: Ep, members: impl Fn(Ep) -> bool) -> bool {
     match ep {
         Ep::Cpu | Ep::Xnnpack | Ep::CoreMl => false,
         Ep::Cuda | Ep::TensorRt | Ep::DirectMl => true,
         Ep::Auto => [Ep::Cuda, Ep::TensorRt, Ep::DirectMl]
             .into_iter()
-            .any(compiled),
+            .any(members),
     }
 }
 
@@ -461,8 +516,11 @@ fn dispatches() -> Option<Vec<ExecutionProviderDispatch>> {
             v.push(ort::ep::TensorRT::default().build());
             #[cfg(feature = "cuda")]
             v.push(ort::ep::CUDA::default().build());
+            // Only when `auto` was set by name (#602 — CoreML is opt-in).
             #[cfg(feature = "coreml")]
-            v.push(coreml_ep().build());
+            if in_auto(Ep::CoreMl) {
+                v.push(coreml_ep().build());
+            }
             #[cfg(feature = "directml")]
             v.push(ort::ep::DirectML::default().build());
             // Last, above only the implicit CPU fallback: a CPU-class
@@ -500,7 +558,7 @@ pub fn apply(builder: SessionBuilder) -> Result<SessionBuilder, String> {
         // with correct output and nothing else to hint at why. Say so once at
         // the moment the cost is incurred.
         #[cfg(feature = "coreml")]
-        if matches!(choice(), Ep::CoreMl | Ep::Auto) {
+        if choice() == Ep::CoreMl || (choice() == Ep::Auto && in_auto(Ep::CoreMl)) {
             eprintln!(
                 "docling-rs: CoreML registered; its session setup costs roughly 2 s per \
                  worker and pays off for long-lived processes and large batches — for \
@@ -923,6 +981,11 @@ mod tests {
         assert!(!prefers_fp32_for(Ep::Xnnpack, mac));
         assert!(prefers_fp32_for(Ep::Auto, mac));
         assert!(!prefers_fp32_for(Ep::Auto, cpu_only));
+        // An implicit `auto` (DOCLING_RS_EP unset) leaves CoreML out, so a
+        // macOS build's default stays on the int8 CPU path.
+        let mac_default = |ep: Ep| auto_member(ep, mac, false);
+        assert!(!prefers_fp32_for(Ep::Auto, mac_default));
+        assert!(prefers_fp32_for(Ep::Auto, |ep| auto_member(ep, mac, true)));
         // Batched layout only for the CUDA class: CoreML needs the static,
         // per-page graph to be handed anything at all.
         assert!(!prefers_batching_for(Ep::CoreMl, mac));
@@ -934,6 +997,28 @@ mod tests {
         for ep in [Ep::Cuda, Ep::TensorRt, Ep::DirectMl] {
             assert!(prefers_batching_for(ep, cuda), "{ep:?}");
         }
+    }
+
+    /// #602: CoreML is opt-in. With `DOCLING_RS_EP` unset a CoreML build
+    /// stays on CPU, while CUDA-class (and XNNPACK) builds keep defaulting
+    /// to `auto`; a named `auto` registers CoreML, the implicit one does not.
+    #[test]
+    fn coreml_is_opt_in() {
+        let cpu_only = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto);
+        let mac = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::CoreMl);
+        let mac_xnn = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::CoreMl | Ep::Xnnpack);
+        let cuda = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::Cuda);
+        assert_eq!(default_choice_for(cpu_only), Ep::Cpu);
+        assert_eq!(default_choice_for(mac), Ep::Cpu);
+        assert_eq!(default_choice_for(cuda), Ep::Auto);
+        assert_eq!(default_choice_for(mac_xnn), Ep::Auto);
+        assert!(!auto_member(Ep::CoreMl, mac_xnn, false));
+        assert!(auto_member(Ep::Xnnpack, mac_xnn, false));
+        assert!(auto_member(Ep::CoreMl, mac, true));
+        assert!(auto_member(Ep::Cuda, cuda, false));
+        assert!(!auto_member(Ep::Cuda, mac, true));
+        assert!(!auto_member(Ep::Cpu, mac, true));
+        assert!(!auto_member(Ep::Auto, mac, true));
     }
 
     /// #602: NeuralNetwork is the CoreML default (CPU-identical output);
@@ -1020,23 +1105,22 @@ mod tests {
     #[test]
     fn unset_defaults_to_auto_exactly_in_gpu_builds() {
         // CI's ep-features matrix runs this with each GPU feature on, the
-        // plain test job with none — both arms get exercised.
+        // plain test job with none — both arms get exercised. CoreML alone
+        // is no GPU build for this purpose: it is opt-in (#602).
         #[cfg(any(
             feature = "cuda",
             feature = "tensorrt",
             feature = "directml",
-            feature = "coreml",
             feature = "xnnpack"
         ))]
-        assert_eq!(default_choice(), Ep::Auto);
+        assert_eq!(default_choice_for(compiled), Ep::Auto);
         #[cfg(not(any(
             feature = "cuda",
             feature = "tensorrt",
             feature = "directml",
-            feature = "coreml",
             feature = "xnnpack"
         )))]
-        assert_eq!(default_choice(), Ep::Cpu);
+        assert_eq!(default_choice_for(compiled), Ep::Cpu);
     }
 }
 
