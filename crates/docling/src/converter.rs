@@ -115,7 +115,8 @@ pub struct DocumentConverter {
     /// Skip OCR, keep layout and tables — docling's `do_ocr=False` (#611:
     /// `--no-ocr`, `--skip-ocr`).
     no_ocr: bool,
-    /// The password of an encrypted PDF (docling's `--pdf-password`, #611).
+    /// The password of an encrypted PDF (docling's `--pdf-password`, #611)
+    /// or Office document (#625).
     pdf_password: Option<String>,
     force_full_page_ocr: bool,
     /// OCR mode id (docling's `OcrMode`, #254); parsed at the ML call sites.
@@ -754,6 +755,14 @@ impl DocumentConverter {
     /// A missing or wrong one fails the conversion with "the PDF is
     /// encrypted: a password is required", as before. PDF sources on the ML
     /// pipeline only (the `pdf-text` / wasm build reads unencrypted PDFs).
+    ///
+    /// The same password opens an encrypted Office document (#625, a
+    /// docling.rs extension — docling reads none): `.docx`/`.xlsx`/`.pptx`
+    /// (Agile and Standard encryption), `.doc`/`.xls`/`.ppt` (RC4 and RC4
+    /// CryptoAPI), in every build. Without it, or when it is wrong, the
+    /// format's default password is tried (Excel's `VelvetSweatshop`,
+    /// PowerPoint's for modify-password-only files); otherwise the error says
+    /// the document is encrypted, or that the password is wrong.
     pub fn pdf_password(mut self, password: Option<String>) -> Self {
         self.pdf_password = password;
         self
@@ -1042,15 +1051,22 @@ impl DocumentConverter {
         // today the PDF pipeline's spent document budget (#497).
         #[cfg_attr(not(feature = "pdf"), allow(unused_mut))]
         let mut errors: Vec<crate::ErrorItem> = Vec::new();
-        // An encrypted OOXML package is a compound file, not a ZIP (#624):
-        // say so instead of "bad zip".
-        if matches!(
-            source.format,
-            InputFormat::Docx | InputFormat::Xlsx | InputFormat::Pptx | InputFormat::Visio
-        ) && crate::backend::offcrypto::is_encrypted_package(&source.bytes)
+        // An encrypted Office document (#624/#625) is decrypted with the
+        // converter's password (or the format's default password) into the
+        // file the backend reads; without a key that opens it, the error
+        // says the document is encrypted — not "bad zip" or an empty result.
+        let unlocked;
+        let source = match crate::backend::offcrypto::unlock(source, self.pdf_password.as_deref())?
         {
-            return Err(crate::backend::offcrypto::encrypted(source.format.as_str()));
-        }
+            Some(bytes) => {
+                unlocked = SourceDocument {
+                    bytes,
+                    ..source.clone()
+                };
+                &unlocked
+            }
+            None => source,
+        };
         let mut document = match source.format {
             // A legacy APS (Automated Patent System) plain-text patent (`PATN`
             // first record) is reconstructed verbatim, mirroring docling.

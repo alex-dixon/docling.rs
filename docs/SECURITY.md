@@ -42,6 +42,7 @@ secret or network variable is missing from this page.
 | Spreadsheet sheet size (calamine allocates the dense used area) | 10 000 000 cells in a sheet's used area — a 4 KB file with values in `A1` and `XFD1048576` asked for 17 billion | the sheet is skipped with a warning; the other sheets convert | `DOCLING_RS_SHEET_MAX_CELLS` |
 | Remote VLM page request (`--pipeline vlm`) | 600 s per page request (connect: 10 s) | the page fails with an error naming the cap; a timeout is not retried | `DOCLING_RS_VLM_TIMEOUT` |
 | Audio sample rate (ASR) | header-declared rate clamped to 8 kHz–768 kHz, so the resampler can't be steered into an OOM-sized upsample | clamped | — |
+| Encrypted Office documents (#625) | the Agile spin count is capped at the spec's 10 000 000, key/salt/block/hash sizes are checked against the spec before any hashing or allocation, and the declared plaintext size of an `EncryptedPackage` may not exceed its ciphertext (the stream itself is under the part budget above) | the document fails with "encryption header is damaged" naming the field | — |
 | TableFormer matching | `median()` guards the empty slice (a crafted table row/column with zero matched cells no longer panics) | — | — |
 
 `docling-serve` adds request-level bounds:
@@ -99,6 +100,16 @@ limit — a container cgroup or `systemd` `RuntimeMaxSec` / `MemoryMax`.
 - `DOCLING_SERVE_API_KEY` (or `--api-key`) is docling-serve's own access key
   (below). Prefer the variable: a command-line flag shows up in the process
   list.
+- A document password (`pdf_password`; CLI `--password`) is only handed to
+  the decryption — never logged or echoed in an error. On a shared machine
+  give the CLI `--password-file PATH` instead: `--password` shows up in the
+  process list. Office documents also get their format's **published
+  default password** tried after the given one (#625): PowerPoint's
+  `/01Hannes Ruescher/01` and Excel's `VelvetSweatshop` — the passwords
+  Office itself uses for files protected only against editing, which it
+  opens without prompting. A file "protected" that way is therefore
+  converted without a password, exactly as Office would show it; this
+  includes such files sent as attachments.
 
 XML safety (verified, no change needed): the DOM parser (`roxmltree`) never
 resolves external entities (no XXE) and caps entity-reference depth/count (no

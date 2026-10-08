@@ -372,6 +372,25 @@ async fn encrypted_office_files_are_422() {
     }
 }
 
+/// #625: the request's `pdf_password` opens an encrypted Office file too;
+/// a wrong one is a 422 saying so.
+#[tokio::test]
+async fn pdf_password_opens_an_encrypted_office_file() {
+    let bytes =
+        std::fs::read(repo_root().join("crates/docling/tests/data/encrypted/min_encrypted.pptx"))
+            .unwrap();
+    let (ct, body) = multipart("deck.pptx", &bytes, &[("pdf_password", "1234")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_string(response).await.contains("Hello"));
+    let (ct, body) = multipart("deck.pptx", &bytes, &[("pdf_password", "4321")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body_string(response)
+        .await
+        .contains("the password is wrong"));
+}
+
 #[tokio::test]
 async fn missing_file_part_is_400() {
     let (ct, body) = multipart("x.md", b"x", &[]);

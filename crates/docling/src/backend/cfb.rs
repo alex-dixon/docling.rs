@@ -283,6 +283,70 @@ impl<'a> CompoundFile<'a> {
         }
     }
 
+    /// A stream of the root storage by name — root only, for structures
+    /// that must not be confused with an embedded document's (#512), such
+    /// as an encrypted package's `EncryptionInfo` (#625).
+    pub(crate) fn root_stream(&self, name: &str) -> Option<usize> {
+        self.children_of(None).into_iter().find(|&i| {
+            self.entries
+                .get(i)
+                .is_some_and(|e| e.object_type == 2 && e.name == name)
+        })
+    }
+
+    /// Where stream `idx`'s bytes sit in the file, in stream order — one
+    /// range per sector (64-byte mini sectors map through the root entry's
+    /// chain). Decryption (#625) writes a stream's plaintext back over these
+    /// ranges, so the decrypted file is the original container with the
+    /// same layout, read by the same backend. `None` where
+    /// [`stream_by_index`](Self::stream_by_index) fails, or when the ranges
+    /// run past the end of the file.
+    pub(crate) fn stream_spans(&self, idx: usize) -> Option<Vec<std::ops::Range<usize>>> {
+        let entry = self.entries.get(idx)?;
+        if entry.object_type != 2 || entry.size > ooxml::max_part_bytes() {
+            return None;
+        }
+        // (file offset, unit) per sector of the stream, in order.
+        let mut sectors: Vec<usize> = Vec::new();
+        let unit;
+        if entry.size < 4096 {
+            unit = 64;
+            // The mini stream is the root entry's FAT chain.
+            let root = self.entries.iter().find(|e| e.object_type == 5)?;
+            let root_sectors = fat_chain(&self.fat, root.start_sector);
+            let mut m = entry.start_sector;
+            while sectors.len() * unit < entry.size as usize {
+                if m >= MAXREGSECT || sectors.len() > self.mini_fat.len() {
+                    return None;
+                }
+                let off = m as usize * 64;
+                let sector = *root_sectors.get(off / self.sector_size)?;
+                sectors.push(sector_offset(sector, self.sector_size) + off % self.sector_size);
+                m = *self.mini_fat.get(m as usize)?;
+            }
+        } else {
+            unit = self.sector_size;
+            let chain = fat_chain(&self.fat, entry.start_sector);
+            for s in chain {
+                if sectors.len() * unit >= entry.size as usize {
+                    break;
+                }
+                sectors.push(sector_offset(s, self.sector_size));
+            }
+        }
+        let mut left = entry.size as usize;
+        let mut spans = Vec::with_capacity(sectors.len());
+        for base in sectors {
+            let n = left.min(unit);
+            if base + n > self.data.len() {
+                return None;
+            }
+            spans.push(base..base + n);
+            left -= n;
+        }
+        (left == 0).then_some(spans)
+    }
+
     /// The error for a file [`open`](Self::open) rejected or whose `name`
     /// stream [`stream`](Self::stream) could not read, prefixed `fmt:` — a
     /// damaged compound file (the signature is there) reads differently from
@@ -322,6 +386,21 @@ impl<'a> CompoundFile<'a> {
 /// writes v4 when an edited .ppt is saved in place).
 fn sector_offset(n: u32, sector_size: usize) -> usize {
     sector_size.max(512) + n as usize * sector_size
+}
+
+/// The sector numbers of the FAT chain from `start`, cut at the first
+/// special marker and bounded by the FAT length (a cycle ends the walk).
+fn fat_chain(fat: &[u32], start: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut s = start;
+    while s < MAXREGSECT && out.len() <= fat.len() {
+        out.push(s);
+        match fat.get(s as usize) {
+            Some(&next) => s = next,
+            None => break,
+        }
+    }
+    out
 }
 
 /// Follow a FAT chain from `start`, concatenating sectors, truncated to `size`
@@ -711,6 +790,42 @@ mod tests {
             cfb.stream_error("ppt", "\u{5}SummaryInformation"),
             "ppt: \u{5}SummaryInformation stream unreadable (file truncated or corrupt)"
         );
+    }
+
+    /// The spans of every stream — FAT-chained and mini — concatenate to
+    /// exactly the bytes `stream_by_index` reads, in v3 and v4 files (#625
+    /// rewrites decrypted streams through them).
+    #[test]
+    fn stream_spans_cover_exactly_the_stream() {
+        let mirror = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/");
+        for path in [
+            format!("{mirror}doc/sources/docx_lists.doc"),
+            format!("{mirror}ppt/sources/powerpoint_sample.ppt"),
+        ] {
+            let v3 = std::fs::read(&path).unwrap();
+            for data in [v3.clone(), to_v4(&v3, false)] {
+                let cfb = CompoundFile::open(&data).unwrap();
+                let mut small_and_large = (0, 0);
+                for i in 0..cfb.entries.len() {
+                    let Some(want) = cfb.stream_by_index(i) else {
+                        continue;
+                    };
+                    let got: Vec<u8> = cfb
+                        .stream_spans(i)
+                        .unwrap()
+                        .into_iter()
+                        .flat_map(|r| data[r].to_vec())
+                        .collect();
+                    assert_eq!(got, want, "{path}: {}", cfb.entries[i].name);
+                    if want.len() < 4096 {
+                        small_and_large.0 += 1;
+                    } else {
+                        small_and_large.1 += 1;
+                    }
+                }
+                assert!(small_and_large.0 > 0 && small_and_large.1 > 0, "{path}");
+            }
+        }
     }
 
     #[test]

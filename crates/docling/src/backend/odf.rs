@@ -161,7 +161,10 @@ pub(crate) fn convert_odf(
         // read as "no content.xml" (#624).
         if let Some(manifest) = pkg.as_mut().and_then(|p| p.read("META-INF/manifest.xml")) {
             if manifest_encrypts_content(&manifest) {
-                return Err(crate::backend::offcrypto::encrypted(source.format.as_str()));
+                return Err(crate::backend::offcrypto::unsupported(
+                    source.format.as_str(),
+                    "ODF package encryption",
+                ));
             }
         }
         let (content, styles_xml) = match pkg.as_mut() {

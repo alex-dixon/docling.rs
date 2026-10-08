@@ -688,7 +688,10 @@ components:
         pdf_password:
           type: string
           format: password
-          description: The password of an encrypted PDF (docling's `--pdf-password`, #611).
+          description: >-
+            The password of an encrypted PDF (docling's `--pdf-password`, #611)
+            or Office document — .docx/.xlsx/.pptx/.doc/.xls/.ppt (#625). A
+            missing or wrong one is a 422 saying so.
         force_full_page_ocr:
           type: boolean
           default: false

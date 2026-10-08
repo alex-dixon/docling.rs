@@ -135,16 +135,31 @@ spellings `--page-range`, `--image-export-mode`, `--no-tables`,
 engine always had but no caller passed) and `--output-file`; see
 `docs/OPTIONS.md`.
 
-**Encrypted Office documents (#624).** A password-protected `.doc`, `.docx`,
-`.xls`, `.xlsx`, `.ppt`, `.pptx` or ODF file fails with one error,
-`<format>: document is encrypted` (a 422 from the server), where `.ppt` used
-to convert to an empty document, `.docx`/`.pptx` failed as `bad zip`, an ODF
-package as `no content.xml`, and `.xls`/`.xlsx` with calamine's wording. A
-`.ppt` is recognized by the `CryptSession10Container` its current user edit
-references ([MS-PPT] 2.3.7) — PowerPoint also encrypts a file that has only a
-*modify* password, so those fail the same way; Word and Excel leave such a
-file unencrypted and it converts. A mislabelled encrypted file (a `.ppt`
-named `.pptx`) reports the encryption, not the declared format's parse error.
+**Encrypted Office documents (#624, #625).** A password-protected `.doc`,
+`.docx`, `.xls`, `.xlsx`, `.ppt` or `.pptx` converts with the password —
+`--password` / `--password-file` on the CLI, `pdf_password` everywhere else
+(the PDF option, named after docling's, now opens Office documents too) — a
+docling.rs extension: docling's password option is PDF-only, and an
+encrypted Office file fails there. Decrypted: OOXML Agile (Office 2010+) and
+Standard (2007) encryption, RC4 CryptoAPI (2002+, 40- to 128-bit) and Office
+97/2000 RC4 for the binaries; the decrypted bytes are msoffcrypto-tool's
+(the OOXML package, the `.doc` and `.xls` streams byte for byte; a `.ppt`'s
+every persist object). Not decrypted: XOR obfuscation (Word/Excel 95), ODF
+package encryption, a `.ppt`'s `Pictures` stream (the backend does not read
+it); the `dataIntegrity` HMAC is not checked. Without the password the error
+is `<format>: document is encrypted (a password is required to open it)`, with
+a wrong one `<format>: document is encrypted and the password is wrong` (422
+from the server) — where a `.ppt` used to convert to an empty document,
+`.docx`/`.pptx` failed as `bad zip`, an ODF package as `no content.xml` (now
+"encrypted with an unsupported scheme"), and `.xls`/`.xlsx` in calamine's
+words. A `.ppt` is recognized by the `CryptSession10Container` its current
+user edit references ([MS-PPT] 2.3.7). Default passwords are tried after the
+given one, as Office does without prompting: PowerPoint encrypts a file that
+has only a *modify* password with `/01Hannes Ruescher/01`, so those convert
+without a password; Excel's `VelvetSweatshop` opens workbooks protected only
+against structural edits; Word and Excel leave a modify-password-only file
+unencrypted. A mislabelled encrypted file (a `.ppt` named `.pptx`) reports the
+encryption, not the declared format's parse error.
 
 ## 2. Format coverage
 

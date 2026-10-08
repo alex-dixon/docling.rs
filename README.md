@@ -1450,7 +1450,8 @@ A script written for Python docling's CLI runs as is: `--page-range 1-4`
 (`--pages`), `--image-export-mode referenced` (`--images`), `--no-tables`
 (`--no-table-former`), `--no-ocr` (never OCR, keep layout and tables —
 docling's meaning since 2.0; the old text-layer fast path is
-`--text-layer-only`), `--pdf-password SECRET` (also `--password`) and
+`--text-layer-only`), `--pdf-password SECRET` (also `--password`, which opens
+encrypted Office documents too — see below) and
 `--output-file PATH`, which writes the one result to exactly that path —
 docling's rule: exactly one input document and one `--to` format, else an
 error naming the failing condition; `--images referenced` pictures land in
@@ -1460,6 +1461,23 @@ alias: it is `--force-full-page-ocr` (or `--ocr-mode full_page`).
 ```bash
 docling-rs report.pdf --page-range 1-3 --no-ocr --output-file out/report.md
 docling-rs locked.pdf --pdf-password 1234 --to json --output-file locked.json
+```
+
+## Encrypted Office documents
+
+A password-protected `.docx`, `.xlsx`, `.pptx`, `.doc`, `.xls` or `.ppt` converts
+with its password (#625 — beyond docling, whose password option opens PDFs
+only). It is the same option as the PDF password: `--password` (or
+`--pdf-password`), `--password-file PATH` to keep it out of the process list,
+`pdf_password` in serve, Python and Node. Files with only a *modify*
+password convert without one (PowerPoint encrypts them with its built-in
+default password, which is tried automatically, as is Excel's). Without the
+password — or with a wrong one — the conversion fails saying so; the schemes
+are listed in `docs/MIGRATION.md`.
+
+```bash
+docling-rs budget.xlsx --password-file ~/.budget-password
+curl -F file=@deck.pptx -F pdf_password=1234 localhost:5001/v1/convert
 ```
 
 ## Batch conversion — several sources, `--input` / `--output`

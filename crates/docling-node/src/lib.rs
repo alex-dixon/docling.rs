@@ -108,7 +108,8 @@ pub struct ConverterOptions {
     /// the CLI's `--text-layer-only` (what `noOcr` meant before 2.0, #611).
     /// Default `false`.
     pub text_layer_only: Option<bool>,
-    /// The password of an encrypted PDF (docling's `--pdf-password`, #611).
+    /// The password of an encrypted PDF (docling's `--pdf-password`, #611)
+    /// or Office document (#625).
     pub pdf_password: Option<String>,
     /// Skip TableFormer — tables come from the layout model's geometry
     /// instead (the CLI's `--no-table-former`, #577). Default `false`.
@@ -281,7 +282,8 @@ pub struct ConvertOptions {
     /// the CLI's `--text-layer-only` (what `noOcr` meant before 2.0, #611).
     /// Default `false`.
     pub text_layer_only: Option<bool>,
-    /// The password of an encrypted PDF (docling's `--pdf-password`, #611).
+    /// The password of an encrypted PDF (docling's `--pdf-password`, #611)
+    /// or Office document (#625).
     pub pdf_password: Option<String>,
     /// Skip TableFormer — tables come from the layout model's geometry
     /// instead (the CLI's `--no-table-former`, #577). Default `false`.

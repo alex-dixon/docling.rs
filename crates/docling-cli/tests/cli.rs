@@ -827,3 +827,33 @@ fn pdf_password_opens_an_encrypted_pdf() {
     let (code, _, stderr) = run(&[pdf, "--text-layer-only", "--pdf-password"]);
     assert_eq!(code, 2, "a bare flag is a usage error: {stderr}");
 }
+
+/// #625: the same password opens an encrypted Office document, given on the
+/// command line or — out of the process list — as `--password-file`.
+#[test]
+fn password_opens_an_encrypted_office_document() {
+    let doc = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../docling/tests/data/encrypted/min_encrypted.doc"
+    );
+    let (code, _, stderr) = run(&[doc]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("doc: document is encrypted (a password is required to open it)"),
+        "{stderr}"
+    );
+    let (code, with, stderr) = run(&[doc, "--password", "1234"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(with.contains("Hello encrypted legacy doc"), "{with}");
+    let scratch = Scratch::new("password");
+    let file = scratch.0.join("pw.txt");
+    std::fs::write(&file, "1234\n").unwrap();
+    let (code, from_file, stderr) = run(&[doc, "--password-file", file.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(from_file, with);
+    let (code, _, stderr) = run(&[doc, "--password-file", "/no/such/file"]);
+    assert_eq!(
+        code, 2,
+        "an unreadable password file is a usage error: {stderr}"
+    );
+}

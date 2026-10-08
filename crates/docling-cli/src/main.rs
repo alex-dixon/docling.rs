@@ -17,7 +17,7 @@
 //! the same name): one identifier per line, sorted, for scripts that ask the
 //! binary what it converts instead of hard-coding a list.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|text|dclx|chunks|images|latex|pandoc] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--output-file PATH] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--text-layer-only] [--pdf-password PASSWORD] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|text|dclx|chunks|images|latex|pandoc] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--output-file PATH] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--text-layer-only] [--pdf-password PASSWORD | --password-file PATH] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
 //!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
 //!                      md --to json`): each document converts once and is
 //!                      written in every format named, `<stem>.md` +
@@ -294,7 +294,10 @@ PDF / IMAGE PIPELINE
                           --skip-ocr is the same)
   --text-layer-only       no models at all: the embedded text layer as flat
                           paragraphs (what --no-ocr did before 2.0)
-  --pdf-password PASSWORD password of an encrypted PDF (also --password)
+  --pdf-password PASSWORD password of an encrypted PDF or Office document
+                          (also --password; .docx/.xlsx/.pptx/.doc/.xls/.ppt)
+  --password-file PATH    the same password, read from the file's first line
+                          (keeps it out of the process list)
   --force-full-page-ocr   OCR the whole page, discarding the text layer
                           (docling's deprecated --force-ocr; = --ocr-mode full_page)
   --no-text-panels        disable the text-panel heuristic
@@ -468,11 +471,32 @@ fn main() -> ExitCode {
             "--no-ocr" | "--skip-ocr" => opts.no_ocr = Some(true),
             "--text-layer-only" => opts.text_layer_only = Some(true),
             // The password of an encrypted PDF (docling's `--pdf-password`;
-            // `--password` is the spelling PDF_CONFORMANCE.md used, #611).
+            // `--password` is the spelling PDF_CONFORMANCE.md used, #611) —
+            // and of an encrypted Office document (#625).
             "--pdf-password" | "--password" => match args.next() {
                 Some(v) => opts.pdf_password = Some(v),
                 None => {
-                    eprintln!("error: {arg} needs the PDF's password");
+                    eprintln!("error: {arg} needs the document's password");
+                    return ExitCode::from(2);
+                }
+            },
+            // The same password read from a file (#625): a command-line
+            // argument is visible to every user of the machine (`ps`), a
+            // file can be private. Its first line, without the line break.
+            "--password-file" => match args
+                .next()
+                .map(|p| std::fs::read_to_string(&p).map(|t| (p, t)))
+            {
+                Some(Ok((_, text))) => {
+                    let line = text.lines().next().unwrap_or_default();
+                    opts.pdf_password = Some(line.to_string());
+                }
+                Some(Err(e)) => {
+                    eprintln!("error: --password-file: {e}");
+                    return ExitCode::from(2);
+                }
+                None => {
+                    eprintln!("error: --password-file needs a path");
                     return ExitCode::from(2);
                 }
             },

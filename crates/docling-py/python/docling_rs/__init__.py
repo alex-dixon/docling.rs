@@ -262,7 +262,9 @@ class DocumentConverter:
     * ``pdf_password`` — the password of an encrypted PDF (#611; docling's
       ``--pdf-password``). Also accepted docling-shaped, as the PDF
       ``PdfFormatOption``'s ``backend_options.password`` (a plain string or
-      a pydantic ``SecretStr``).
+      a pydantic ``SecretStr``). The same password opens an encrypted
+      Office document — ``.docx``/``.xlsx``/``.pptx``/``.doc``/``.xls``/
+      ``.ppt`` (#625, beyond docling, which reads none).
     * ``page_range`` — ``(first, last)``, a 1-based inclusive PDF page window
       for every conversion (#518). docling takes it per call —
       ``convert(source, page_range=(a, b))`` — which works here too and wins

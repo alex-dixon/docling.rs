@@ -99,7 +99,8 @@ pub struct ConvertOptions {
     /// serde alias, so a body that sends both spellings (a pre-2.0 form)
     /// is not a duplicate-field error.
     pub skip_ocr: Option<bool>,
-    /// The password of an encrypted PDF (docling's `--pdf-password`, #611).
+    /// The password of an encrypted PDF (docling's `--pdf-password`, #611)
+    /// or Office document (#625).
     pub pdf_password: Option<String>,
     /// OCR every page, discarding the text layer.
     pub force_full_page_ocr: Option<bool>,

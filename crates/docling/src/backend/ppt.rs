@@ -72,10 +72,15 @@ impl DeclarativeBackend for PptBackend {
         // slide. `EncryptedSummary` alone never fired on PowerPoint's own
         // files; the reliable marker is the current edit's reference to a
         // `CryptSession10Container`.
+        // `EncryptedSummary` decides only when there is no edit chain to read:
+        // a decrypted file (#625) keeps the stream, but no longer the
+        // reference.
         let current_user = cfb.stream("Current User").unwrap_or_default();
-        if cfb.stream("EncryptedSummary").is_some()
-            || UserEdits::read(&current_user, &stream).is_some_and(|e| e.encrypted())
-        {
+        let encrypted = match UserEdits::read(&current_user, &stream) {
+            Some(edits) => edits.encrypted(),
+            None => cfb.stream("EncryptedSummary").is_some(),
+        };
+        if encrypted {
             return Err(crate::backend::offcrypto::encrypted("ppt"));
         }
 
@@ -123,7 +128,6 @@ impl DeclarativeBackend for PptBackend {
 
 const RT_USER_EDIT_ATOM: u16 = 0x0FF5;
 const RT_PERSIST_DIRECTORY_ATOM: u16 = 0x1772;
-#[cfg_attr(not(test), allow(dead_code))] // decryption reads it (#625)
 const RT_CRYPT_SESSION10_CONTAINER: u16 = 0x2F14;
 
 /// The user-edit chain of a `PowerPoint Document` stream ([MS-PPT] 2.3.2,
@@ -134,11 +138,16 @@ const RT_CRYPT_SESSION10_CONTAINER: u16 = 0x2F14;
 /// these records is encrypted in an encrypted file (2.3.7), which is what
 /// makes them the place to look for the encryption.
 pub(crate) struct UserEdits {
-    /// Persist object id → offset in the stream, newest edit first.
-    pub(crate) persist: std::collections::HashMap<u32, u32>,
+    /// Persist object id → offset in the stream, the newest edit's wins.
+    persist: std::collections::HashMap<u32, u32>,
+    /// Every edit's (persist id, offset) pairs, superseded ones included —
+    /// decryption (#625) must reach every object the stream holds.
+    pub(crate) objects: Vec<(u32, u32)>,
     /// The newest edit's `encryptSessionPersistIdRef` — present only when
     /// that `UserEditAtom` is 0x20 bytes long, i.e. the file is encrypted.
     encrypt_ref: Option<u32>,
+    /// Where that field sits in the stream.
+    encrypt_ref_at: Option<usize>,
 }
 
 impl UserEdits {
@@ -149,7 +158,9 @@ impl UserEdits {
         let mut off = u32_at(current_user, 16)? as usize;
         let mut edits = Self {
             persist: std::collections::HashMap::new(),
+            objects: Vec::new(),
             encrypt_ref: None,
+            encrypt_ref_at: None,
         };
         // Each edit lies before the previous one's offset in a well-formed
         // file; the hop count bounds a cyclic chain either way.
@@ -160,6 +171,7 @@ impl UserEdits {
             }
             if hop == 0 && body.len() >= 32 {
                 edits.encrypt_ref = u32_at(body, 28);
+                edits.encrypt_ref_at = Some(off + 8 + 28);
             }
             let dir_off = u32_at(body, 12)? as usize;
             if let Some((h, dir)) = doc.get(dir_off..).and_then(|d| Records::new(d).next()) {
@@ -174,6 +186,7 @@ impl UserEdits {
                                 break;
                             };
                             edits.persist.entry(id + k as u32).or_insert(o);
+                            edits.objects.push((id + k as u32, o));
                         }
                         p += 4 + count * 4;
                     }
@@ -189,11 +202,22 @@ impl UserEdits {
 
     /// The `CryptSession10Container` body the newest edit references — the
     /// file's `EncryptionInfo` ([MS-PPT] 2.3.7).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn crypt_session<'a>(&self, doc: &'a [u8]) -> Option<&'a [u8]> {
         let off = *self.persist.get(&self.encrypt_ref?)? as usize;
         let (header, body) = Records::new(doc.get(off..)?).next()?;
         (header.rec_type == RT_CRYPT_SESSION10_CONTAINER).then_some(body)
+    }
+
+    /// The stream offset of the `CryptSession10Container` (left in the
+    /// clear by encryption, so decryption skips it).
+    pub(crate) fn session_offset(&self) -> Option<usize> {
+        self.persist.get(&self.encrypt_ref?).map(|&o| o as usize)
+    }
+
+    /// Where the newest edit's `encryptSessionPersistIdRef` sits in the
+    /// stream — decryption zeroes it, after which the file reads as plain.
+    pub(crate) fn encrypt_ref_offset(&self) -> Option<usize> {
+        self.encrypt_ref_at
     }
 
     /// Whether the presentation is encrypted: the newest edit references an

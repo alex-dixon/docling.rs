@@ -122,6 +122,16 @@ flate2 = "1"
 # Raw-block Snappy decode for Apple iWork's IWA members (#213); pure Rust, so
 # the backend rides along in every build including wasm.
 snap = "1"
+# Password-protected Office documents ([MS-OFFCRYPTO], #625): AES for OOXML
+# Agile/Standard encryption, SHA-1/SHA-512/MD5 for the key derivations (RC4
+# itself is a dozen lines in `offcrypto.rs`). The RustCrypto generation lopdf
+# already pulls in for PDF decryption — the default build gains only `sha1`.
+# Pure Rust, every build including wasm.
+aes = "0.9"
+sha1 = "0.11"
+sha2 = "0.11"
+md-5 = "0.11"
+base64 = "0.22"
 
 [[example]]
 name = "convert"
