@@ -1522,7 +1522,7 @@ checksum = "780955b8b195a21ab8e4ac6b60dd1dbdcec1dc6c51c0617964b08c81785e12c9"
 
 [[package]]
 name = "docling"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "calamine",
  "criterion",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "docling-asr"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "docling-core",
  "docling-onnx",
@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "docling-cli"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "docling",
  "docling-serve",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "docling-core"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "png 0.18.1",
  "pulldown-cmark",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "docling-ffi"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "docling",
  "serde",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "docling-node"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "docling",
  "napi",
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "docling-onnx"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "docling-core",
  "libloading 0.8.9",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "docling-pdf"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "docling-core",
  "docling-onnx",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "docling-rag"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "docling-serve"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "axum",
  "docling",
@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "docling-wasm"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "console_error_panic_hook",
  "docling",
