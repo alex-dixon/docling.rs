@@ -143,6 +143,25 @@ jobs:
           mkdir pkg
           tar -xzf sdist/*.tar.gz -C pkg --strip-components=1
 
+      # Fetch every crate the build needs here, on the runner (with retries),
+      # and point cargo at the copies: the build itself — inside the
+      # manylinux container for the cibuildwheel jobs — then never talks to
+      # crates.io, whose CDN the container could not reach in a release run
+      # ("Could not connect to server" on static.crates.io before anything
+      # compiled). Only the wheel builds vendor; the published sdist stays
+      # small. ONNX Runtime's binaries (`ort`'s download-binaries) are still
+      # fetched by its build script.
+      - name: Vendor crates
+        shell: bash
+        working-directory: pkg
+        env:
+          CARGO_NET_RETRY: "10"
+        run: |
+          MANIFEST="$(sed -n 's/^manifest-path = "\(.*\)"/\1/p' pyproject.toml)"
+          mkdir -p .cargo
+          cargo vendor --locked --manifest-path "${MANIFEST:-Cargo.toml}" vendor > .cargo/config.toml
+          cat .cargo/config.toml
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.0
         with:
@@ -201,6 +220,25 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add s390x-unknown-linux-gnu
+
+      # Fetch every crate the build needs here, on the runner (with retries),
+      # and point cargo at the copies: the build itself — inside the
+      # manylinux container for the cibuildwheel jobs — then never talks to
+      # crates.io, whose CDN the container could not reach in a release run
+      # ("Could not connect to server" on static.crates.io before anything
+      # compiled). Only the wheel builds vendor; the published sdist stays
+      # small. ONNX Runtime's binaries (`ort`'s download-binaries) are still
+      # fetched by its build script.
+      - name: Vendor crates
+        shell: bash
+        working-directory: pkg
+        env:
+          CARGO_NET_RETRY: "10"
+        run: |
+          MANIFEST="$(sed -n 's/^manifest-path = "\(.*\)"/\1/p' pyproject.toml)"
+          mkdir -p .cargo
+          cargo vendor --locked --manifest-path "${MANIFEST:-Cargo.toml}" vendor > .cargo/config.toml
+          cat .cargo/config.toml
 
       - uses: actions/setup-python@v7
         with:
@@ -261,6 +299,25 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+
+      # Fetch every crate the build needs here, on the runner (with retries),
+      # and point cargo at the copies: the build itself — inside the
+      # manylinux container for the cibuildwheel jobs — then never talks to
+      # crates.io, whose CDN the container could not reach in a release run
+      # ("Could not connect to server" on static.crates.io before anything
+      # compiled). Only the wheel builds vendor; the published sdist stays
+      # small. ONNX Runtime's binaries (`ort`'s download-binaries) are still
+      # fetched by its build script.
+      - name: Vendor crates
+        shell: bash
+        working-directory: pkg
+        env:
+          CARGO_NET_RETRY: "10"
+        run: |
+          MANIFEST="$(sed -n 's/^manifest-path = "\(.*\)"/\1/p' pyproject.toml)"
+          mkdir -p .cargo
+          cargo vendor --locked --manifest-path "${MANIFEST:-Cargo.toml}" vendor > .cargo/config.toml
+          cat .cargo/config.toml
 
       - name: Build docling-rs-cuda wheel
         run: |
