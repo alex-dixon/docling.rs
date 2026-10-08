@@ -67,8 +67,16 @@ impl DeclarativeBackend for PptBackend {
         let stream = cfb.stream("PowerPoint Document").ok_or_else(|| {
             ConversionError::Parse(cfb.stream_error("ppt", "PowerPoint Document"))
         })?;
-        if cfb.stream("EncryptedSummary").is_some() {
-            return Err(ConversionError::Parse("ppt: document is encrypted".into()));
+        // #624: an encrypted presentation used to convert to an empty
+        // document — its records are ciphertext, so the walk below found no
+        // slide. `EncryptedSummary` alone never fired on PowerPoint's own
+        // files; the reliable marker is the current edit's reference to a
+        // `CryptSession10Container`.
+        let current_user = cfb.stream("Current User").unwrap_or_default();
+        if cfb.stream("EncryptedSummary").is_some()
+            || UserEdits::read(&current_user, &stream).is_some_and(|e| e.encrypted())
+        {
+            return Err(crate::backend::offcrypto::encrypted("ppt"));
         }
 
         // SLWT text blocks per slide, in presentation order.
@@ -110,6 +118,89 @@ impl DeclarativeBackend for PptBackend {
             }
         }
         Ok(doc)
+    }
+}
+
+const RT_USER_EDIT_ATOM: u16 = 0x0FF5;
+const RT_PERSIST_DIRECTORY_ATOM: u16 = 0x1772;
+#[cfg_attr(not(test), allow(dead_code))] // decryption reads it (#625)
+const RT_CRYPT_SESSION10_CONTAINER: u16 = 0x2F14;
+
+/// The user-edit chain of a `PowerPoint Document` stream ([MS-PPT] 2.3.2,
+/// 2.3.4): the `Current User` stream's `CurrentUserAtom` names the newest
+/// `UserEditAtom`, each edit points to the one before it and to its
+/// `PersistDirectoryAtom`, and the persist directory maps persist object ids
+/// to stream offsets — the newest edit's mapping of an id wins. None of
+/// these records is encrypted in an encrypted file (2.3.7), which is what
+/// makes them the place to look for the encryption.
+pub(crate) struct UserEdits {
+    /// Persist object id → offset in the stream, newest edit first.
+    pub(crate) persist: std::collections::HashMap<u32, u32>,
+    /// The newest edit's `encryptSessionPersistIdRef` — present only when
+    /// that `UserEditAtom` is 0x20 bytes long, i.e. the file is encrypted.
+    encrypt_ref: Option<u32>,
+}
+
+impl UserEdits {
+    pub(crate) fn read(current_user: &[u8], doc: &[u8]) -> Option<Self> {
+        let u32_at =
+            |d: &[u8], o: usize| Some(u32::from_le_bytes(d.get(o..o + 4)?.try_into().ok()?));
+        // CurrentUserAtom: 8-byte header, size, headerToken, offsetToCurrentEdit.
+        let mut off = u32_at(current_user, 16)? as usize;
+        let mut edits = Self {
+            persist: std::collections::HashMap::new(),
+            encrypt_ref: None,
+        };
+        // Each edit lies before the previous one's offset in a well-formed
+        // file; the hop count bounds a cyclic chain either way.
+        for hop in 0..doc.len() / 40 + 1 {
+            let (header, body) = Records::new(doc.get(off..)?).next()?;
+            if header.rec_type != RT_USER_EDIT_ATOM || body.len() < 28 {
+                return (hop > 0).then_some(edits);
+            }
+            if hop == 0 && body.len() >= 32 {
+                edits.encrypt_ref = u32_at(body, 28);
+            }
+            let dir_off = u32_at(body, 12)? as usize;
+            if let Some((h, dir)) = doc.get(dir_off..).and_then(|d| Records::new(d).next()) {
+                if h.rec_type == RT_PERSIST_DIRECTORY_ATOM {
+                    // PersistDirectoryEntry: persistId (20 bits) + cPersist
+                    // (12 bits), then cPersist offsets for consecutive ids.
+                    let mut p = 0;
+                    while let Some(v) = u32_at(dir, p) {
+                        let (id, count) = (v & 0xF_FFFF, (v >> 20) as usize);
+                        for k in 0..count {
+                            let Some(o) = u32_at(dir, p + 4 + k * 4) else {
+                                break;
+                            };
+                            edits.persist.entry(id + k as u32).or_insert(o);
+                        }
+                        p += 4 + count * 4;
+                    }
+                }
+            }
+            match u32_at(body, 8)? as usize {
+                0 => break,
+                prev => off = prev,
+            }
+        }
+        Some(edits)
+    }
+
+    /// The `CryptSession10Container` body the newest edit references — the
+    /// file's `EncryptionInfo` ([MS-PPT] 2.3.7).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn crypt_session<'a>(&self, doc: &'a [u8]) -> Option<&'a [u8]> {
+        let off = *self.persist.get(&self.encrypt_ref?)? as usize;
+        let (header, body) = Records::new(doc.get(off..)?).next()?;
+        (header.rec_type == RT_CRYPT_SESSION10_CONTAINER).then_some(body)
+    }
+
+    /// Whether the presentation is encrypted: the newest edit references an
+    /// encryption session. A reference the persist directory cannot resolve
+    /// still counts — no unencrypted writer sets one.
+    pub(crate) fn encrypted(&self) -> bool {
+        self.encrypt_ref.is_some_and(|r| r != 0)
     }
 }
 
@@ -790,6 +881,50 @@ fn bytes_text(b: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #624: every PowerPoint-encrypted fixture — open password, modify
+    /// password, both, a version 4 file — references a
+    /// `CryptSession10Container` from its current edit, and the plain files
+    /// do not. The `Current User` header token is no marker: B's is the
+    /// plain-file value.
+    #[test]
+    fn user_edit_chain_finds_the_encryption_session() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/encrypted/");
+        let edits = |path: &str| {
+            let data = std::fs::read(path).unwrap();
+            let cfb = CompoundFile::open(&data).unwrap();
+            let doc = cfb.stream("PowerPoint Document").unwrap();
+            let user = cfb.stream("Current User").unwrap();
+            let edits = UserEdits::read(&user, &doc).expect("edit chain");
+            let session = edits.crypt_session(&doc).map(<[u8]>::len);
+            (edits.encrypted(), session)
+        };
+        for name in [
+            "min_encrypted.ppt",
+            "min_writepw.ppt",
+            "B_openpw.ppt",
+            "C_writepw.ppt",
+            "D_both.ppt",
+            "H_A_addpw_save.ppt",
+        ] {
+            let (encrypted, session) = edits(&format!("{dir}{name}"));
+            assert!(encrypted, "{name}");
+            // RC4 CryptoAPI EncryptionInfo: 4.2 version, header, verifier.
+            assert_eq!(session, Some(198), "{name}");
+        }
+        for plain in [
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/data/ppt/sources/powerpoint_sample.ppt"
+            ),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/data/ppt/sources/ppt_cfb_v4_edit_save.ppt"
+            ),
+        ] {
+            assert_eq!(edits(plain), (false, None), "{plain}");
+        }
+    }
     use crate::InputFormat;
 
     #[test]

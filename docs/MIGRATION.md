@@ -135,6 +135,17 @@ spellings `--page-range`, `--image-export-mode`, `--no-tables`,
 engine always had but no caller passed) and `--output-file`; see
 `docs/OPTIONS.md`.
 
+**Encrypted Office documents (#624).** A password-protected `.doc`, `.docx`,
+`.xls`, `.xlsx`, `.ppt`, `.pptx` or ODF file fails with one error,
+`<format>: document is encrypted` (a 422 from the server), where `.ppt` used
+to convert to an empty document, `.docx`/`.pptx` failed as `bad zip`, an ODF
+package as `no content.xml`, and `.xls`/`.xlsx` with calamine's wording. A
+`.ppt` is recognized by the `CryptSession10Container` its current user edit
+references ([MS-PPT] 2.3.7) — PowerPoint also encrypts a file that has only a
+*modify* password, so those fail the same way; Word and Excel leave such a
+file unencrypted and it converts. A mislabelled encrypted file (a `.ppt`
+named `.pptx`) reports the encryption, not the declared format's parse error.
+
 ## 2. Format coverage
 
 Conformance is measured against the latest **published** docling (installed from

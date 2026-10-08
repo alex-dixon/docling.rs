@@ -31,8 +31,11 @@ pub struct XlsBackend {
 impl DeclarativeBackend for XlsBackend {
     fn convert(&self, source: &SourceDocument) -> Result<DoclingDocument, ConversionError> {
         let cursor = Cursor::new(source.bytes.clone());
-        let mut workbook: Xls<_> =
-            Xls::new(cursor).map_err(|e| ConversionError::with_source("xls", e))?;
+        let mut workbook: Xls<_> = Xls::new(cursor).map_err(|e| match e {
+            // A FILEPASS record (#624): the same error every format gives.
+            calamine::XlsError::Password => crate::backend::offcrypto::encrypted("xls"),
+            e => ConversionError::with_source("xls", e),
+        })?;
 
         let metas: Vec<(String, calamine::SheetType, calamine::SheetVisible)> = workbook
             .sheets_metadata()

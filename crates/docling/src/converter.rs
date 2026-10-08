@@ -1015,7 +1015,16 @@ impl DocumentConverter {
         };
         let declared = source.format;
         let retry = SourceDocument { format, ..source };
-        let result = self.convert_as(&retry).map_err(|_| err)?;
+        // The retry's error replaces the first one only when it says the
+        // file is encrypted (#624) — an encrypted `.ppt` named `.pptx` is
+        // better reported as encrypted than as a bad ZIP.
+        let result = self.convert_as(&retry).map_err(|e| {
+            if crate::backend::offcrypto::is_encryption_error(&e) {
+                e
+            } else {
+                err
+            }
+        })?;
         // Converted, but not as the name said: worth a line, since the
         // mislabelled file is otherwise invisible.
         eprintln!(
@@ -1033,6 +1042,15 @@ impl DocumentConverter {
         // today the PDF pipeline's spent document budget (#497).
         #[cfg_attr(not(feature = "pdf"), allow(unused_mut))]
         let mut errors: Vec<crate::ErrorItem> = Vec::new();
+        // An encrypted OOXML package is a compound file, not a ZIP (#624):
+        // say so instead of "bad zip".
+        if matches!(
+            source.format,
+            InputFormat::Docx | InputFormat::Xlsx | InputFormat::Pptx | InputFormat::Visio
+        ) && crate::backend::offcrypto::is_encrypted_package(&source.bytes)
+        {
+            return Err(crate::backend::offcrypto::encrypted(source.format.as_str()));
+        }
         let mut document = match source.format {
             // A legacy APS (Automated Patent System) plain-text patent (`PATN`
             // first record) is reconstructed verbatim, mirroring docling.

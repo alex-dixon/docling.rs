@@ -341,6 +341,37 @@ async fn unknown_format_is_422() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// #624: an encrypted Office file is a 422 naming the encryption — the
+/// `.ppt` used to stream an empty 200, the `.pptx` failed as "bad zip".
+#[tokio::test]
+async fn encrypted_office_files_are_422() {
+    for name in ["min_encrypted.ppt", "min_encrypted.pptx"] {
+        let bytes = std::fs::read(
+            repo_root()
+                .join("crates/docling/tests/data/encrypted")
+                .join(name),
+        )
+        .unwrap();
+        for query in ["", "?to=json"] {
+            let (ct, body) = multipart(name, &bytes, &[]);
+            let response = app()
+                .oneshot(convert_request(&ct, body, query))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{name}{query}"
+            );
+            let text = body_string(response).await;
+            assert!(
+                text.contains("document is encrypted"),
+                "{name}{query}: {text}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn missing_file_part_is_400() {
     let (ct, body) = multipart("x.md", b"x", &[]);

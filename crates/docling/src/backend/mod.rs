@@ -60,6 +60,7 @@ mod mhtml;
 pub(crate) mod msg;
 mod odf;
 mod odf_tree;
+pub(crate) mod offcrypto;
 mod officeart;
 mod omml;
 mod ooxml;
