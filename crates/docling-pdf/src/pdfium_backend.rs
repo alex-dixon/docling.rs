@@ -1302,10 +1302,12 @@ mod native {
     pub(super) struct Session<'a>(Infallible, PhantomData<&'a ()>);
     pub(super) struct Page<'a>(Infallible, PhantomData<&'a ()>);
 
+    /// Reached only for a file the pure-Rust object model could not read
+    /// (every entry point tries it first), so the error is about the file:
+    /// naming the missing library sent users of a corrupt or non-PDF upload
+    /// looking for a pdfium install that would not have helped either.
     pub(super) fn bind() -> Result<Lib, PdfError> {
-        Err(PdfError::Document(
-            "pdfium support is not compiled in (docling-pdf feature `pdfium`)".into(),
-        ))
+        Err(PdfError::Document(crate::UNREADABLE.into()))
     }
 
     impl Lib {
