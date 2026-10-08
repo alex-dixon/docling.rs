@@ -265,8 +265,9 @@ impl LayoutModel {
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!(
                         "docling-pdf: layout model rejected a {}-page batch ({e}); \
-                         falling back to per-page inference — re-export with \
-                         scripts/install/export_layout.py for batched layout",
+                         falling back to per-page inference (same output, lower \
+                         throughput) — re-export with scripts/install/export_layout.py \
+                         for batched layout, or set DOCLING_RS_PDF_LAYOUT_BATCH=1",
                         pages.len()
                     );
                 }

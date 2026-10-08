@@ -2069,9 +2069,12 @@ fn pdf_worker_count() -> usize {
 /// whatever is already rendered gets batched, so batching never *waits* for
 /// pages and adds no latency when rendering is the bottleneck.
 ///
-/// Default: per-page (1) on the CPU provider, 4 when a GPU provider is
-/// selected (#338). The old "4 on 8+ cores" CPU default was a hypothesis —
-/// that single-session amortization pays off with a wider thread budget —
+/// Default: per-page (1) on the CPU provider, 4 when a CUDA-class GPU
+/// provider is selected (#338) — CoreML stays per-page (#602,
+/// [`docling_onnx::prefers_batching`]): only the pinned batch=1 graph is
+/// static, and static partitions are all CoreML is allowed to take. The old
+/// "4 on 8+ cores" CPU default was a hypothesis — that single-session
+/// amortization pays off with a wider thread budget —
 /// and every actual CPU measurement lands the other way: a 4-core x86 box
 /// runs the 9-page 2206.01062 fixture in 8.5 s/conv at batch=1 vs 9.3 s at
 /// batch=4 (re-measured for #338; the original 8.1 vs 9.3 agrees), and the
@@ -2084,7 +2087,13 @@ fn pdf_worker_count() -> usize {
 pub(crate) fn pdf_layout_batch() -> usize {
     env::parse::<usize>("DOCLING_RS_PDF_LAYOUT_BATCH")
         .filter(|&n| n > 0)
-        .unwrap_or_else(|| if docling_onnx::prefers_fp32() { 4 } else { 1 })
+        .unwrap_or_else(|| {
+            if docling_onnx::prefers_batching() {
+                4
+            } else {
+                1
+            }
+        })
 }
 
 #[cfg(feature = "ml")]
