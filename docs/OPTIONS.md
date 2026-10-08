@@ -42,12 +42,14 @@ own output options next to the shared ones.
 | `asr_model` | preset name | unset = Whisper tiny | `--asr-model` | `asr_model` | `asrModel` | ASR preset for audio/video (`whisper_*`, `parakeet_tdt_0.6b_v3`). |
 | `asr_lang` | Whisper code \| `auto` | `auto` | `--asr-lang` | `asr_lang` | `asrLang` | Transcription language for audio/video. |
 | `video_frames` | int ≥ 0 | 8 | `--video-frames` | `video_frames` | `videoFrames` | Max frames sampled from a video (0 = transcript only; needs ffmpeg). |
-| `pages` | `A-B` \| `N` | unset = every page | `--pages` | `page_range` | `pages` | PDF page window, 1-based inclusive (#80). Python: `page_range=(first, last)`. |
+| `pages` | `A-B` \| `N` | unset = every page | `--pages` (also `--page-range`) | `page_range` | `pages` | PDF page window, 1-based inclusive (#80). Python: `page_range=(first, last)`. |
 | `document_timeout` | seconds > 0 | unset = unlimited | `--document-timeout` | `document_timeout` | `documentTimeout` | Per-document budget for the PDF pipeline (#497): checked between pages, the pages done so far are the partial document. |
-| `no_ocr` | bool | false | `--no-ocr` | `text_layer_only` | `noOcr` | Skip the whole ML stack: text layer only. Python: `text_layer_only`. |
-| `skip_ocr` | bool | false | `--skip-ocr` | `do_ocr` | `skipOcr` | Keep layout + TableFormer, never run OCR (docling's `do_ocr=False`, #244). Python: `do_ocr` (inverted). |
-| `force_full_page_ocr` | bool | false | `--force-full-page-ocr` | `force_full_page_ocr` | `forceFullPageOcr` | OCR every page, discarding the text layer. |
-| `no_table_former` | bool | false | `--no-table-former` | `do_table_structure` | `noTableFormer` | Skip TableFormer (geometric tables instead). Python: `do_table_structure` (inverted). |
+| `no_ocr` | bool | false | `--no-ocr` | `do_ocr` | `noOcr` | Keep layout + TableFormer, never run OCR — docling's `--no-ocr` / `do_ocr=False` (#611; until 2.0 `no_ocr` was the text-layer path, now `text_layer_only`). Python: `do_ocr` (inverted). |
+| `skip_ocr` | bool | false | `--skip-ocr` | — | `skipOcr` | `no_ocr` under its pre-2.0 name (#244), still read: either one set skips OCR. Python: `do_ocr`. |
+| `text_layer_only` | bool | false | `--text-layer-only` | `text_layer_only` | `textLayerOnly` | Skip the whole ML stack: the embedded text layer as flat paragraphs (what `no_ocr` meant before 2.0, #611). |
+| `pdf_password` | string | unset | `--pdf-password` (also `--password`) | `pdf_password` | `pdfPassword` | The password of an encrypted PDF — docling's `--pdf-password` (#611). Python also reads docling's `PdfFormatOption(backend_options=PdfBackendOptions(password=…))`. Not read by the `pdf-text` / wasm build. |
+| `force_full_page_ocr` | bool | false | `--force-full-page-ocr` | `force_full_page_ocr` | `forceFullPageOcr` | OCR every page, discarding the text layer. docling's deprecated `--force-ocr` is this (or `--ocr-mode full_page`); it gets no alias, as docling itself retires it. |
+| `no_table_former` | bool | false | `--no-table-former` (also `--no-tables`) | `do_table_structure` | `noTableFormer` | Skip TableFormer (geometric tables instead). Python: `do_table_structure` (inverted). |
 | `no_text_panels` | bool | false | `--no-text-panels` | `no_text_panels` | `noTextPanels` | Disable the text-panel heuristic (#173). |
 | `heading_hierarchy` | bool | false | `--heading-hierarchy` | `heading_hierarchy` | `headingHierarchy` | Infer PDF/image heading levels after assembly (#302). |
 | `ocr_engine` | `ppocr` \| `tesseract` | `ppocr` (`DOCLING_RS_OCR_ENGINE`) | `--ocr-engine` | `ocr_engine` | `ocrEngine` | Which OCR engine reads scanned pages (#460). |
@@ -88,7 +90,12 @@ codec or copybook when the conversion runs.
 
 - **CLI** — flags fill a `ConvertOptions`, `validate()` runs once after the
   command line is parsed; errors read `--ocr-scale must be a positive
-  number, got 0`.
+  number, got 0`. Python `docling convert`'s spellings are accepted too
+  (#611): `--page-range` (`--pages`), `--image-export-mode` (`--images`),
+  `--no-tables` (`--no-table-former`), `--no-ocr` with docling's meaning,
+  `--pdf-password`, and `--output-file PATH` — the one result written to
+  exactly PATH, refused unless there is exactly one input document and one
+  `--to` format (docling's checks and messages).
 - **serve** — the query string, the JSON body and multipart text parts are
   three layers of the same struct (body over query, text parts over query),
   merged generically; a text value is read as the option's type (string,

@@ -107,6 +107,8 @@ struct PyDocumentConverter {
     /// them each time (the transient path `inner` takes otherwise). `Arc` so
     /// the interruptible worker threads can own a handle to it.
     pdf_pipeline: std::sync::Arc<std::sync::Mutex<Option<docling::Pipeline>>>,
+    /// The warm `docling::Pipeline`'s switches, in its (pre-2.0) names:
+    /// `no_ocr` is `text_layer_only`, `skip_ocr` is `do_ocr=False` (#611).
     no_ocr: bool,
     skip_ocr: bool,
     no_table_former: bool,
@@ -128,6 +130,8 @@ struct PyDocumentConverter {
     page_range: Option<(usize, usize)>,
     /// docling's `document_timeout` (#497), for the warm pipeline.
     document_timeout: Option<std::time::Duration>,
+    /// The password of an encrypted PDF (#611), for the warm pipeline.
+    pdf_password: Option<String>,
     /// `pipeline="vlm"` (#304): resolved once in `new` (a bad configuration
     /// raises there, not mid-conversion); `convert` then routes PDF/image
     /// through the remote VLM instead of the local ML stack.
@@ -139,6 +143,8 @@ impl PyDocumentConverter {
     /// Engine knobs mapped from docling's converter/`PdfPipelineOptions` on the
     /// Python side:
     /// * `fetch_images` — resolve remote/local `<img src>` for HTML/EPUB/MHTML/JATS.
+    /// * `pdf_password` — the password of an encrypted PDF (docling's
+    ///   `--pdf-password` / `PdfBackendOptions.password`, #611).
     /// * `do_ocr` — run OCR on scanned PDF/image pages (docling's `do_ocr`).
     ///   `do_ocr=False` now matches docling exactly (#244): layout detection
     ///   and TableFormer still run, only OCR is skipped — previously it
@@ -259,6 +265,7 @@ impl PyDocumentConverter {
         vlm_prompt = None,
         vlm_max_tokens = None,
         document_timeout = None,
+        pdf_password = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -297,6 +304,7 @@ impl PyDocumentConverter {
         vlm_prompt: Option<String>,
         vlm_max_tokens: Option<usize>,
         document_timeout: Option<f64>,
+        pdf_password: Option<String>,
     ) -> PyResult<Self> {
         // A malformed window (0-based, reversed) raises here instead of
         // silently selecting nothing (#518).
@@ -323,8 +331,9 @@ impl PyDocumentConverter {
             video_frames,
             pages: page_range.map(|(first, last)| format!("{first}-{last}")),
             document_timeout,
-            no_ocr: Some(text_layer_only),
-            skip_ocr: Some(!do_ocr),
+            text_layer_only: Some(text_layer_only),
+            no_ocr: Some(!do_ocr),
+            pdf_password: pdf_password.clone(),
             force_full_page_ocr: Some(force_full_page_ocr),
             no_table_former: Some(!do_table_structure),
             no_text_panels: Some(no_text_panels),
@@ -391,6 +400,7 @@ impl PyDocumentConverter {
             images: opts.image_output(),
             page_range,
             document_timeout: opts.document_timeout().map_err(value_err)?,
+            pdf_password,
             vlm,
         })
     }
@@ -622,6 +632,7 @@ impl PyDocumentConverter {
             let slot = std::sync::Arc::clone(&self.pdf_pipeline);
             let window = page_range.or(self.page_range);
             let default_window = self.page_range;
+            let password = self.pdf_password.clone();
             return run_interruptible(py, move || {
                 let mut slot = slot.lock().unwrap();
                 let pipeline = slot
@@ -630,7 +641,7 @@ impl PyDocumentConverter {
                 // The warm pipeline is shared across calls: apply this call's
                 // window and put the constructor's back afterwards.
                 pipeline.set_pages(window);
-                let outcome = pipeline.convert_outcome(&src.bytes, None, &src.name);
+                let outcome = pipeline.convert_outcome(&src.bytes, password.as_deref(), &src.name);
                 pipeline.set_pages(default_window);
                 // docling's PARTIAL_SUCCESS (#497): a spent budget leaves the
                 // pages done so far and says so in `errors`.

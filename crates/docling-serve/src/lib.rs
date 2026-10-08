@@ -36,10 +36,12 @@
 //! - `strict` — cleaner Markdown instead of docling-legacy output
 //! - `images` — `placeholder` (default; `embedded` for `to=pandoc`, #537) | `embedded`
 //!   (Markdown, HTML and the Pandoc AST)
-//! - `no_ocr`, `skip_ocr`, `no_table_former`, `force_full_page_ocr`,
-//!   `no_text_panels`, `heading_hierarchy` — PDF/image pipeline switches (`skip_ocr`, #244: keep
-//!   layout + TableFormer, never OCR — docling's independent `do_ocr=False`;
-//!   `no_ocr` skips the whole ML stack)
+//! - `no_ocr`, `text_layer_only`, `no_table_former`, `force_full_page_ocr`,
+//!   `no_text_panels`, `heading_hierarchy` — PDF/image pipeline switches (`no_ocr`:
+//!   keep layout + TableFormer, never OCR — docling's `do_ocr=False`, its
+//!   `--no-ocr`; `skip_ocr` is its pre-2.0 name, still read; `text_layer_only`
+//!   skips the whole ML stack, what `no_ocr` meant before 2.0, #611)
+//! - `pdf_password` — the password of an encrypted PDF (#611)
 //! - `do_picture_classification`, `do_code_enrichment`,
 //!   `do_formula_enrichment` — the opt-in enrichment models (#423; docling's
 //!   `PdfPipelineOptions` flags of the same names, the CLI's
@@ -1668,7 +1670,8 @@ fn rasterize_pages(
         .pipeline
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let pages = docling::render_pdf_pages(&source.bytes, None, range, scale)
+    let password = options.convert.pdf_password.as_deref();
+    let pages = docling::render_pdf_pages(&source.bytes, password, range, scale)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(pages
         .iter()
@@ -2385,7 +2388,7 @@ fn convert_document_inner(
             pipeline.set_document_timeout(o.document_timeout().map_err(bad)?);
             let mut converted = match source.format {
                 InputFormat::Pdf => pipeline
-                    .convert_outcome(&source.bytes, None, &source.name)
+                    .convert_outcome(&source.bytes, o.pdf_password.as_deref(), &source.name)
                     .map(|c| Converted {
                         errors: c
                             .completion
@@ -2433,8 +2436,8 @@ fn convert_document_inner(
 /// models themselves load lazily on the first matching region anyway).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct PipelineFlags {
+    text_layer_only: bool,
     no_ocr: bool,
-    skip_ocr: bool,
     no_table_former: bool,
     no_text_panels: bool,
     enrich: docling::EnrichmentOptions,
@@ -2444,8 +2447,8 @@ impl PipelineFlags {
     fn of(options: &ConvertOptions) -> Self {
         let o = &options.convert;
         Self {
-            no_ocr: o.no_ocr.unwrap_or(false),
-            skip_ocr: o.skip_ocr.unwrap_or(false),
+            text_layer_only: o.text_layer_only.unwrap_or(false),
+            no_ocr: o.ocr_disabled(),
             no_table_former: o.no_table_former.unwrap_or(false),
             no_text_panels: o.no_text_panels.unwrap_or(false),
             enrich: o.enrichments(),
@@ -2453,7 +2456,7 @@ impl PipelineFlags {
     }
 }
 
-/// The lazily-loaded warm pipeline. Pipeline switches (`no_ocr`, `skip_ocr`,
+/// The lazily-loaded warm pipeline. Pipeline switches (`text_layer_only`, `no_ocr`,
 /// `no_table_former`, `no_text_panels`) are per-instance, so the pipeline is
 /// rebuilt exactly when the request's switches differ from the cached
 /// instance's — including back to the default (#246; the old code only
@@ -2468,8 +2471,10 @@ fn warm_pipeline<'a>(
     if slot.as_ref().map(|(built, _)| *built) != Some(flags) {
         let p = Pipeline::new()
             .map_err(|e| ApiError::Internal(e.to_string()))?
-            .no_ocr(flags.no_ocr)
-            .skip_ocr(flags.skip_ocr)
+            // docling-pdf's pre-2.0 names: its `no_ocr` is the text-layer
+            // fast path, its `skip_ocr` docling's do_ocr=False (#611).
+            .no_ocr(flags.text_layer_only)
+            .skip_ocr(flags.no_ocr)
             .no_table_former(flags.no_table_former)
             .no_text_panels(flags.no_text_panels)
             .enrichments(flags.enrich);
@@ -2689,7 +2694,7 @@ mod pipeline_flag_tests {
     /// #246: the cached pipeline must be rebuilt whenever the request's
     /// switches differ from the ones it was built with — in BOTH directions.
     /// The old code only rebuilt toward reduced configurations, so a
-    /// `no_ocr=true` request permanently degraded the shared instance for
+    /// `text_layer_only=true` request permanently degraded the shared instance for
     /// every later default request. (`Pipeline::new()` loads no models —
     /// they're lazy — so this runs in plain CI.)
     #[test]
@@ -2698,7 +2703,7 @@ mod pipeline_flag_tests {
         let default_opts = ConvertOptions::default();
         let no_ocr_opts = ConvertOptions {
             convert: docling::ConvertOptions {
-                no_ocr: Some(true),
+                text_layer_only: Some(true),
                 ..Default::default()
             },
             ..ConvertOptions::default()

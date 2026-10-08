@@ -705,3 +705,100 @@ fn zip_sources_convert_each_document_inside() {
     assert!(swept.0.join("c.md").is_file());
     assert!(!swept.0.join("bundle").exists(), "stderr: {stderr}");
 }
+
+const PDF_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/pdf/sources");
+
+/// #611: `--output-file PATH` (docling's flag) writes the one result to
+/// exactly PATH — the bytes stdout would carry, directories created, nothing
+/// on stdout — and refuses, with docling's messages, anything but one input
+/// document in one format.
+#[test]
+fn output_file_writes_exactly_that_path() {
+    let out = Scratch::new("output-file");
+    let a = format!("{MD_FIXTURES}/duck.md");
+    let b = format!("{MD_FIXTURES}/blocks.md");
+    let target = out.path("nested/dir/result.markdown");
+    let (code, stdout, stderr) = run(&[&a, "--output-file", &target]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.is_empty(), "stdout: {stdout}");
+    let (_, expected, _) = run(&[&a]);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), expected);
+    // Only the file: no scratch directory or stem-named copy left behind.
+    let dir = out.0.join("nested/dir");
+    let names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["result.markdown"]);
+
+    let (code, _, stderr) = run(&[&a, &b, "--output-file", &target]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("requires exactly one input document"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run(&[&a, "--to", "md", "--to", "json", "--output-file", &target]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("requires exactly one output format"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run(&[MD_FIXTURES, "--output-file", &target]);
+    assert_eq!(code, 2, "a directory is several documents: {stderr}");
+}
+
+/// #611: Python `docling convert`'s spellings are the same switches —
+/// `--page-range` is `--pages`, `--image-export-mode` is `--images`,
+/// `--no-tables` is `--no-table-former` — byte for byte.
+#[test]
+fn docling_flag_spellings_match_ours() {
+    let pdf = format!("{PDF_FIXTURES}/multi_page.pdf");
+    let ours = run(&[
+        &pdf,
+        "--text-layer-only",
+        "--pages",
+        "2-3",
+        "--images",
+        "embedded",
+    ]);
+    let theirs = run(&[
+        &pdf,
+        "--text-layer-only",
+        "--page-range",
+        "2-3",
+        "--image-export-mode",
+        "embedded",
+    ]);
+    assert_eq!(ours.0, 0, "stderr: {}", ours.2);
+    assert_eq!(ours.1, theirs.1);
+    let full = run(&[&pdf, "--text-layer-only"]);
+    assert_ne!(ours.1, full.1, "the window applies");
+    let a = run(&[&pdf, "--text-layer-only", "--no-table-former"]);
+    let b = run(&[&pdf, "--text-layer-only", "--no-tables"]);
+    assert_eq!(a.0, 0, "stderr: {}", a.2);
+    assert_eq!(a.1, b.1);
+}
+
+/// #611: an encrypted PDF converts with docling's `--pdf-password` (or
+/// `--password`, the spelling PDF_CONFORMANCE.md used); without one it fails
+/// with docling's message. (Text-layer path: no models needed.)
+#[test]
+fn pdf_password_opens_an_encrypted_pdf() {
+    let pdf = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/data/pdf_password/sources/2206.01062_pg3.pdf"
+    );
+    let (code, _, stderr) = run(&[pdf, "--text-layer-only"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("the PDF is encrypted: a password is required"),
+        "{stderr}"
+    );
+    let (code, with, stderr) = run(&[pdf, "--text-layer-only", "--pdf-password", "1234"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(with.contains("DocLayNet"), "{with}");
+    let (_, alias, _) = run(&[pdf, "--text-layer-only", "--password", "1234"]);
+    assert_eq!(alias, with);
+    let (code, _, stderr) = run(&[pdf, "--text-layer-only", "--pdf-password"]);
+    assert_eq!(code, 2, "a bare flag is a usage error: {stderr}");
+}

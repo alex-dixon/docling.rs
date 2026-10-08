@@ -75,7 +75,7 @@ pub use docling_pdf::{
     OcrEngine, OcrLang, OcrMode, Pipeline, RenderedPage,
 };
 // The pure-Rust text-layer extraction (no pdfium, no models) — compiled with
-// either PDF feature. The CLI uses it as the `--no-ocr` fallback when the
+// either PDF feature. The CLI uses it as the `--text-layer-only` fallback when the
 // runtime assets are missing (launch blocker: a bare `cargo install` ships
 // neither pdfium nor the models).
 #[cfg(any(feature = "pdf", feature = "pdf-text"))]

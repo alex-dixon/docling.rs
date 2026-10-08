@@ -3,9 +3,12 @@
 //! The docling.rs counterpart of `docling.cli.main`; `docling-rs serve`
 //! (with `--features serve`) starts the HTTP conversion API.
 //!
-//! `--skip-ocr` (#244) keeps layout + TableFormer but never runs OCR
-//! (docling's independent `do_ocr=False`); `--no-ocr` remains the
-//! skip-everything fast path.
+//! `--no-ocr` keeps layout + TableFormer but never runs OCR — docling's
+//! `--no-ocr` (`do_ocr=False`) since 2.0 (#611); `--skip-ocr`, its pre-2.0
+//! name, is an alias, and the skip-everything fast path `--no-ocr` used to
+//! be is `--text-layer-only`. docling's other spellings are accepted too:
+//! `--page-range` (`--pages`), `--image-export-mode` (`--images`),
+//! `--no-tables` (`--no-table-former`), `--pdf-password`, `--output-file`.
 //!
 //! `--help` prints the full flag list and `--version` the version plus the
 //! optional features the binary carries (execution providers, `serve`,
@@ -14,7 +17,7 @@
 //! the same name): one identifier per line, sorted, for scripts that ask the
 //! binary what it converts instead of hard-coding a list.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--skip-ocr] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|dclx|chunks|images|latex] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--output-file PATH] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--text-layer-only] [--pdf-password PASSWORD] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
 //!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
 //!                      md --to json`): each document converts once and is
 //!                      written in every format named, `<stem>.md` +
@@ -130,8 +133,9 @@
 //!                      are authoritative, legal/outline numbering covers the
 //!                      rest, font style breaks the ties. Off by default —
 //!                      headings then keep the flat level docling emits
-//!   --no-ocr           skip layout detection, OCR, and TableFormer entirely for
-//!                      PDF/image input — no model load or inference at all.
+//!   --text-layer-only  skip layout detection, OCR, and TableFormer entirely for
+//!                      PDF/image input — no model load or inference at all
+//!                      (`--no-ocr` before 2.0, #611).
 //!                      Emits the embedded text layer as flat paragraphs in
 //!                      reading order (no headings/lists/tables/pictures). The
 //!                      fastest option, but a scanned/image-only PDF (no
@@ -243,7 +247,7 @@ OUTPUT
   --strict                cleaner, more conformant Markdown (Markdown only)
   --page-break-placeholder TEXT   insert TEXT between pages (Markdown only, e.g. <!-- page break -->)
   --images MODE           picture handling: placeholder (default; embedded for --to pandoc)
-                          | embedded | referenced
+                          | embedded | referenced (docling's --image-export-mode)
   --pandoc-api-version V  fail unless the Pandoc AST is this API (`--to pandoc`; only 1.23)
   --compact-tables        render Markdown tables without width padding
   --no-stream             build the whole document before printing
@@ -253,6 +257,8 @@ INPUT SELECTION
                           or quoted globs are a batch and need --output
   --input GLOB|DIR        batch mode: convert everything the glob/directory matches
   --output DIR            where batch (or single-file) results are written
+  --output-file PATH      write the one result to exactly PATH (one input document,
+                          one --to format; docling's --output-file)
   --jobs N                batch workers (default 1)
   --abort-on-error        stop the batch at the first failed file (default: skip it;
                           a timed-out document counts as failed under this flag)
@@ -264,7 +270,8 @@ INPUT SELECTION
   --document-timeout SECONDS   per-document budget for the PDF pipeline (docling's
                           document_timeout, #497): checked between pages; once
                           spent, the pages done so far are the (partial) document
-  --pages A-B             convert only PDF pages A..B (1-based, inclusive)
+  --pages A-B             convert only PDF pages A..B (1-based, inclusive;
+                          docling's --page-range)
   --scale X               `--to images` render scale, px per PDF point (0.1-4.0, default 2.0)
 
 FORMAT OPTIONS
@@ -278,10 +285,15 @@ FORMAT OPTIONS
 
 PDF / IMAGE PIPELINE
   --ocr-engine ppocr|tesseract   OCR engine (default: ppocr; tesseract = the system binary)
-  --no-table-former       skip the TableFormer model (geometric tables instead)
-  --no-ocr                skip OCR entirely (text-layer only)
-  --skip-ocr              keep layout + tables, never run OCR
+  --no-table-former       skip the TableFormer model (geometric tables instead;
+                          docling's --no-tables)
+  --no-ocr                never run OCR, keep layout + tables (docling's --no-ocr;
+                          --skip-ocr is the same)
+  --text-layer-only       no models at all: the embedded text layer as flat
+                          paragraphs (what --no-ocr did before 2.0)
+  --pdf-password PASSWORD password of an encrypted PDF (also --password)
   --force-full-page-ocr   OCR the whole page, discarding the text layer
+                          (docling's deprecated --force-ocr; = --ocr-mode full_page)
   --no-text-panels        disable the text-panel heuristic
   --heading-hierarchy     infer heading levels from font weight/slant/case
   --ocr-lang LANG         OCR recognition model (default: en): en | ch, or a
@@ -406,6 +418,9 @@ fn main() -> ExitCode {
     let mut inputs: Vec<String> = Vec::new();
     let mut abort_on_error = false;
     let mut output: Option<String> = None;
+    // `--output-file PATH` (#611, docling's flag): the one result, written to
+    // exactly this path.
+    let mut output_file: Option<String> = None;
     let mut output_dirs = OutputDirs::Auto;
     let mut jobs: usize = 1;
     let mut args = std::env::args().skip(1);
@@ -441,12 +456,23 @@ fn main() -> ExitCode {
                 }
             },
             "--no-stream" => no_stream = true,
-            "--no-table-former" => opts.no_table_former = Some(true),
-            "--no-ocr" => opts.no_ocr = Some(true),
-            // #244: keep layout + TableFormer, never OCR (docling's
-            // independent do_ocr=False) — unlike --no-ocr, which skips the
-            // whole ML stack.
-            "--skip-ocr" => opts.skip_ocr = Some(true),
+            // `--no-tables` is docling's spelling (`do_table_structure=False`, #611).
+            "--no-table-former" | "--no-tables" => opts.no_table_former = Some(true),
+            // Since 2.0 (#611) `--no-ocr` is docling's: keep layout +
+            // TableFormer, never OCR (`do_ocr=False`). `--skip-ocr` is its
+            // pre-2.0 name; the old skip-everything fast path is
+            // `--text-layer-only`.
+            "--no-ocr" | "--skip-ocr" => opts.no_ocr = Some(true),
+            "--text-layer-only" => opts.text_layer_only = Some(true),
+            // The password of an encrypted PDF (docling's `--pdf-password`;
+            // `--password` is the spelling PDF_CONFORMANCE.md used, #611).
+            "--pdf-password" | "--password" => match args.next() {
+                Some(v) => opts.pdf_password = Some(v),
+                None => {
+                    eprintln!("error: {arg} needs the PDF's password");
+                    return ExitCode::from(2);
+                }
+            },
             "--force-full-page-ocr" => opts.force_full_page_ocr = Some(true),
             "--no-text-panels" => opts.no_text_panels = Some(true),
             "--heading-hierarchy" => opts.heading_hierarchy = Some(true),
@@ -490,6 +516,13 @@ fn main() -> ExitCode {
                 Some(v) => output = Some(v),
                 None => {
                     eprintln!("error: --output needs a directory");
+                    return ExitCode::from(2);
+                }
+            },
+            "--output-file" => match args.next() {
+                Some(v) if !v.is_empty() => output_file = Some(v),
+                _ => {
+                    eprintln!("error: --output-file needs a file path");
                     return ExitCode::from(2);
                 }
             },
@@ -545,7 +578,9 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
-            "--images" => images = Some(args.next().unwrap_or_default()),
+            // `--image-export-mode` is docling's spelling (#611); the values
+            // and their rules are the same.
+            "--images" | "--image-export-mode" => images = Some(args.next().unwrap_or_default()),
             // #515: the Pandoc API the caller's `pandoc` reads. Only one is
             // written, so this is a check, not a choice: an unsupported
             // version fails here instead of feeding Pandoc a document it
@@ -568,13 +603,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
-            // PDF page window, 1-based inclusive: `--pages 3-7` or `--pages 3`.
-            "--pages" => match args.next() {
+            // PDF page window, 1-based inclusive: `--pages 3-7` or `--pages 3`
+            // (`--page-range` is docling's spelling, same syntax, #611).
+            "--pages" | "--page-range" => match args.next() {
                 // Checked by `validate()` below like every other option; a
                 // missing value is a usage error of its own.
                 Some(v) => opts.pages = Some(v),
                 None => {
-                    eprintln!("error: --pages needs a range like 1-10 (or a single page)");
+                    eprintln!("error: {arg} needs a range like 1-10 (or a single page)");
                     return ExitCode::from(2);
                 }
             },
@@ -759,7 +795,7 @@ fn main() -> ExitCode {
     // need them.
     let pages = opts.page_range().ok().flatten();
     let strict = opts.strict.unwrap_or(false);
-    let no_ocr = opts.no_ocr.unwrap_or(false);
+    let text_layer_only = opts.text_layer_only.unwrap_or(false);
     let page_break_placeholder = opts.page_break_placeholder.clone();
     let image_mode = match images.as_deref().unwrap_or("placeholder") {
         "placeholder" => ImageMode::Placeholder,
@@ -780,6 +816,28 @@ fn main() -> ExitCode {
     } else {
         ImageMode::Embedded
     };
+
+    // `--output-file PATH` (#611, docling's flag): exactly one input
+    // document in exactly one format, written to that path; `--output` is
+    // ignored, as in docling.
+    if let Some(target) = output_file {
+        if bench_warm.is_some() {
+            eprintln!("error: --bench-warm prints timings, not a document; drop --output-file");
+            return ExitCode::from(2);
+        }
+        let sources: Vec<&String> = inputs.iter().chain(&paths).collect();
+        let cfg = BatchCfg {
+            to,
+            image_mode,
+            pandoc_image_mode,
+            opts,
+            pages,
+            scale,
+            chunk: chunk_opts.clone(),
+            vlm,
+        };
+        return write_output_file(Path::new(&target), &sources, &cfg);
+    }
 
     // Batch mode (#205, #489): `--input <glob>` and/or several positional
     // sources fan one warm process over many files, writing results under
@@ -898,7 +956,9 @@ fn main() -> ExitCode {
             &source,
             runs,
             opts.no_table_former.unwrap_or(false),
-            no_ocr,
+            text_layer_only,
+            opts.ocr_disabled(),
+            opts.pdf_password.as_deref(),
         ) {
             Ok(avg) => {
                 // Bare seconds on stdout for the benchmark harness; a human line on stderr.
@@ -928,7 +988,9 @@ fn main() -> ExitCode {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "document".into());
-        return match write_page_images(&source.bytes, pages, scale, Path::new(""), &stem) {
+        let password = opts.pdf_password.as_deref();
+        return match write_page_images(&source.bytes, password, pages, scale, Path::new(""), &stem)
+        {
             Ok(written) => {
                 // Humans read stderr; stdout stays the bare paths for scripts
                 // (the dclx convention).
@@ -981,9 +1043,14 @@ fn main() -> ExitCode {
         let stream = match converter.convert_streaming_images(source, image_mode) {
             Ok(s) => s,
             Err(e) => {
-                if let Some(mut doc) =
-                    pdf_no_ocr_fallback(&e.to_string(), is_pdf, no_ocr, strict, &path, pages)
-                {
+                if let Some(mut doc) = pdf_text_layer_fallback(
+                    &e.to_string(),
+                    is_pdf,
+                    text_layer_only,
+                    strict,
+                    &path,
+                    pages,
+                ) {
                     doc.page_break_placeholder = page_break_placeholder.clone();
                     return output_document(doc, &to, image_mode, &path, &chunk_opts);
                 }
@@ -1020,10 +1087,10 @@ fn main() -> ExitCode {
                     // error can surface here — but only fall back while nothing
                     // has been printed, to never emit a document twice.
                     if !wrote_any {
-                        if let Some(mut doc) = pdf_no_ocr_fallback(
+                        if let Some(mut doc) = pdf_text_layer_fallback(
                             &e.to_string(),
                             is_pdf,
-                            no_ocr,
+                            text_layer_only,
                             strict,
                             &path,
                             pages,
@@ -1057,9 +1124,14 @@ fn main() -> ExitCode {
             result.document
         }
         Err(e) => {
-            if let Some(mut doc) =
-                pdf_no_ocr_fallback(&e.to_string(), is_pdf, no_ocr, strict, &path, pages)
-            {
+            if let Some(mut doc) = pdf_text_layer_fallback(
+                &e.to_string(),
+                is_pdf,
+                text_layer_only,
+                strict,
+                &path,
+                pages,
+            ) {
                 doc.page_break_placeholder = page_break_placeholder.clone();
                 return output_document(doc, &to, image_mode, &path, &chunk_opts);
             }
@@ -1071,22 +1143,24 @@ fn main() -> ExitCode {
 }
 
 /// Launch-blocker fallback: a bare `cargo install docling-cli` ships no ONNX
-/// models, so the first PDF a new user tries dies at pipeline startup. Under `--no-ocr` the pure-Rust text-layer path needs no
-/// runtime assets at all — when the failure is exactly "assets missing"
-/// (matched on the markers docling-pdf's enriched errors carry), convert the
-/// embedded text layer instead of failing. Any other error, or a run without
-/// `--no-ocr`, returns `None` and the (actionable) error prints as usual.
-fn pdf_no_ocr_fallback(
+/// models, so the first PDF a new user tries dies at pipeline startup. Under
+/// `--text-layer-only` (`--no-ocr` before 2.0, #611) the pure-Rust text-layer
+/// path needs no runtime assets at all — when the failure is exactly "assets
+/// missing" (matched on the markers docling-pdf's enriched errors carry),
+/// convert the embedded text layer instead of failing. Any other error, or a
+/// run without `--text-layer-only`, returns `None` and the (actionable) error
+/// prints as usual.
+fn pdf_text_layer_fallback(
     err: &str,
     is_pdf: bool,
-    no_ocr: bool,
+    text_layer_only: bool,
     strict: bool,
     path: &str,
     pages: Option<(usize, usize)>,
 ) -> Option<docling::DoclingDocument> {
     let assets_missing =
         err.contains("pdfium library is not installed") || err.contains("model not found at");
-    if !is_pdf || !no_ocr || !assets_missing {
+    if !is_pdf || !text_layer_only || !assets_missing {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
@@ -1094,7 +1168,7 @@ fn pdf_no_ocr_fallback(
     match docling::pdf_text_layer_pages(&bytes, &name, pages) {
         Ok(mut doc) if !doc.nodes.is_empty() => {
             eprintln!(
-                "warning: models unavailable — --no-ocr extracted the embedded text \
+                "warning: models unavailable — --text-layer-only extracted the embedded text \
                  layer only (run scripts/install/download_dependencies.sh for the full pipeline)"
             );
             doc.strict_markdown = strict;
@@ -1537,8 +1611,10 @@ fn batch_pipeline<'a>(
         let mut p = Pipeline::new()
             .map_err(|e| e.to_string())?
             .no_table_former(o.no_table_former.unwrap_or(false))
-            .no_ocr(o.no_ocr.unwrap_or(false))
-            .skip_ocr(o.skip_ocr.unwrap_or(false))
+            // docling-pdf's pre-2.0 names: its `no_ocr` is the text-layer
+            // fast path, its `skip_ocr` docling's do_ocr=False (#611).
+            .no_ocr(o.text_layer_only.unwrap_or(false))
+            .skip_ocr(o.ocr_disabled())
             .force_full_page_ocr(o.force_full_page_ocr.unwrap_or(false))
             .no_text_panels(o.no_text_panels.unwrap_or(false))
             .heading_hierarchy(docling::HeadingHierarchyOptions::enabled(
@@ -1577,13 +1653,14 @@ fn batch_pipeline<'a>(
 /// written paths in page order.
 fn write_page_images(
     bytes: &[u8],
+    password: Option<&str>,
     pages: Option<(usize, usize)>,
     scale: f32,
     dir: &Path,
     stem: &str,
 ) -> Result<Vec<std::path::PathBuf>, String> {
     let rendered =
-        docling::render_pdf_pages(bytes, None, pages, scale).map_err(|e| e.to_string())?;
+        docling::render_pdf_pages(bytes, password, pages, scale).map_err(|e| e.to_string())?;
     let mut written = Vec::with_capacity(rendered.len());
     for page in &rendered {
         let out = dir.join(format!("{stem}_page_{:04}.png", page.page_no));
@@ -1611,7 +1688,7 @@ fn batch_convert_one(
     // Announce the document up front — with its page count for PDFs, so long
     // conversions are attributable while the dots tick.
     let pages = (source.format == InputFormat::Pdf)
-        .then(|| docling::pdf_page_count(&source.bytes, None).ok())
+        .then(|| docling::pdf_page_count(&source.bytes, cfg.opts.pdf_password.as_deref()).ok())
         .flatten()
         .map(|n| match cfg.pages {
             // A --pages window converts only its slice of the document.
@@ -1648,7 +1725,8 @@ fn batch_convert_one(
         // not race a concurrent PDF conversion.
         let pages_written = {
             let _pdf_owner = pipe.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            write_page_images(&source.bytes, cfg.pages, cfg.scale, &dir, &stem)?
+            let password = cfg.opts.pdf_password.as_deref();
+            write_page_images(&source.bytes, password, cfg.pages, cfg.scale, &dir, &stem)?
         };
         written.push(pages_written.first().cloned().unwrap_or(out));
     }
@@ -1680,7 +1758,11 @@ fn batch_convert_one(
         match source.format {
             InputFormat::Pdf => {
                 let c = p
-                    .convert_outcome(&source.bytes, None, &source.name)
+                    .convert_outcome(
+                        &source.bytes,
+                        cfg.opts.pdf_password.as_deref(),
+                        &source.name,
+                    )
                     .map_err(|e| e.to_string())?;
                 partial.extend(c.completion.message());
                 c.document
@@ -1807,6 +1889,114 @@ struct BatchOutcome {
     secs: f64,
     pages: Option<usize>,
     partial: Vec<String>,
+}
+
+/// `--output-file PATH` (#611): docling's checks first, in its order and
+/// with its messages — exactly one input document (a directory, a glob or a ZIP that holds more
+/// is several) and exactly one output format (`--to images` writes a PNG per
+/// page, so it is not one file). The document then goes through the batch
+/// writer in a scratch directory beside PATH; the result moves onto PATH and
+/// whatever it wrote next to it — the `<stem>_artifacts/` of `--images
+/// referenced`, which its links point into relatively — into PATH's
+/// directory, where docling exports them too. Progress goes to stderr;
+/// nothing is printed on stdout.
+fn write_output_file(target: &Path, sources: &[&String], cfg: &BatchCfg) -> ExitCode {
+    let mut files = Vec::new();
+    for pattern in sources {
+        match expand_source(pattern) {
+            Ok((matched, base)) => files.extend(matched.into_iter().map(|f| (f, base.clone()))),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let (mut items, report) = expand_archives(files);
+    if items.len() != 1 || report.failed + report.skipped > 0 {
+        eprintln!(
+            "error: --output-file requires exactly one input document ({} given)",
+            items.len() + report.failed + report.skipped
+        );
+        return ExitCode::from(2);
+    }
+    if cfg.to.len() != 1 || cfg.to[0] == "images" {
+        eprintln!("error: --output-file requires exactly one output format");
+        if cfg.to.iter().any(|t| t == "images") {
+            eprintln!("(--to images writes one PNG per page: use --output DIR)");
+        }
+        return ExitCode::from(2);
+    }
+    let item = items.remove(0);
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("error: creating {}: {e}", dir.display());
+        return ExitCode::FAILURE;
+    }
+    let scratch = dir.join(format!(".docling-rs-{}.tmp", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let converter = batch_converter(cfg);
+    let pipe = std::sync::Mutex::new(None);
+    let mut archives = ArchiveCache::default();
+    let result = batch_convert_one(&item, &scratch, cfg, &converter, &pipe, &mut archives)
+        .and_then(|outcome| {
+            let written = outcome
+                .written
+                .first()
+                .cloned()
+                .ok_or_else(|| "the conversion wrote no output".to_string())?;
+            place_output(&written, target, dir)?;
+            Ok(outcome)
+        });
+    let _ = std::fs::remove_dir_all(&scratch);
+    match result {
+        Ok(outcome) => {
+            for problem in &outcome.partial {
+                eprintln!("warning: partial document: {problem}");
+            }
+            eprintln!(
+                "ok: {} -> {} ({:.1}s)",
+                item.label(),
+                target.display(),
+                outcome.secs
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {}: {e}", item.label());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Move `written` onto `target`, and everything else in its directory into
+/// `dir` — merged into an existing directory of the same name, a file
+/// replaced, nothing else of the user's touched.
+fn place_output(written: &Path, target: &Path, dir: &Path) -> Result<(), String> {
+    fn move_into(src: &Path, dst: &Path) -> Result<(), String> {
+        if src.is_dir() && dst.is_dir() {
+            for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                move_into(&entry.path(), &dst.join(entry.file_name()))?;
+            }
+            return Ok(());
+        }
+        if dst.is_file() {
+            std::fs::remove_file(dst).map_err(|e| format!("replacing {}: {e}", dst.display()))?;
+        }
+        std::fs::rename(src, dst).map_err(|e| format!("writing {}: {e}", dst.display()))
+    }
+    move_into(written, target)?;
+    let Some(from) = written.parent() else {
+        return Ok(());
+    };
+    for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        move_into(&entry.path(), &dir.join(entry.file_name()))?;
+    }
+    Ok(())
 }
 
 /// Convert every matched file, `--jobs` workers wide. Output paths print to
@@ -2201,16 +2391,20 @@ fn bench_warm_conversion(
     source: &SourceDocument,
     runs: usize,
     no_table_former: bool,
+    text_layer_only: bool,
     no_ocr: bool,
+    password: Option<&str>,
 ) -> Result<f64, String> {
     let mut pipeline = Pipeline::new()
         .map_err(|e| e.to_string())?
         .no_table_former(no_table_former)
-        .no_ocr(no_ocr);
+        // docling-pdf's pre-2.0 names (see `batch_pipeline`).
+        .no_ocr(text_layer_only)
+        .skip_ocr(no_ocr);
     let once = |p: &mut Pipeline| -> Result<(), String> {
         match source.format {
             InputFormat::Pdf => p
-                .convert(&source.bytes, None, &source.name)
+                .convert(&source.bytes, password, &source.name)
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
             InputFormat::Image => p

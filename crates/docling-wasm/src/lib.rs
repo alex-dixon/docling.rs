@@ -5,7 +5,7 @@
 //!
 //! Built on `docling` with `default-features = false` plus `pdf-text`: a PDF's
 //! **embedded text layer** converts too (pure-Rust parser, same extraction as
-//! the native `--no-ocr` flag — flat paragraphs, no headings/tables/pictures).
+//! the native `--text-layer-only` flag — flat paragraphs, no headings/tables/pictures).
 //! The ML pipelines (ONNX Runtime) and the HTTP image fetcher are
 //! compiled out — scanned PDFs, images, and audio are rejected at convert time
 //! with a clear message.
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn pdf_text_layer_converts() {
         // A text-layer PDF converts via the pure-Rust `pdf-text` path (the
-        // exact `--no-ocr` extraction: flat paragraphs in reading order).
+        // exact `--text-layer-only` extraction: flat paragraphs in reading order).
         // Under `cargo test --workspace`, feature unification swaps in the
         // full ML pipeline (which needs the models) — this test is about
         // the text-layer arm, so it only runs in the real wasm feature set.

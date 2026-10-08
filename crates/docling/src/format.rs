@@ -59,7 +59,7 @@ pub enum InputFormat {
     Visio,
     /// SVG (`.svg`) — a docling.rs extension (#212); docling does not accept
     /// SVG input. Mirrors the pdf / pdf-text split: the ML build rasterizes
-    /// (resvg) and rides the image pipeline; without ML — or under `--no-ocr`
+    /// (resvg) and rides the image pipeline; without ML — or under `--no-ocr` / `--text-layer-only`
     /// — `<text>` elements are extracted directly into flat paragraphs.
     Svg,
     /// Apple Pages (`.pages`) — a conformance format (#318, #383): mirrors

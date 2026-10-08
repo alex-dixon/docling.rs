@@ -120,6 +120,21 @@ documentation to the central table (`docs/OPTIONS.md`, `OPTIONS` in
 over `PipelineOptions`, per-format backend options and docling-serve's
 request model — so this is a docling.rs structure, not a parity item.
 
+**2.0: `no_ocr` means docling's `--no-ocr`** (#611, a breaking change). A
+script written for `docling convert` used to lose its headings, tables and
+pictures here, because `--no-ocr` was docling.rs's skip-everything fast path.
+Since 2.0 `--no-ocr` / `no_ocr` / `noOcr` / `DocumentConverter::no_ocr` is
+docling's `do_ocr=False` — layout and TableFormer run, OCR never does —
+`--skip-ocr` / `skip_ocr` / `skipOcr` / `::skip_ocr`, its old name, is still
+read, and the fast path is `--text-layer-only` / `text_layer_only` /
+`textLayerOnly` / `::text_layer_only` (Python's kwarg of that name, and
+`do_ocr`, are unchanged). Replaying the corpus, `--text-layer-only` gives
+byte for byte what `--no-ocr` gave on 1.104.3. The CLI also takes docling's
+spellings `--page-range`, `--image-export-mode`, `--no-tables`,
+`--pdf-password` (and the `pdf_password` option on every surface, which the
+engine always had but no caller passed) and `--output-file`; see
+`docs/OPTIONS.md`.
+
 ## 2. Format coverage
 
 Conformance is measured against the latest **published** docling (installed from
@@ -190,7 +205,7 @@ the same treatment is what closes those columns.
 | LaTeX | `latex.rs` + `latex_walker.rs` | docling's `LatexDocumentBackend` ported handler for handler on a port of pylatexenc 2.11's tolerant `LatexWalker` (#466): **8/8 Markdown exact, 7/8 JSON identical** vs docling 2.130+ groundtruth — `example_01/02` plus the six arXiv projects (`1706.03762`, `2305.03393`, `2310.06825`, `2412.19437`, `2501.00089`, `arXiv-2501.01300v2`), `\input` files parsed in place. The walker port is checked node for node against pylatexenc's own dump on every fixture (`scripts/dev/pylatexenc_dump.py` … `latex_walker::tests::dump_file`), because upstream's output is the node stream's: pylatexenc's default macro specs (`\paragraph{…}` is unknown to it, so the title becomes a sibling group), chars nodes ending at every macro, the swallowed post-macro space, comments, specials (`~`, `--`, `` `` `` dropped — upstream has no handler for them), tolerant recovery from stray braces and `\end`s. Handlers: the text buffer flushed by structural macros/environments/paragraph breaks (docling#4340), `\newcommand` bodies expanded by text, citations `[key]`, `href` → `[text](url)`, theorem/proof markers, `thebibliography` as a list group, `tabular` with the `\multicolumn`/`\multirow` lookup at the node's *document* offset into the environment's own text (usually a miss, then the macro's groups are cell text). Deviations: PDF figures are payload-less pictures (upstream: pypdfium2 render at 144 dpi); a `tikzpicture` is a payload-less picture without upstream's `meta.code`; `1706.03762`'s one `tabular` carries consistent span fields where upstream's stay 1 docling#4325 (2.130.0-33): `tabular*`, `tabularx` and `longtable` are tables (longtable with docling's own `[{` spec; `\endhead` & co. no cell content). |
 | MHTML (.mhtml/.mht) | `mhtml.rs` (mail-parser) → HTML backend | docling's `InputFormat.MHTML` (docling#4184, unreleased — it unwraps the archive inside its HTML backend); #386 mirrors its fixture (`tests/data/mhtml/sources/example.mhtml`, a Blink save of example.com; upstream ships no groundtruth for it — its tests assert programmatically — so its expected outputs live in our regression corpus as `example_docling.mhtml`, beside our older `example.mhtml`, a different save of the same page with the same Markdown) and its test matrix: the root is the first `multipart/related` entity, its `start` parameter names the root part by `Content-ID`, a `multipart/alternative` root yields its last HTML alternative, and a bare `text/html` message is its own root; no `Content-Type`, no `multipart/related`, an empty one, a `start` naming nothing or a non-HTML part, or an empty page **fail** the conversion as docling's do (we used to return an empty document, and to take the first `text/html` part anywhere); image resources are the selected scope's `image/*` parts only, keyed by `Content-Location` verbatim and resolved against the archive base, and by the normalized `cid:` (case-insensitive, brackets stripped), first part wins a duplicate key; the base is the root's `Content-Location` — a remote URL kept, `//host` made `https:`, a local path / `file:` URI / Windows drive path (either slash form) remapped under docling's synthetic `thismessage:/` so `<img src>` and `Content-Location` meet without touching the filesystem; archive images (and `data:` URIs) are embedded only under `fetch_images`, as docling's `HTMLBackendOptions.fetch_images` gates them — the default leaves placeholders (we used to embed unconditionally). Not ported: docling's fallback to its shared image loader (files beside the archive, remote fetches) for a reference the archive lacks. Kept beyond docling: `use_web_browser` pre-renders the page (docling rejects `render_page` for MHTML). Markdown on the mirrored fixture is identical |
 | RTF (.rtf) | `rtf.rs` (hand-rolled control-word tokenizer, #209) | **native, where docling reads RTF through LibreOffice** (upstream gained that path after this backend); paragraphs + bold/italic/strike runs, stylesheet/outline headings, `\listtext` lists (incl. multilevel numbering; list identity from `\ls`, or a top-level marker-kind flip when a writer omits it — #385), `\trowd` tables with `\cellx`-grid merge recovery, textbox content, HYPERLINK fields, embedded PNG/JPEG pictures, cp1250/1251/1252 + `\uN` unicode. Conformance (`scripts/conformance/rtf_conformance.sh`): 30 of the 31 corpus files in `tests/data/rtf/sources/` are LibreOffice-generated from the DOCX/DOC fixtures and diffed against **our own conversion of the source document** — 4/30 exact, 6/30 whitespace-normalized; the rest is dominated by LibreOffice round-trip artifacts (style bold/italic materialized into runs, equations linearized to text, checkbox form fields), not parser losses. #387 adds the 31st, `legacy_sample`, mirrored from upstream with **docling's own groundtruth**, so it is diffed against that real reference instead: **exact**, tables rendered without width padding to match the stored corpus (`--compact-tables`). #578: equations — `{\mmath{\*\moMath …}}`, OMML transliterated into control words (`\msSup`, `\mr`, `{\mchr \u8721?}`, …) — are rebuilt as OMML and converted by the DOCX backend's `omml.rs`, so an RTF equation reads as the same equation saved as `.docx` (`Synthetic equation:  $E=mc^{2}$`, docling's inline spacing; a paragraph of equations alone is a `$$…$$` `formula`); the `{\mmathPict …}` picture Word writes after each one for readers without math is dropped, where it used to surface as an `<!-- image -->` ahead of the paragraph and the formula itself was lost. An `\mmath` group holding only a picture (LibreOffice's save of a formula it could not express) still yields that picture. Upstream reads RTF through LibreOffice, whose conversion keeps the equation; the mirrored LibreOffice saves `omml_frac_superscript`, `omml_multi_equation_paragraph` and `table_with_equations` now match their DOCX originals' groundtruth equations |
-| SVG (.svg) | `svg.rs` + resvg rasterization (#212) | **docling.rs extension — docling does not accept SVG input**; mirrors the pdf/pdf-text split: ML builds rasterize (resvg, white-backed PNG, ~2048px long side) and ride the image pipeline (layout + OCR + tables); `pdf-text`/wasm builds and `--no-ocr` extract `<text>` elements directly — transform-aware (translate/scale/rotate/matrix) reading order, root `<title>`/`<desc>` as heading/lead paragraph, unrendered subtrees (`defs`, `clipPath`, `display:none`, …) skipped |
+| SVG (.svg) | `svg.rs` + resvg rasterization (#212) | **docling.rs extension — docling does not accept SVG input**; mirrors the pdf/pdf-text split: ML builds rasterize (resvg, white-backed PNG, ~2048px long side) and ride the image pipeline (layout + OCR + tables); `pdf-text`/wasm builds, `--no-ocr` and `--text-layer-only` extract `<text>` elements directly — transform-aware (translate/scale/rotate/matrix) reading order, root `<title>`/`<desc>` as heading/lead paragraph, unrendered subtrees (`defs`, `clipPath`, `display:none`, …) skipped |
 | StarOffice / OpenOffice 1.x & flat ODF (.sxw/.stw/.sxg, .sxi/.sti, .sxc/.stc, .fodt/.fods/.fodp) | `odf.rs` (shared ODF parser + local-name mapping layer, #215) | **docling.rs extension — docling reaches these only via LibreOffice**; the OO1.x predecessor schema differs from ODF mostly in namespace URIs, which this parser never matches on — the mapping layer covers the real deltas: `office:body` as the direct content container (dispatched by `office:class`), `ordered-list`/`unordered-list`, `tab-stop`, `text:level` headings, `style:properties` with `text-crossing-out`/`text-underline`. Flat ODF is the same document XML uncompressed in one file: styles ride the content DOM, embedded charts become inline `draw:object` documents, inline `binary-data` images gate on their decoded raster magic (SVM previews stay out). UOF is out of scope |
 | dBase / DIF / SYLK (.dbf, .dif, .slk/.sylk) | `interchange.rs` (#216) | **docling.rs extension — docling reads none of them**; native parsers, content-sniffed inside one backend so a misnamed file still converts. DIF and SYLK are sheet snapshots and run through the same flood-fill region splitting as ODS sheets — a `.dif`/`.slk` LibreOffice saves from a sheet converts **byte-identically** to our conversion of the `.ods` itself (verified on the corpus in `tests/data/interchange/`). dBase converts as one table: field names as the header row, deleted records skipped, `D` dates as ISO, `L` logicals as true/false, memo fields (a `.dbt` sidecar) empty, cp1252 high bytes |
 | Lotus 1-2-3 / Symphony / MS Works (.wk1–.wk4, .wks, .wrk, .123) | `lotus.rs` (#216) | **docling.rs extension — docling reads none of them**; native record-stream parsers following Gnumeric's lotus-123 importer, content-sniffed on the BOF so a misnamed file still converts (`.wks` is ambiguous: 1-2-3 rel 1A and MS Works v3 both used it — the BOF opcode decides). WK1/WKS cells (INTEGER/NUMBER/LABEL/FORMULA caches + STRING results), WK3/WK4/123 cells (extended floats, SMALLNUM, packed numbers, FORMULASTRING, multi-sheet), Works v3 cells incl. the packed-f32 SMALL_FLOAT. Sheets split into data regions like ODS: a `.wk1` of a sheet's data converts **byte-identically** to the `.slk` of the same sheet (pinned in `tests/data/lotus/`). Read-verified against LibreOffice's Lotus/Works import on the committed corpus (LO itself drops WK1 string-formula results; we keep the cached STRING record, following Gnumeric). Quattro Pro and the rest of the umbrella stay demand-gated |
@@ -596,15 +611,16 @@ These are deliberate or unavoidable divergences, not bugs.
     files (no cap — the pages land on the caller's own disk).
 
 11. **`do_ocr` and `do_table_structure` are independent** (#244), as in
-    docling: `skip_ocr` (`--skip-ocr`, serve/Node `skip_ocr`, Python
-    `do_ocr=False`) keeps layout detection and TableFormer but never loads or
-    runs OCR — pixel-only text comes back empty instead of erroring. The
-    Python binding's `do_ocr=False` previously skipped the whole ML stack
-    (layout and tables included), which docling's `do_ocr` never meant; that
-    fast path is now the docling.rs-only `text_layer_only=True` kwarg
-    (`--no-ocr` / `no_ocr` elsewhere). A missing OCR model also degrades to
-    the `skip_ocr` behavior with a one-time warning — docling errors there —
-    matching the repo-wide degradation-over-failure convention.
+    docling: `no_ocr` (`--no-ocr`, serve/Node `no_ocr`/`noOcr`, Python
+    `do_ocr=False`; `skip_ocr` before 2.0, still read) keeps layout detection
+    and TableFormer but never loads or runs OCR — pixel-only text comes back
+    empty instead of erroring. The Python binding's `do_ocr=False` previously
+    skipped the whole ML stack (layout and tables included), which docling's
+    `do_ocr` never meant; that fast path is the docling.rs-only
+    `text_layer_only` (`--text-layer-only` — before 2.0, #611, the CLI's
+    `--no-ocr`). A missing OCR model also degrades to the `no_ocr` behavior
+    with a one-time warning — docling errors there — matching the repo-wide
+    degradation-over-failure convention.
 
 12. **Sparse spreadsheets can skip empty cells** (#271, docling.rs-only
     options, both off by default): `skip_empty_cells` omits empty positions
@@ -735,7 +751,7 @@ These are deliberate or unavoidable divergences, not bugs.
     only once docling would render images and otherwise keeps the 2× crop;
     other scales resample the pipeline's 2.0 px/pt render instead of
     re-rendering the page (CatmullRom ≙ PIL BICUBIC, so above 2.0 it
-    upsamples); text-layer-only (`no_ocr`) pages and streamed Markdown carry
+    upsamples); text-layer-only (`text_layer_only`) pages and streamed Markdown carry
     no page image. Python's `convert(source, page_range=(a, b))` now takes
     docling's per-call window (#518; it was a native-only constructor
     kwarg).
@@ -853,7 +869,7 @@ deliberate scope boundary or a cosmetic, single-fixture polish gap.
   `Pipeline` for many PDFs, and the remote VLM pipeline (`pipeline: 'vlm'`).
 - **`docling-wasm`** — WebAssembly bindings: the declarative converters (and
   digital PDFs via the opt-in `pdf-text` text-layer feature — the same
-  extraction as `--no-ocr`, no ONNX) run fully client-side in the
+  extraction as `--text-layer-only`, no ONNX) run fully client-side in the
   browser, ~1.9 MB gzipped; scanned PDFs return a "needs OCR" error. Python
   docling has no equivalent. See the crate README.
 - **`docling-py`** — PyO3 bindings (PyPI package `docling-rs`): a strangler-fig

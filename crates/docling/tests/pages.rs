@@ -1,7 +1,7 @@
 //! e2e for issue #80: the `--pages A-B` window and memory-bounded
 //! referenced-image streaming.
 //!
-//! The PDF tests use the `no_ocr` path (text layer only), so they need no
+//! The PDF tests use the `text_layer_only` path (text layer only), so they need no
 //! native library and no ONNX models; the OCR/TableFormer ones skip cleanly
 //! when the models aren't around (e.g. a contributor checkout before
 //! `download_dependencies.sh`).
@@ -34,12 +34,12 @@ fn parse_page_range_accepts_ranges_and_single_pages() {
 #[test]
 fn pdf_page_window_converts_only_that_window() {
     let full = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .convert(pdf_source())
         .expect("full convert")
         .document;
     let windowed = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .page_range(2, 3)
         .convert(pdf_source())
         .expect("windowed convert")
@@ -54,7 +54,7 @@ fn pdf_page_window_converts_only_that_window() {
     // A window covering the whole document is exactly the full conversion
     // (`last` clamps past the end).
     let all = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .page_range(1, 999)
         .convert(pdf_source())
         .expect("clamped convert")
@@ -65,7 +65,7 @@ fn pdf_page_window_converts_only_that_window() {
 #[test]
 fn pdf_page_window_outside_document_is_an_error() {
     let err = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .page_range(50, 60)
         .convert(pdf_source())
         .expect_err("window past the last page");
@@ -269,9 +269,9 @@ fn pdf_pipeline_reports_confidence() {
 /// are the same extraction the pipeline sees), layout is the orphan-rescue
 /// set (cell confidence 1.0), and OCR never ran. Needs no models.
 #[test]
-fn no_ocr_conversion_reports_parse_confidence() {
+fn text_layer_only_conversion_reports_parse_confidence() {
     let doc = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .page_range(1, 2)
         .convert(pdf_source())
         .expect("convert")
@@ -281,7 +281,7 @@ fn no_ocr_conversion_reports_parse_confidence() {
     assert!(report.pages.contains_key(&1) && report.pages.contains_key(&2));
     let parse = report.parse_score().expect("text layer parsed");
     assert!(parse > 0.5, "clean text layer, got {parse}");
-    assert_eq!(report.ocr_score(), None, "no OCR on the no_ocr path");
+    assert_eq!(report.ocr_score(), None, "no OCR on the text-layer path");
 }
 
 /// TableFormer models present too (encoder/decoder/bbox next to the layout

@@ -85,8 +85,9 @@ pub(crate) struct StreamSettings {
     pub strict: bool,
     pub no_table_former: bool,
     pub no_text_panels: bool,
+    pub text_layer_only: bool,
     pub no_ocr: bool,
-    pub skip_ocr: bool,
+    pub pdf_password: Option<String>,
     pub force_full_page_ocr: bool,
     pub enrich: docling_pdf::EnrichmentOptions,
     pub page_range: Option<(usize, usize)>,
@@ -182,8 +183,9 @@ fn run_pdf(
     let mut pipeline = match docling_pdf::Pipeline::new().map(|p| {
         p.no_table_former(settings.no_table_former)
             .no_text_panels(settings.no_text_panels)
-            .no_ocr(settings.no_ocr)
-            .skip_ocr(settings.skip_ocr)
+            // docling-pdf's pre-2.0 names (see `DocumentConverter::ml_pipeline`).
+            .no_ocr(settings.text_layer_only)
+            .skip_ocr(settings.no_ocr)
             .force_full_page_ocr(settings.force_full_page_ocr)
             .ocr_lang(settings.ocr_lang)
             .ocr_engine(settings.ocr_engine)
@@ -202,8 +204,11 @@ fn run_pdf(
         }
     };
 
-    let result =
-        pipeline.convert_streaming_outcome(&source.bytes, None, &source.name, |nodes, links| {
+    let result = pipeline.convert_streaming_outcome(
+        &source.bytes,
+        settings.pdf_password.as_deref(),
+        &source.name,
+        |nodes, links| {
             let chunk = streamer.push(&nodes, &links);
             // Referenced mode: this push's images hit the disk as its Markdown is
             // emitted, keeping ~one page batch of image bytes resident. A write
@@ -218,7 +223,8 @@ fn run_pdf(
                 ));
             }
             Ok(())
-        });
+        },
+    );
 
     match result {
         Ok(completion) => {

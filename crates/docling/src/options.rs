@@ -89,10 +89,18 @@ pub struct ConvertOptions {
     pub pages: Option<String>,
     /// Per-document budget in seconds for the PDF pipeline (#497).
     pub document_timeout: Option<f64>,
-    /// Skip the whole ML stack: text layer only.
+    /// Skip the whole ML stack: text layer only (#611; `no_ocr` before 2.0).
+    pub text_layer_only: Option<bool>,
+    /// Keep layout + TableFormer, never run OCR — docling's `do_ocr=False`,
+    /// its CLI's `--no-ocr` (#611).
     pub no_ocr: Option<bool>,
-    /// Keep layout + TableFormer, never run OCR (docling's `do_ocr=False`).
+    /// `no_ocr` under its pre-2.0 name (#244), still read: either one set
+    /// skips OCR ([`Self::ocr_disabled`]). A field of its own rather than a
+    /// serde alias, so a body that sends both spellings (a pre-2.0 form)
+    /// is not a duplicate-field error.
     pub skip_ocr: Option<bool>,
+    /// The password of an encrypted PDF (docling's `--pdf-password`, #611).
+    pub pdf_password: Option<String>,
     /// OCR every page, discarding the text layer.
     pub force_full_page_ocr: Option<bool>,
     /// Skip TableFormer (geometric tables instead).
@@ -257,15 +265,20 @@ pub const OPTIONS: &[OptionInfo] = &[
     },
     row("document_timeout"),
     // Python keeps docling's positive spellings: `do_ocr`,
-    // `do_table_structure`, and the docling.rs-only `text_layer_only`.
+    // `do_table_structure` — and the docling.rs-only `text_layer_only`.
+    // `no_ocr` is docling's `--no-ocr` since 2.0 (#611); `skip_ocr` is its
+    // pre-2.0 name, still read (the CLI's `--skip-ocr` too) — Python has
+    // docling's `do_ocr` for both.
+    row("text_layer_only"),
     OptionInfo {
-        python: Some("text_layer_only"),
+        python: Some("do_ocr"),
         ..row("no_ocr")
     },
     OptionInfo {
-        python: Some("do_ocr"),
+        python: Some(""),
         ..row("skip_ocr")
     },
+    row("pdf_password"),
     row("force_full_page_ocr"),
     OptionInfo {
         python: Some("do_table_structure"),
@@ -463,11 +476,14 @@ impl ConvertOptions {
         if self.document_timeout.is_some() {
             c = c.document_timeout(self.document_timeout()?);
         }
-        if let Some(v) = self.no_ocr {
-            c = c.no_ocr(v);
+        if let Some(v) = self.text_layer_only {
+            c = c.text_layer_only(v);
         }
-        if let Some(v) = self.skip_ocr {
-            c = c.skip_ocr(v);
+        if self.no_ocr.is_some() || self.skip_ocr.is_some() {
+            c = c.no_ocr(self.ocr_disabled());
+        }
+        if self.pdf_password.is_some() {
+            c = c.pdf_password(self.pdf_password.clone());
         }
         if let Some(v) = self.force_full_page_ocr {
             c = c.force_full_page_ocr(v);
@@ -621,6 +637,12 @@ impl ConvertOptions {
                 .map_err(|e| OptionsError::new("ocr_lang", e)),
             crate::OcrEngine::PpOcr => Ok(None),
         }
+    }
+
+    /// Whether OCR is off: `no_ocr` or its pre-2.0 name `skip_ocr` (#611).
+    /// What a surface that builds the PDF pipeline itself reads.
+    pub fn ocr_disabled(&self) -> bool {
+        self.no_ocr.unwrap_or(false) || self.skip_ocr.unwrap_or(false)
     }
 
     /// `ocr_mode` parsed (#254); `None` when unset.
@@ -951,5 +973,28 @@ mod tests {
             );
             assert!(e.message.contains("DOCLING_RS_VLM_MODEL"), "{e}");
         }
+    }
+
+    /// #611: `no_ocr` is docling's `do_ocr=False` and `skip_ocr` its pre-2.0
+    /// name — either one turns OCR off, and a body carrying both (a pre-2.0
+    /// client sending both switches) parses instead of failing on a
+    /// duplicate field; `text_layer_only` and `pdf_password` are read too.
+    #[test]
+    fn ocr_spellings_and_pdf_password_parse() {
+        let both: ConvertOptions = serde_json::from_str(
+            r#"{"no_ocr": false, "skip_ocr": true, "text_layer_only": true,
+                "pdf_password": "1234"}"#,
+        )
+        .expect("both spellings parse");
+        assert!(both.ocr_disabled());
+        assert_eq!(both.text_layer_only, Some(true));
+        assert_eq!(both.pdf_password.as_deref(), Some("1234"));
+        let new: ConvertOptions = serde_json::from_str(r#"{"no_ocr": true}"#).unwrap();
+        assert!(new.ocr_disabled());
+        assert!(!ConvertOptions::default().ocr_disabled());
+        // Merged like every option: a later layer's spelling adds to the base.
+        let merged = new.merge_over(both);
+        assert!(merged.ocr_disabled());
+        assert_eq!(merged.pdf_password.as_deref(), Some("1234"));
     }
 }

@@ -109,8 +109,14 @@ pub struct DocumentConverter {
     ebcdic_layout: Option<String>,
     no_table_former: bool,
     no_text_panels: bool,
+    /// The text layer only, no models (#611: `--text-layer-only`, the
+    /// pre-2.0 `--no-ocr`).
+    text_layer_only: bool,
+    /// Skip OCR, keep layout and tables — docling's `do_ocr=False` (#611:
+    /// `--no-ocr`, `--skip-ocr`).
     no_ocr: bool,
-    skip_ocr: bool,
+    /// The password of an encrypted PDF (docling's `--pdf-password`, #611).
+    pdf_password: Option<String>,
     force_full_page_ocr: bool,
     /// OCR mode id (docling's `OcrMode`, #254); parsed at the ML call sites.
     ocr_mode: Option<String>,
@@ -209,8 +215,9 @@ impl Default for DocumentConverter {
             ebcdic_layout: None,
             no_table_former: false,
             no_text_panels: false,
+            text_layer_only: false,
             no_ocr: false,
-            skip_ocr: false,
+            pdf_password: None,
             force_full_page_ocr: false,
             ocr_mode: None,
             ocr_engine: None,
@@ -303,8 +310,10 @@ impl DocumentConverter {
     fn ml_pipeline(&self) -> Result<docling_pdf::Pipeline, docling_pdf::PdfError> {
         Ok(docling_pdf::Pipeline::new()?
             .no_table_former(self.no_table_former)
-            .no_ocr(self.no_ocr)
-            .skip_ocr(self.skip_ocr)
+            // docling-pdf's `Pipeline` keeps its pre-2.0 names: its `no_ocr`
+            // is the text-layer fast path, its `skip_ocr` docling's do_ocr=False.
+            .no_ocr(self.text_layer_only)
+            .skip_ocr(self.no_ocr)
             .no_text_panels(self.no_text_panels)
             .enrichments(self.enrich)
             .ocr_lang(self.ocr_lang_choice())
@@ -335,7 +344,7 @@ impl DocumentConverter {
         }
         // No text layer anywhere in the selection.
         #[cfg(feature = "pdf")]
-        if !self.no_ocr && !self.skip_ocr {
+        if !self.text_layer_only && !self.no_ocr {
             let pngs = djvu::rasterize_pages(&source.bytes, self.page_range)?;
             let mut pipeline = self
                 .ml_pipeline()
@@ -705,7 +714,8 @@ impl DocumentConverter {
     }
 
     /// Skip layout detection, OCR, and TableFormer entirely for PDF/image/METS
-    /// sources — no model load, no inference of any kind.
+    /// sources — no model load, no inference of any kind (#611; this was
+    /// `no_ocr` before 2.0).
     ///
     /// Off by default. When enabled, the PDF's embedded text cells are grouped by
     /// line and emitted as plain paragraphs in reading order: no headings, lists,
@@ -713,25 +723,39 @@ impl DocumentConverter {
     /// layout model. The fastest possible PDF path, but pages with no embedded
     /// text layer (scanned/image-only PDFs) yield no text at all — convert those
     /// without this flag. Implies [`no_table_former`](Self::no_table_former).
+    pub fn text_layer_only(mut self, enable: bool) -> Self {
+        self.text_layer_only = enable;
+        self
+    }
+
+    /// Never run OCR, but keep layout detection and TableFormer — docling's
+    /// `do_ocr=False`, its CLI's `--no-ocr` (#244; since 2.0, #611, the
+    /// meaning of `no_ocr` too). Unlike
+    /// [`text_layer_only`](Self::text_layer_only) (the skip-everything fast
+    /// path), structured output — headings, tables, pictures, reading order —
+    /// is preserved; only text that exists solely as pixels is lost (scanned
+    /// pages come back with empty regions, and the speculative OCR of large
+    /// embedded images never runs). The OCR model is never loaded, and
+    /// independently of this flag a *missing* OCR model degrades to the same
+    /// behavior with a warning instead of failing the conversion. SVG inputs
+    /// route to direct `<text>` extraction (their text is native — skipping
+    /// OCR must not lose it).
     pub fn no_ocr(mut self, disable: bool) -> Self {
         self.no_ocr = disable;
         self
     }
 
-    /// Never run OCR, but keep layout detection and TableFormer — docling's
-    /// independent `do_ocr=False` (#244), the counterpart of
-    /// [`no_table_former`](Self::no_table_former). Unlike
-    /// [`no_ocr`](Self::no_ocr) (the skip-everything fast path), structured
-    /// output — headings, tables, pictures, reading order — is preserved; only
-    /// text that exists solely as pixels is lost (scanned pages come back with
-    /// empty regions, and the speculative OCR of large embedded images never
-    /// runs). The OCR model is never loaded, and independently of this flag a
-    /// *missing* OCR model now degrades to the same behavior with a warning
-    /// instead of failing the conversion. SVG inputs route to direct
-    /// `<text>` extraction (their text is native — skipping OCR must not lose
-    /// it), like `no_ocr`.
-    pub fn skip_ocr(mut self, disable: bool) -> Self {
-        self.skip_ocr = disable;
+    /// [`no_ocr`](Self::no_ocr) under its pre-2.0 name, kept as an alias.
+    pub fn skip_ocr(self, disable: bool) -> Self {
+        self.no_ocr(disable)
+    }
+
+    /// The password of an encrypted PDF — docling's `--pdf-password` (#611).
+    /// A missing or wrong one fails the conversion with "the PDF is
+    /// encrypted: a password is required", as before. PDF sources on the ML
+    /// pipeline only (the `pdf-text` / wasm build reads unencrypted PDFs).
+    pub fn pdf_password(mut self, password: Option<String>) -> Self {
+        self.pdf_password = password;
         self
     }
 
@@ -739,7 +763,8 @@ impl DocumentConverter {
     /// an embedded text layer — docling's `force_full_page_ocr`. The escape
     /// hatch for text layers that exist but lie (broken encodings, subset
     /// fonts with garbage mappings, scanned forms with a few typed-in
-    /// fields). Off by default; ignored when [`no_ocr`](Self::no_ocr) is set,
+    /// fields). Off by default; ignored when [`no_ocr`](Self::no_ocr) or
+    /// [`text_layer_only`](Self::text_layer_only) is set,
     /// mirroring docling, where it is a sub-option of `do_ocr`. Applies to
     /// PDFs only — standalone images are always OCR'd.
     pub fn force_full_page_ocr(mut self, force: bool) -> Self {
@@ -803,7 +828,7 @@ impl DocumentConverter {
     /// `pages[n].image` at [`Self::images_scale`], which docling-core's
     /// `TableItem.get_image` / `FormulaItem.get_image` crop from. Off by
     /// default (one full-page PNG per page in memory). PDF/image ML pipeline
-    /// only; text-layer-only (`no_ocr`) and streaming conversions get none.
+    /// only; text-layer-only (`text_layer_only`) and streaming conversions get none.
     pub fn generate_page_images(mut self, enabled: bool) -> Self {
         self.generate_page_images = enabled;
         self
@@ -939,8 +964,9 @@ impl DocumentConverter {
             strict: self.strict,
             no_table_former: self.no_table_former,
             no_text_panels: self.no_text_panels,
+            text_layer_only: self.text_layer_only,
             no_ocr: self.no_ocr,
-            skip_ocr: self.skip_ocr,
+            pdf_password: self.pdf_password.clone(),
             force_full_page_ocr: self.force_full_page_ocr,
             enrich: self.enrich,
             page_range: self.page_range,
@@ -1169,7 +1195,9 @@ impl DocumentConverter {
                         p.force_full_page_ocr(self.force_full_page_ocr)
                             .pages(self.page_range)
                     })
-                    .and_then(|mut p| p.convert_outcome(&source.bytes, None, &source.name))
+                    .and_then(|mut p| {
+                        p.convert_outcome(&source.bytes, self.pdf_password.as_deref(), &source.name)
+                    })
                     .map_err(|e| ConversionError::with_source("pdf", e))?;
                 if let Some(message) = converted.completion.message() {
                     errors.push(crate::ErrorItem::timeout(message));
@@ -1177,18 +1205,19 @@ impl DocumentConverter {
                 converted.document
             }
             // SVG (#212), the ML route: rasterize (resvg, white-backed PNG at
-            // ~2048px long side) and ride the image pipeline. `--no-ocr` short-
-            // circuits to direct <text> extraction instead — the SVG carries
-            // its text natively, so skipping OCR must not mean losing it.
+            // ~2048px long side) and ride the image pipeline. `--no-ocr` /
+            // `--text-layer-only` short-circuit to direct <text> extraction
+            // instead — the SVG carries its text natively, so skipping OCR
+            // must not mean losing it.
             #[cfg(feature = "pdf")]
-            InputFormat::Svg if !self.no_ocr && !self.skip_ocr => {
+            InputFormat::Svg if !self.text_layer_only && !self.no_ocr => {
                 let png = crate::backend::svg::rasterize_png(&source.bytes)?;
                 self.ml_pipeline()
                     .and_then(|mut p| p.convert_image(&png, &source.name))
                     .map_err(|e| ConversionError::with_source("svg", e))?
             }
             // SVG without the ML pipeline (pdf-text / wasm builds) or with
-            // --no-ocr / --skip-ocr: pure-Rust <text> extraction, flat
+            // --no-ocr / --text-layer-only: pure-Rust <text> extraction, flat
             // paragraphs in reading order (the pdf / pdf-text split, applied
             // to SVG) — the SVG carries its text natively, so skipping OCR
             // must not mean losing it.
@@ -1234,7 +1263,7 @@ impl DocumentConverter {
             .map_err(|e| ConversionError::with_source(source.format.as_str(), e))?,
             // Without the full ML pipeline, `pdf-text` still converts a PDF's
             // embedded text layer (pure Rust — the wasm32 path), equivalent to
-            // `--no-ocr`: flat paragraphs, no headings/tables/pictures. A
+            // `--text-layer-only`: flat paragraphs, no headings/tables/pictures. A
             // scanned PDF has no text layer, so an empty document means "this
             // needs OCR" — say so instead of returning nothing.
             #[cfg(all(feature = "pdf-text", not(feature = "pdf")))]

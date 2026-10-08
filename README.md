@@ -70,7 +70,7 @@ never inspected:
 | Text & markup | `.md` `.markdown` `.txt` `.text` `.qmd` `.rmd` · AsciiDoc `.adoc` `.asciidoc` `.asc` (text inputs decode like docling's `decode_text`: BOM, UTF-8, then windows-1252 — or the encoding you name with `--encoding shift_jis` / the `encoding` option, docling's `TextBackendOptions.encoding`) · HTML `.html` `.htm` `.xhtml` (any charset: BOM, declared `<meta charset>`, UTF-8, windows-1252 fallback; the JSON is docling's own tree — heading nesting, `inline` groups of formatted runs with `formatting`/`hyperlink`, rich table cells, `furniture` chrome — structurally identical to upstream's on the whole corpus) · MHTML `.mhtml` `.mht` · LaTeX `.tex` `.latex` |
 | Word processing | DOCX `.docx` `.docm` `.dotx` `.dotm` (the JSON is docling's own tree — heading nesting, `inline` groups of formatting runs, list groups, rich cells, textbox/header/footer sections, comment back-refs — structurally identical to upstream's on the whole corpus; `mc:AlternateContent` is resolved before parsing — the modern `mc:Choice` the backend reads (text boxes, shape groups, 2010 extensions) over the `mc:Fallback`, body-level blocks included, #572) · Word 97–2004 `.doc` `.dot` (text boxes, headers/footers and footnotes included; Word 6.0/95 files as text-only paragraphs; Word for Windows 1.x/2.0 flat files — `wIdent` 0xA5DB, the pre-OLE layout — as paragraphs, tables, bold/italic and the standard heading styles, #566/#573) · OpenDocument `.odt` `.ott` (flat `.fodt`) · OpenOffice 1.x `.sxw` `.stw` `.sxg` · StarWriter 3–5 `.sdw` `.vor` · AbiWord `.abw` `.zabw` `.awt` · WordPerfect 5.x/6.x+ `.wpd` `.wp` `.wp5` `.wp6` `.wpt` · Microsoft Works 2–9 `.wps` · EPUB `.epub` · RTF `.rtf` (equations — `{\mmath …}`, OMML spelled in control words — are LaTeX like DOCX's, inline `$…$` or a `$$…$$` formula, #578) |
 | Presentations | PPTX `.pptx` `.pptm` `.potx` `.potm` `.ppsx` `.ppsm` (the JSON is docling's own tree — slide groups, `paragraph`/`title`/`list_item` items with docling's markers, list groups, non-empty table cells, pictures at the file's dpi, chart captions, notes and `comment_section` groups, every item's raw-EMU provenance — structurally identical to upstream's on the whole corpus; equations (`a14:m` OMML, which python-pptx and so docling drop) are LaTeX through the DOCX converter, a formula of their own or inline `$…$`, #575) · PowerPoint 97–2003 `.ppt` `.pot` `.pps` · OpenDocument `.odp` `.otp` (flat `.fodp`) · OpenOffice 1.x `.sxi` `.sti` · StarImpress/StarDraw 3–5 `.sdd` `.sda` |
-| Diagrams | Visio `.vsdx` `.vsdm` — pages as sections, shape text in reading order, connectors as a relations table · SVG `.svg` — rasterized (resvg) into the image ML pipeline; without ML or with `--no-ocr`, `<text>` elements extract directly into reading-order paragraphs |
+| Diagrams | Visio `.vsdx` `.vsdm` — pages as sections, shape text in reading order, connectors as a relations table · SVG `.svg` — rasterized (resvg) into the image ML pipeline; without ML or with `--no-ocr` / `--text-layer-only`, `<text>` elements extract directly into reading-order paragraphs |
 | Spreadsheets | XLSX `.xlsx` `.xlsm` (templates `.xltx` `.xltm`) · binary XLSB `.xlsb` · Excel 97–2004 `.xls` `.xlt` · OpenDocument `.ods` `.ots` (flat `.fods`) · OpenOffice 1.x `.sxc` `.stc` · CSV `.csv` `.tsv` · dBase `.dbf` · DIF `.dif` · SYLK `.slk` `.sylk` · Lotus 1-2-3 / Symphony `.wk1` `.wk2` `.wk3` `.wk4` `.wks` `.wrk` `.123` · Quattro Pro `.wq1` `.wq2` `.wb1` `.wb2` `.wb3` `.qpw` · MS Works 6–9 `.xlr` · MS Works `.wks` |
 | Apple iWork | Pages `.pages` · Numbers `.numbers` · Keynote `.key` — Pages mirrors docling's reader (#318, #383): both generations (2013+ `Index/*.iwa` and iWork '09 `index.xml`), title/heading labels from paragraph styles, tables in the text flow, text boxes, lists, inline images, bold/italic/strike/links, headers/footers/footnotes (furniture) and reviewer comments (notes), byte-identical Markdown on upstream's corpus; Keynote mirrors docling's reader too (#466, docling 2.130+): charts (`TSCH.ChartDrawableArchive`, docling#4376) as pictures classified by kind with the chart's data as a table and its shown title as the caption — the shape the PPTX backend gives a chart; all three container generations (`Index/*.iwa`, the 2018+ nested `Index.zip`, iWork '09 `index.apxl`), a `chapter` group and a page per slide, drawables in reading order with their boxes, title placeholders as titles, theme-inherited bullets, tables, presenter notes and comments on the notes layer — exact Markdown and structurally identical JSON on upstream's corpus; Numbers is a text-level extension (#213): sheet/table names + cell text |
 | XML dialects | JATS / USPTO / XBRL (`.xml` `.nxml`, content-sniffed) · DocLang `.dclg` |
@@ -318,7 +318,7 @@ honoring `pages=A-B` and a `scale` of 0.1–4.0 pixels per PDF point (default
 
 Options per request: `to=md|json|html|dclx|chunks|latex|pandoc|images` (`pandoc_api_version` checks the Pandoc API a `to=pandoc` caller expects), `strict`, `images=placeholder|embedded`,
 `skip_empty_cells`, `compact_tables`, `md_page_break_placeholder` (text between pages in Markdown),
-`no_ocr`, `skip_ocr`, `no_table_former`, `no_text_panels`, `heading_hierarchy`, `force_full_page_ocr`, `pages`,
+`no_ocr` (docling's `--no-ocr`; `skip_ocr` its pre-2.0 name), `text_layer_only`, `pdf_password`, `no_table_former`, `no_text_panels`, `heading_hierarchy`, `force_full_page_ocr`, `pages`,
 `do_picture_classification`, `do_code_enrichment`, `do_formula_enrichment` (#423: the
 [enrichment models](#enrichment-models-picture-classification-code-formulas), named as
 docling's `PdfPipelineOptions` flags; a request that changes the enrichment mix rebuilds the
@@ -406,7 +406,7 @@ import { convert } from "docling.rs-wasm";          // bundlers
 const markdown = convert(bytes, file.name, "md");
 ``` Digital PDFs convert too: the wasm build always compiles docling-pdf's
 pure-Rust text-layer parser (the `pdf-text` feature of the `docling` crate;
-the same extraction as `--no-ocr`: flat paragraphs, no headings/tables/pictures),
+the same extraction as `--text-layer-only`: flat paragraphs, no headings/tables/pictures),
 while scanned PDFs get a clear "needs OCR" error instead of an empty
 document. The crate ships a drop-a-file demo page under
 [`www/`](./crates/docling-wasm/www). Native builds are untouched: the
@@ -516,7 +516,7 @@ cannot ship on one surface and silently miss another.
 ```rust
 use docling::{ConvertOptions, DocumentConverter};
 
-let options: ConvertOptions = serde_json::from_str(r#"{"pages": "1-3", "skip_ocr": true}"#)?;
+let options: ConvertOptions = serde_json::from_str(r#"{"pages": "1-3", "no_ocr": true}"#)?;
 let converter = DocumentConverter::from_options(&options)?; // validated + applied
 ```
 
@@ -1019,27 +1019,32 @@ The CLI streams Markdown by default (`--no-stream` opts back into buffering;
 loading/running the TableFormer table-structure model, falling back to simple
 geometric table reconstruction from cell positions — no model load, no
 per-table inference, which can noticeably speed up parsing (especially in
-streaming mode) at the cost of table fidelity. `--no-ocr` goes further and
-skips layout detection, OCR, and TableFormer entirely — no ML inference at
-all, only the PDF's embedded text cells grouped into flat paragraphs by
-reading order (no headings/lists/tables/pictures). It's the fastest PDF path
-by a wide margin, but a scanned/image-only PDF (no embedded text layer) comes
-back empty rather than erroring, so a caller can detect that and re-convert
-without the flag. `--skip-ocr` (#244) sits between the two: it keeps layout
-detection and TableFormer but never runs (or loads) OCR — docling's
-independent `do_ocr=False`, the counterpart of `--no-table-former`. Structured
-output — headings, tables, pictures, reading order — survives; only text that
-exists solely as pixels is lost (scanned pages come back with empty regions,
-and the speculative OCR of large embedded images never runs). Independently of
-the flag, a *missing* OCR model now warns and degrades to the same behavior
-instead of failing the conversion (`skip_ocr` in serve/Node,
-`do_ocr=False` in Python — which now matches docling exactly; the old
-skip-everything meaning moved to the Python-only `text_layer_only=True`).
+streaming mode) at the cost of table fidelity. `--text-layer-only` goes
+further and skips layout detection, OCR, and TableFormer entirely — no ML
+inference at all, only the PDF's embedded text cells grouped into flat
+paragraphs by reading order (no headings/lists/tables/pictures). It's the
+fastest PDF path by a wide margin, but a scanned/image-only PDF (no embedded
+text layer) comes back empty rather than erroring, so a caller can detect
+that and re-convert without the flag. `--no-ocr` sits between the two, as in
+Python docling's `docling convert --no-ocr`: it keeps layout detection and
+TableFormer but never runs (or loads) OCR — docling's `do_ocr=False`, the
+counterpart of `--no-table-former`. Structured output — headings, tables,
+pictures, reading order — survives; only text that exists solely as pixels
+is lost (scanned pages come back with empty regions, and the speculative OCR
+of large embedded images never runs). **Before 2.0 `--no-ocr` was the
+text-layer fast path** (#611): it is `--text-layer-only` now, and
+`--skip-ocr`, the old name of today's `--no-ocr` (#244), still works.
+Independently of the flag, a *missing* OCR model warns and degrades to the
+same behavior instead of failing the conversion (`no_ocr` in serve/Node,
+`do_ocr=False` in Python, which matches docling exactly;
+`text_layer_only` everywhere is the skip-everything path).
 `--force-full-page-ocr` is the opposite escape hatch
 (docling's `force_full_page_ocr`): OCR every page from its rendered image
 even when it carries a text layer — for layers that exist but lie (broken
 encodings, subset fonts with garbage mappings, a scanned form with a few
-typed-in field values). Ignored under `--no-ocr`, mirroring docling. The same
+typed-in field values). Ignored under `--no-ocr`, mirroring docling (and
+under `--text-layer-only`); docling's deprecated `--force-ocr` is this flag
+or `--ocr-mode full_page`. The same
 switch is available on every surface: `force_full_page_ocr(bool)` on the
 library builder, a `force_full_page_ocr` option in docling-rs-serve, the
 `force_full_page_ocr=` kwarg in Python, `forceFullPageOcr` in Node, and the
@@ -1171,7 +1176,7 @@ kwarg, Node option):
   (docling-core's `PageItem.image`), so docling-core's
   `TableItem.get_image(doc)` / `FormulaItem.get_image(doc)` crop from it and
   full-page consumers need not re-render the PDF. Off by default (a PNG per
-  page, held in memory); `--no-ocr` (text layer only) pages have no render,
+  page, held in memory); `--text-layer-only` pages have no render,
   and streamed Markdown carries no page map. Both options are on every
   surface: `DocumentConverter::images_scale` / `::generate_page_images` and
   `Pipeline::images_scale` / `::generate_page_images` / `::set_images`,
@@ -1358,6 +1363,24 @@ reachable for the cascade to resolve — inline `<style>` works offline, but a
 saved page that links external stylesheets needs those fetchable (with a base
 host). Without the feature, `--use-web-browser` is a clear error rather than a
 silent no-op.
+
+## Python `docling convert` spellings (#611)
+
+A script written for Python docling's CLI runs as is: `--page-range 1-4`
+(`--pages`), `--image-export-mode referenced` (`--images`), `--no-tables`
+(`--no-table-former`), `--no-ocr` (never OCR, keep layout and tables —
+docling's meaning since 2.0; the old text-layer fast path is
+`--text-layer-only`), `--pdf-password SECRET` (also `--password`) and
+`--output-file PATH`, which writes the one result to exactly that path —
+docling's rule: exactly one input document and one `--to` format, else an
+error naming the failing condition; `--images referenced` pictures land in
+`<stem>_artifacts/` next to it. docling's deprecated `--force-ocr` has no
+alias: it is `--force-full-page-ocr` (or `--ocr-mode full_page`).
+
+```bash
+docling-rs report.pdf --page-range 1-3 --no-ocr --output-file out/report.md
+docling-rs locked.pdf --pdf-password 1234 --to json --output-file locked.json
+```
 
 ## Batch conversion — several sources, `--input` / `--output`
 

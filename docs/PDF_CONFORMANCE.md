@@ -90,9 +90,11 @@ the default build is a native PDF library:
 
 **Encrypted PDFs** open through lopdf: the empty user password most
 "protected" files carry is tried silently, the document's password
-(`--password`, `PdfMeta::open_with_password`) decrypts at load, and a missing
-or wrong one is the error docling raises (`pdf: the PDF is encrypted: a
-password is required` — the `pdf_password` snapshot records it).
+(docling's `--pdf-password`, also `--password` — the `pdf_password` option
+on every surface since #611, `PdfMeta::open_with_password`) decrypts at load,
+and a missing one is the error docling raises (`pdf: the PDF is encrypted: a
+password is required` — the `pdf_password` snapshot records it; a wrong one
+says `… and the password is wrong`).
 
 ### The renderer (`crates/docling-pdf/src/render/`)
 
@@ -741,7 +743,7 @@ better, byte-identical where the change is structural:
 | SIMD page downscale (`fast_image_resize`, same kernel; **default**) | `image.resize` stage **17×** faster (2607 → 152 ms / 16 pages) |
 | TableFormer KV cache fed back as `ort` values (no per-step copy) | ~9% faster table-structure decode, byte-identical |
 | One shared lazy TableFormer across the worker pool | peak RSS **3.8 → 1.9 GB** (4 workers); table-free docs 682 → 331 MB |
-| Single shared line/word contraction pass | `--no-ocr` conversion ~1.25× faster, identical output |
+| Single shared line/word contraction pass | `--text-layer-only` (then `--no-ocr`) conversion ~1.25× faster, identical output |
 | Per-document font + form caches in the text parser | 3–10% off `textparse` here; far more on CJK/form-heavy PDFs |
 | True-KV-cache decoder export (`decoder_kv.onnx`, optional) | parity at corpus table sizes; O(past)/step for very large tables |
 | Dynamic-batch `decoder_kv.onnx`: a page's tables decode in one lockstep loop | decode steps shared across tables; byte-identical (see round four below) |
@@ -1029,7 +1031,7 @@ the 60-page slice is byte-identical with and without them, on the serial path
 
 - **The page window loaded every page.** `for_each_page` walked
   `pages.iter()` from page 0 and skipped to `first`, so every page before the
-  window was loaded and closed — ~0.7 ms each. A one-page `--no-ocr`
+  window was loaded and closed — ~0.7 ms each. A one-page `--text-layer-only`
   window over the 1913-page .NET reference took 3.1 s, of which the parser
   accounted for 0.4 s; indexing the window with `pages.get(i)` brings it to
   **0.85 s** (the full pipeline on that page: 4.1 → 2.1 s, `--pages 1-60`
