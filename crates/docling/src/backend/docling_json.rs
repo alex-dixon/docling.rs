@@ -412,6 +412,7 @@ fn table_item(item: &Value, root: &Value, doc: &mut DoclingDocument) {
             cells: None,
             caption: caption_of(item, root),
             caption_parent: caption_parent_of(item, root),
+            caption_location: None,
         }));
     }
 }
@@ -425,6 +426,7 @@ fn picture_item(item: &Value, root: &Value, doc: &mut DoclingDocument) {
     doc.push(Node::Picture {
         caption: caption_of(item, root),
         caption_parent: caption_parent_of(item, root),
+        caption_location: None,
         caption_href: None,
         image: picture_image(item),
         classification: None,

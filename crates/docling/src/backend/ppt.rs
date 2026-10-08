@@ -574,6 +574,7 @@ fn grid_table(cells: &[(Anchor, ShapeText)]) -> Option<Table> {
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 

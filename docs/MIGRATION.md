@@ -399,7 +399,34 @@ pointed at the wrong item).
   comment back-refs and — for a backend with page geometry — their exact
   `prov` (a `TreeProv`: the backend's own box, origin tag and charspan),
   serialized as they are — which is how the HTML, DOCX and PPTX JSON are
-  structurally identical to upstream's (see those rows).
+  structurally identical to upstream's (see those rows). In the PDF/image
+  JSON every text item carries its page and box (#609): a picture's, table's
+  or code block's caption its own caption region — not the item's, as
+  docling's `ReadingOrderModel._add_caption_or_footnote` assigns it, within
+  1.5 pt of upstream's boxes on the groundtruth corpus (the 0–511 grid's step) — and a
+  checkbox item its region, so chunks made of captions or checkboxes have a
+  page. Glyphs stacked at one x (a chart's y-axis ticks, each set by its own
+  `cm`) are separate text cells with their own boxes, as in docling-parse —
+  the text layer used to glue them into one cell boxed like the first. A
+  checkbox item is docling's `checkbox_selected` / `checkbox_unselected`
+  text with the bare option label (it was a `text` item spelling `- [ ] …`;
+  the task-list marker is Markdown's rendering). And, a deliberate
+  divergence (#609): a line marked as a checkbox on the page is its own
+  checkbox item even when the layout model read the checklist as one text
+  block — marked by a **drawn** square in front of it (a stroked `re`, or
+  four stroked edges as ReportLab draws them, 5–24 pt, unfilled or filled
+  white; `checkbox.rs` finds them in the text parser's path walk, ink inside
+  checks it, a colour-filled square is a legend swatch and does not count)
+  or by a **ballot-box glyph** it opens with (`☐ □ ▢ ◻ ❏ ❐ ❑ ❒` unchecked,
+  `☑ ☒ ⊠ ⌧ ▣ 🗹 🗷 🗵` checked; a line with two, `☐ Yes ☐ No`, stays text). The
+  glyph leaves the label, and on a region the model did label a checkbox the
+  mark sets the state. docling has only the model's labels: on the
+  reporter's checklist it prints two garbled paragraphs (`First option Third
+  option` / `Second option Fourth option`), here four `- [ ]` items; on a
+  `☐ / ☒ / ☑` list it prints `- [ ] ☑ Bread` (Heron reads that box as
+  empty), here `- [x] Bread`. Symbol-font boxes that reach the text layer as
+  Private Use Area codes or ASCII bytes (Wingdings `o`, `þ`) are not read as
+  boxes — without the font the code is ambiguous.
 - **Image extraction** is wired for PDF/image (figure-region crops) and DOCX/PPTX
   (embedded blobs) by default, and — opt-in via
   `DocumentConverter::fetch_images` (`--fetch-images`) — for HTML/EPUB `<img src>`:

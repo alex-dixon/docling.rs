@@ -1113,10 +1113,17 @@ impl Builder {
                 }
             }
             Node::CheckboxItem { checked, text } => {
-                // JSON keeps the task-list form as a plain text item (the
-                // `checkbox_selected`/`checkbox_unselected` label is DocLang-only).
-                let mark = if *checked { "- [x] " } else { "- [ ] " };
-                Some(self.add_text("text", &format!("{mark}{text}"), parent, json!({})))
+                // docling's checkbox item: the `checkbox_selected` /
+                // `checkbox_unselected` label carries the state and the text
+                // is the bare option label (right_to_left_03's `خير`,
+                // docx_checkboxes' `Orange juice`). The `- [x]` task-list
+                // marker is Markdown's rendering of it, not item text (#609).
+                let label = if *checked {
+                    "checkbox_selected"
+                } else {
+                    "checkbox_unselected"
+                };
+                Some(self.add_text(label, text, parent, json!({})))
             }
             Node::Code {
                 language,
@@ -1212,13 +1219,14 @@ impl Builder {
                 image,
                 classification,
                 caption_parent,
+                caption_location,
             } => Some(self.add_picture(
                 caption.as_deref(),
                 caption_href.as_deref(),
                 image.as_ref(),
                 classification.as_deref().map(classification_meta),
                 parent,
-                *caption_parent,
+                (*caption_parent, *caption_location),
             )),
             // A chart is a picture item in the JSON with docling's chart
             // meta — `classification` (the chart kind, as the one prediction)
@@ -1696,7 +1704,13 @@ impl Builder {
         // `TableItem.captions`), added before the grid so its box isn't
         // inherited by a later item.
         let (captions, children) = match t.caption.as_deref().filter(|c| !c.is_empty()) {
-            Some(cap) => self.add_caption(cap, json!({}), &self_ref, parent, t.caption_parent),
+            Some(cap) => self.add_caption(
+                cap,
+                json!({}),
+                &self_ref,
+                parent,
+                (t.caption_parent, t.caption_location),
+            ),
             None => (Vec::new(), Vec::new()),
         };
         let data = table_data_with(t, raw);
@@ -1720,14 +1734,17 @@ impl Builder {
     /// hangs (#390), returning the `captions` entry for the item and the
     /// item's own `children` (the caption, when it is the item's child).
     /// The caption never consumes the item's pending provenance — the item
-    /// takes its box first.
+    /// takes its box first. Its own box, when the backend kept one (the PDF
+    /// pipeline's caption region, #609), becomes the caption's `prov` on the
+    /// item's page, as docling's reading-order model gives every caption the
+    /// cluster it came from; without one the caption has no `prov`.
     fn add_caption(
         &mut self,
         text: &str,
         extra: Value,
         self_ref: &str,
         parent: &str,
-        choice: CaptionParent,
+        (choice, location): (CaptionParent, Option<[u16; 4]>),
     ) -> (Vec<Value>, Vec<Value>) {
         // docling's PDF pipeline parents the caption to the item; every
         // declarative backend leaves `add_text`'s default — the body — even
@@ -1738,6 +1755,9 @@ impl Builder {
             CaptionParent::Container | CaptionParent::ContainerAfter => parent,
             CaptionParent::Body => "#/body",
         };
+        if self.cur_page > 0 && location.is_some() {
+            self.pending_loc = location;
+        }
         let cap_ref = json!({ "$ref": self.add_text("caption", text, cap_parent, extra) });
         match choice {
             CaptionParent::Item => return (vec![cap_ref.clone()], vec![cap_ref]),
@@ -1764,7 +1784,7 @@ impl Builder {
         image: Option<&crate::PictureImage>,
         meta: Option<Value>,
         parent: &str,
-        caption_parent: CaptionParent,
+        caption_at: (CaptionParent, Option<[u16; 4]>),
     ) -> String {
         let self_ref = format!("#/pictures/{}", self.pictures.len());
         // Take the picture's own provenance before the caption text is added —
@@ -1779,7 +1799,7 @@ impl Builder {
                     Some(href) => json!({ "hyperlink": href }),
                     None => json!({}),
                 };
-                self.add_caption(cap, extra, &self_ref, parent, caption_parent)
+                self.add_caption(cap, extra, &self_ref, parent, caption_at)
             }
             None => (Vec::new(), Vec::new()),
         };
@@ -2125,6 +2145,7 @@ mod tests {
             }),
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
         doc
     }
@@ -2213,6 +2234,7 @@ mod tests {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         let v: Value = serde_json::from_str(&doc.export_to_json()).unwrap();
         let data = &v["tables"][0]["data"];
@@ -2374,6 +2396,104 @@ mod tests {
     /// denormalized against the page into BOTTOMLEFT points. Without markers
     /// (every declarative backend) the JSON stays exactly as before: empty
     /// `pages`, `prov: []` even for located nodes.
+    /// #609: a PDF caption and a checkbox item carry their own page and box.
+    /// docling's reading-order model gives every caption the cluster it came
+    /// from (`_add_caption_or_footnote`), not its picture's or table's, and
+    /// a checkbox is a text item like any other.
+    #[test]
+    fn captions_and_checkboxes_carry_their_own_prov() {
+        let mut doc = DoclingDocument::new("t");
+        doc.push(Node::PageInfo {
+            page_no: 1,
+            width: 512.0,
+            height: 512.0,
+        });
+        doc.push(Node::Located {
+            location: [64, 64, 448, 256],
+            inner: Box::new(Node::Picture {
+                caption: Some("Figure 1".into()),
+                caption_href: None,
+                image: None,
+                classification: None,
+                caption_parent: CaptionParent::Item,
+                caption_location: Some([64, 264, 448, 280]),
+            }),
+        });
+        doc.push(Node::PageInfo {
+            page_no: 2,
+            width: 512.0,
+            height: 512.0,
+        });
+        doc.push(Node::Located {
+            location: [64, 120, 448, 300],
+            inner: Box::new(Node::Table(Table {
+                rows: vec![vec!["a".into()]],
+                caption: Some("Table 1".into()),
+                caption_parent: CaptionParent::Item,
+                caption_location: Some([64, 100, 300, 112]),
+                ..Table::default()
+            })),
+        });
+        doc.push(Node::Located {
+            location: [64, 320, 200, 332],
+            inner: Box::new(Node::CheckboxItem {
+                checked: false,
+                text: "First option".into(),
+            }),
+        });
+        let v: Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let texts = v["texts"].as_array().unwrap();
+        let by_text = |t: &str| texts.iter().find(|x| x["text"] == t).expect(t).clone();
+        let bbox = |p: &Value| {
+            let b = &p["prov"][0]["bbox"];
+            [&b["l"], &b["t"], &b["r"], &b["b"]].map(|x| x.as_f64().unwrap())
+        };
+        // Figure 1: its own box (grid == points on a 512 page, flipped to
+        // BOTTOMLEFT), not the picture's.
+        let fig = by_text("Figure 1");
+        assert_eq!(fig["prov"][0]["page_no"], 1);
+        assert_eq!(bbox(&fig), [64.0, 248.0, 448.0, 232.0]);
+        assert_eq!(fig["prov"][0]["charspan"], serde_json::json!([0, 8]));
+        assert_eq!(fig["parent"]["$ref"], "#/pictures/0");
+        assert_eq!(v["pictures"][0]["prov"][0]["bbox"]["t"], 448.0);
+        // Table 1 on page 2, its own box; the table keeps its own.
+        let tab = by_text("Table 1");
+        assert_eq!(tab["prov"][0]["page_no"], 2);
+        assert_eq!(bbox(&tab), [64.0, 412.0, 300.0, 400.0]);
+        assert_eq!(v["tables"][0]["prov"][0]["bbox"]["t"], 392.0);
+        // The checkbox item.
+        let cb = by_text("First option");
+        assert_eq!(cb["label"], "checkbox_unselected");
+        assert_eq!(cb["prov"][0]["page_no"], 2);
+        assert_eq!(bbox(&cb), [64.0, 192.0, 200.0, 180.0]);
+        assert!(texts
+            .iter()
+            .all(|t| !t["prov"].as_array().unwrap().is_empty()));
+
+        // Without a caption box (every declarative backend) the caption
+        // still has no prov, and nothing else moves.
+        let mut plain = DoclingDocument::new("t");
+        plain.push(Node::PageInfo {
+            page_no: 1,
+            width: 512.0,
+            height: 512.0,
+        });
+        plain.push(Node::Located {
+            location: [64, 64, 448, 256],
+            inner: Box::new(Node::Picture {
+                caption: Some("Figure 1".into()),
+                caption_href: None,
+                image: None,
+                classification: None,
+                caption_parent: CaptionParent::Item,
+                caption_location: None,
+            }),
+        });
+        let v: Value = serde_json::from_str(&plain.export_to_json()).unwrap();
+        assert_eq!(v["texts"][0]["prov"], serde_json::json!([]));
+        assert_eq!(v["pictures"][0]["prov"][0]["bbox"]["t"], 448.0);
+    }
+
     #[test]
     fn page_markers_produce_pages_and_prov() {
         let mut doc = DoclingDocument::new("t");
@@ -2547,6 +2667,7 @@ mod tests {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
 
         let v: Value = serde_json::from_str(&doc.export_to_json()).unwrap();
@@ -3337,6 +3458,7 @@ mod tests {
             image: None,
             classification: None,
             caption_parent,
+            caption_location: None,
         }
     }
 

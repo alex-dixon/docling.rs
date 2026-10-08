@@ -1172,6 +1172,7 @@ fn add_figure(out: &mut Out, parent: Option<usize>, node: XmlNode, fig_base: Opt
         image: image.clone(),
         classification: None,
         caption_parent: Default::default(),
+        caption_location: None,
     });
     let captions = if fig_text.is_empty() {
         Vec::new()
@@ -1518,6 +1519,7 @@ fn parse_jats_table(table: XmlNode) -> Option<Table> {
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 

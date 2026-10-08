@@ -792,6 +792,7 @@ fn odf_picture(styles: &Styles, img: XmlNode) -> Option<Node> {
             image,
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         })
     };
     if href.is_empty() {
@@ -1372,6 +1373,7 @@ fn parse_table(table: XmlNode, styles: &Styles) -> Option<Table> {
         caption: None,
         cells: None,
         caption_parent: Default::default(),
+        caption_location: None,
     })
 }
 
@@ -1667,6 +1669,7 @@ pub(crate) fn emit_sheet_regions(
                 cells: None,
                 caption: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             }));
         }
     }

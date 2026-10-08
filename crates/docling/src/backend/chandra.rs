@@ -123,6 +123,7 @@ fn nodes_for(label: &str, inner: &str) -> Vec<Node> {
             image: None,
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }],
         "Title" => text_node(inner, |t| Node::Heading { level: 1, text: t }),
         "Section-Header" => text_node(inner, |t| Node::Heading { level: 2, text: t }),

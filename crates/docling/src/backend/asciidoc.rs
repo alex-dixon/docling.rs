@@ -648,6 +648,7 @@ impl Parser<'_> {
             image,
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
         self.list_continuation = false;
     }
@@ -732,6 +733,7 @@ impl Parser<'_> {
                 cells: None,
                 caption: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             };
             // docling's `_populate_table_as_grid` writes a cell only where
             // the source row has one — a short row leaves its tail empty in

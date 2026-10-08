@@ -1912,6 +1912,7 @@ impl NodeBuilder {
             image,
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         };
         let plain = plain.trim().to_string();
         // Prose is Markdown-escaped like every other backend's text nodes
@@ -2095,6 +2096,7 @@ impl NodeBuilder {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         self.last_ilfo = None;
         self.run_base = None;

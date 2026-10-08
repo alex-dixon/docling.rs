@@ -505,6 +505,7 @@ impl MarkdownBackend {
                 cells: None,
                 caption: None,
                 caption_parent: Default::default(),
+                caption_location: None,
             }));
         }
     }

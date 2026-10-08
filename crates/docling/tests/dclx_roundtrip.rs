@@ -46,6 +46,7 @@ fn tag_shaped_cell_text_round_trips() {
         cells: None,
         caption: None,
         caption_parent: Default::default(),
+        caption_location: None,
     }));
     let back = roundtrip(&doc);
     let md = back.export_to_markdown();
@@ -117,6 +118,7 @@ fn picture_assets_are_packaged_and_read_back() {
             }),
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
     }
     let bytes = docling::dclx::to_dclx_bytes(&doc);

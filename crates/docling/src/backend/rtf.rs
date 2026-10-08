@@ -599,6 +599,7 @@ impl<'a> Parser<'a> {
                     image: Some(image),
                     classification: None,
                     caption_parent: Default::default(),
+                    caption_location: None,
                 });
             }
             return;
@@ -616,6 +617,7 @@ impl<'a> Parser<'a> {
             }),
             classification: None,
             caption_parent: Default::default(),
+            caption_location: None,
         });
     }
 
@@ -843,6 +845,7 @@ impl<'a> Parser<'a> {
             cells: None,
             caption: None,
             caption_parent: Default::default(),
+            caption_location: None,
         }));
         self.prev_was_list = false;
     }

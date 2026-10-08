@@ -359,14 +359,15 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
         // Recompose a ligature: pdfium decomposes one font glyph (Latin fi/ffi,
         // Arabic lam-alef) into several chars at the *same* loose box. Append them
         // into one cell so the contraction never inserts a space inside it.
-        // "Same box": an upright glyph compares its x span (as it always
-        // has); a quad glyph compares both baseline corners as points — its
-        // reading axis is not x, and glyphs stacked at one position along the
-        // baseline (chart ticks set one under another) are separate cells.
+        // "Same box": both baseline corners match as points, upright or
+        // rotated. A ligature's chars share one box, baseline included; glyphs
+        // stacked one under another at the same x (a chart's y-axis ticks
+        // `3`…`8`, each placed by its own `cm`) are separate cells — comparing
+        // the x span alone glued those into one `345678` cell carrying the
+        // first tick's box (#609), where docling-parse keeps six.
         if let Some(last) = cells.last_mut() {
-            let near = |ax: f64, ay: f64, bx: f64, by: f64| {
-                (ax - bx).abs() < 0.5 && (g.quad.is_none() || (ay - by).abs() < 0.5)
-            };
+            let near =
+                |ax: f64, ay: f64, bx: f64, by: f64| (ax - bx).abs() < 0.5 && (ay - by).abs() < 0.5;
             if near(last.rx0, last.ry0, q[0], q[1]) && near(last.rx1, last.ry1, q[2], q[3]) {
                 // Overprint duplicate: the *same* character re-stamped, offset by a
                 // fraction of its width (a kashida/elongation segment re-drawn for
@@ -609,5 +610,34 @@ mod tests {
         assert_eq!(words, ["MODE", "to"]);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "MODE to");
+    }
+
+    /// #609: a chart's y-axis ticks set one under another at the same x (each
+    /// tick placed by its own `cm`, same `Tm`) are six line cells with their
+    /// own boxes, as in docling-parse — not one `345678` cell with the first
+    /// tick's box. A ligature decomposed at one box still recomposes.
+    #[test]
+    fn stacked_glyphs_at_one_x_stay_separate_cells() {
+        let at = |ch: char, b: f32| Glyph {
+            lb: b,
+            lt: b + 10.0,
+            b,
+            t: b + 10.0,
+            ..glyph(ch, 98.0, 103.0)
+        };
+        let ticks: Vec<Glyph> = "345678"
+            .chars()
+            .enumerate()
+            .map(|(k, ch)| at(ch, 316.0 + 25.92 * k as f32))
+            .collect();
+        let lines = line_cells(&ticks, 792.0, true);
+        let texts: Vec<&str> = lines.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["3", "4", "5", "6", "7", "8"]);
+        assert!(lines.windows(2).all(|w| w[0].t > w[1].t));
+
+        let lig = [glyph('f', 10.0, 16.0), glyph('i', 10.0, 16.0)];
+        let lines = line_cells(&lig, 792.0, true);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "fi");
     }
 }
