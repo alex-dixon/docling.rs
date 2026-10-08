@@ -259,12 +259,13 @@ class DocumentConverter:
       the result is a ``PARTIAL_SUCCESS`` whose ``.errors`` says why. ``None``
       (default) is unlimited. Also accepted docling-shaped, via
       ``pipeline_options.document_timeout``.
-    * ``pdf_password`` — the password of an encrypted PDF (#611; docling's
-      ``--pdf-password``). Also accepted docling-shaped, as the PDF
-      ``PdfFormatOption``'s ``backend_options.password`` (a plain string or
-      a pydantic ``SecretStr``). The same password opens an encrypted
-      Office document — ``.docx``/``.xlsx``/``.pptx``/``.doc``/``.xls``/
-      ``.ppt`` (#625, beyond docling, which reads none).
+    * ``password`` — the password of an encrypted PDF (#611; docling's
+      ``--pdf-password``) or Office document — ``.docx``/``.xlsx``/
+      ``.pptx``/``.doc``/``.xls``/``.ppt`` (#625, beyond docling, which
+      reads none). ``pdf_password``, its earlier name, still works. Also
+      accepted docling-shaped, as the PDF ``PdfFormatOption``'s
+      ``backend_options.password`` (a plain string or a pydantic
+      ``SecretStr``).
     * ``page_range`` — ``(first, last)``, a 1-based inclusive PDF page window
       for every conversion (#518). docling takes it per call —
       ``convert(source, page_range=(a, b))`` — which works here too and wins
@@ -314,6 +315,7 @@ class DocumentConverter:
         vlm_prompt: Optional[str] = None,
         vlm_max_tokens: Optional[int] = None,
         document_timeout: Optional[float] = None,
+        password: Optional[str] = None,
         pdf_password: Optional[str] = None,
         page_range: Optional[Tuple[int, int]] = None,
         images_scale: Optional[float] = None,
@@ -327,8 +329,10 @@ class DocumentConverter:
     ):
         ensure_env(artifacts_path)
 
-        if pdf_password is None:
-            pdf_password = _pdf_backend_password(format_options)
+        if password is None:
+            password = pdf_password
+        if password is None:
+            password = _pdf_backend_password(format_options)
         # A PDF/IMAGE PdfFormatOption overrides the shorthand kwargs.
         pdf_opts = _pdf_pipeline_options(format_options)
         if pdf_opts is not None:
@@ -476,7 +480,7 @@ class DocumentConverter:
             vlm_prompt=vlm_prompt,
             vlm_max_tokens=vlm_max_tokens,
             document_timeout=document_timeout,
-            pdf_password=pdf_password,
+            password=password,
             page_range=_page_range(page_range),
             images_scale=images_scale,
             generate_page_images=generate_page_images,

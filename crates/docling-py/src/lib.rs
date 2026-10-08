@@ -131,7 +131,7 @@ struct PyDocumentConverter {
     /// docling's `document_timeout` (#497), for the warm pipeline.
     document_timeout: Option<std::time::Duration>,
     /// The password of an encrypted PDF (#611), for the warm pipeline.
-    pdf_password: Option<String>,
+    password: Option<String>,
     /// `pipeline="vlm"` (#304): resolved once in `new` (a bad configuration
     /// raises there, not mid-conversion); `convert` then routes PDF/image
     /// through the remote VLM instead of the local ML stack.
@@ -143,8 +143,10 @@ impl PyDocumentConverter {
     /// Engine knobs mapped from docling's converter/`PdfPipelineOptions` on the
     /// Python side:
     /// * `fetch_images` — resolve remote/local `<img src>` for HTML/EPUB/MHTML/JATS.
-    /// * `pdf_password` — the password of an encrypted PDF (docling's
-    ///   `--pdf-password` / `PdfBackendOptions.password`, #611).
+    /// * `password` — the password of an encrypted PDF (docling's
+    ///   `--pdf-password` / `PdfBackendOptions.password`, #611) or Office
+    ///   document (.docx/.xlsx/.pptx/.doc/.xls/.ppt, #625). `pdf_password`,
+    ///   its earlier name, is still read.
     /// * `do_ocr` — run OCR on scanned PDF/image pages (docling's `do_ocr`).
     ///   `do_ocr=False` now matches docling exactly (#244): layout detection
     ///   and TableFormer still run, only OCR is skipped — previously it
@@ -265,6 +267,7 @@ impl PyDocumentConverter {
         vlm_prompt = None,
         vlm_max_tokens = None,
         document_timeout = None,
+        password = None,
         pdf_password = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -304,8 +307,10 @@ impl PyDocumentConverter {
         vlm_prompt: Option<String>,
         vlm_max_tokens: Option<usize>,
         document_timeout: Option<f64>,
+        password: Option<String>,
         pdf_password: Option<String>,
     ) -> PyResult<Self> {
+        let password = password.or(pdf_password);
         // A malformed window (0-based, reversed) raises here instead of
         // silently selecting nothing (#518).
         let page_range = check_page_range(page_range)?;
@@ -333,7 +338,7 @@ impl PyDocumentConverter {
             document_timeout,
             text_layer_only: Some(text_layer_only),
             no_ocr: Some(!do_ocr),
-            pdf_password: pdf_password.clone(),
+            password: password.clone(),
             force_full_page_ocr: Some(force_full_page_ocr),
             no_table_former: Some(!do_table_structure),
             no_text_panels: Some(no_text_panels),
@@ -400,7 +405,7 @@ impl PyDocumentConverter {
             images: opts.image_output(),
             page_range,
             document_timeout: opts.document_timeout().map_err(value_err)?,
-            pdf_password,
+            password,
             vlm,
         })
     }
@@ -632,7 +637,7 @@ impl PyDocumentConverter {
             let slot = std::sync::Arc::clone(&self.pdf_pipeline);
             let window = page_range.or(self.page_range);
             let default_window = self.page_range;
-            let password = self.pdf_password.clone();
+            let password = self.password.clone();
             return run_interruptible(py, move || {
                 let mut slot = slot.lock().unwrap();
                 let pipeline = slot

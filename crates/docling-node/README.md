@@ -295,8 +295,8 @@ The constructor takes the same PDF/image options as the one-shot calls —
 `ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`, `noOcr` (docling's `--no-ocr`:
 never OCR, keep layout and tables; `skipOcr` is its pre-2.0 name),
 `textLayerOnly` (the text layer only, no models — what `noOcr` meant before
-2.0, #611), `pdfPassword` (an encrypted PDF's password, #611 — or an
-encrypted Office document's, #625), `forceFullPageOcr`, `noTextPanels`, `headingHierarchy`, `pages`,
+2.0, #611), `password` (an encrypted PDF's or Office document's password,
+#611/#625; `pdfPassword`, its earlier name, still works), `forceFullPageOcr`, `noTextPanels`, `headingHierarchy`, `pages`,
 `imagesScale` / `pageImages`
 (picture-crop resolution in px per point and the JSON page images, docling's
 `images_scale` / `generate_page_images`, #520), `documentTimeout` (a per-document
@@ -419,7 +419,7 @@ models, #388), and `pages: 'A-B'` converts only that
 then `convertFile` / `convert` / `convertFileAsync` / `convertAsync` /
 `convertFileStreaming` / `streamFileMarkdown`. It reads `strict`, the
 enrichment switches and every PDF/image option (`ocrEngine`, `ocrLang`,
-`ocrMode`, `ocrScale`, `noOcr`, `textLayerOnly`, `pdfPassword`,
+`ocrMode`, `ocrScale`, `noOcr`, `textLayerOnly`, `password`,
 `forceFullPageOcr`, `noTextPanels`, `headingHierarchy`, `pages`, `imagesScale`,
 `pageImages`) from
 `converterOptions` (#471).

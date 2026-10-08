@@ -87,7 +87,7 @@ pub(crate) struct StreamSettings {
     pub no_text_panels: bool,
     pub text_layer_only: bool,
     pub no_ocr: bool,
-    pub pdf_password: Option<String>,
+    pub password: Option<String>,
     pub force_full_page_ocr: bool,
     pub enrich: docling_pdf::EnrichmentOptions,
     pub page_range: Option<(usize, usize)>,
@@ -206,7 +206,7 @@ fn run_pdf(
 
     let result = pipeline.convert_streaming_outcome(
         &source.bytes,
-        settings.pdf_password.as_deref(),
+        settings.password.as_deref(),
         &source.name,
         |nodes, links| {
             let chunk = streamer.push(&nodes, &links);

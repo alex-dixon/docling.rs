@@ -28,7 +28,7 @@ fn fixture(name: &str) -> PathBuf {
 
 fn convert_with(source: SourceDocument, password: Option<&str>) -> Result<String, String> {
     DocumentConverter::new()
-        .pdf_password(password.map(str::to_string))
+        .password(password.map(str::to_string))
         .convert(source)
         .map(|r| r.document.export_to_markdown())
         .map_err(|e| e.to_string())

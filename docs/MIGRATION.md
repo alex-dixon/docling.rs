@@ -131,14 +131,16 @@ read, and the fast path is `--text-layer-only` / `text_layer_only` /
 `do_ocr`, are unchanged). Replaying the corpus, `--text-layer-only` gives
 byte for byte what `--no-ocr` gave on 1.104.3. The CLI also takes docling's
 spellings `--page-range`, `--image-export-mode`, `--no-tables`,
-`--pdf-password` (and the `pdf_password` option on every surface, which the
-engine always had but no caller passed) and `--output-file`; see
+`--pdf-password` (and the `password` option on every surface — `pdf_password`
+before #625, still read — which the engine always had but no caller passed)
+and `--output-file`; see
 `docs/OPTIONS.md`.
 
 **Encrypted Office documents (#624, #625).** A password-protected `.doc`,
 `.docx`, `.xls`, `.xlsx`, `.ppt` or `.pptx` converts with the password —
-`--password` / `--password-file` on the CLI, `pdf_password` everywhere else
-(the PDF option, named after docling's, now opens Office documents too) — a
+`--password` / `--password-file` on the CLI, `password` everywhere else (the
+PDF password option, renamed from docling's `pdf_password`, which stays
+accepted; `--pdf-password` too) — a
 docling.rs extension: docling's password option is PDF-only, and an
 encrypted Office file fails there. Decrypted: OOXML Agile (Office 2010+) and
 Standard (2007) encryption, RC4 CryptoAPI (2002+, 40- to 128-bit) and Office

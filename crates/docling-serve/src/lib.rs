@@ -42,7 +42,8 @@
 //!   keep layout + TableFormer, never OCR — docling's `do_ocr=False`, its
 //!   `--no-ocr`; `skip_ocr` is its pre-2.0 name, still read; `text_layer_only`
 //!   skips the whole ML stack, what `no_ocr` meant before 2.0, #611)
-//! - `pdf_password` — the password of an encrypted PDF (#611)
+//! - `password` — the password of an encrypted PDF or Office document
+//!   (#611, #625; `pdf_password`, docling's name, is read too)
 //! - `do_picture_classification`, `do_code_enrichment`,
 //!   `do_formula_enrichment` — the opt-in enrichment models (#423; docling's
 //!   `PdfPipelineOptions` flags of the same names, the CLI's
@@ -1751,7 +1752,7 @@ fn rasterize_pages(
         .pipeline
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let password = options.convert.pdf_password.as_deref();
+    let password = options.convert.password.as_deref();
     let pages = docling::render_pdf_pages(&source.bytes, password, range, scale)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(pages
@@ -2490,7 +2491,7 @@ fn convert_document_inner(
             pipeline.set_document_timeout(o.document_timeout().map_err(bad)?);
             let mut converted = match source.format {
                 InputFormat::Pdf => pipeline
-                    .convert_outcome(&source.bytes, o.pdf_password.as_deref(), &source.name)
+                    .convert_outcome(&source.bytes, o.password.as_deref(), &source.name)
                     .map(|c| Converted {
                         errors: c
                             .completion

@@ -66,6 +66,7 @@ paths:
         - { $ref: "#/components/parameters/no_ocr" }
         - { $ref: "#/components/parameters/skip_ocr" }
         - { $ref: "#/components/parameters/text_layer_only" }
+        - { $ref: "#/components/parameters/password" }
         - { $ref: "#/components/parameters/pdf_password" }
         - { $ref: "#/components/parameters/force_full_page_ocr" }
         - { $ref: "#/components/parameters/no_table_former" }
@@ -125,7 +126,8 @@ paths:
                 no_ocr: { type: boolean }
                 skip_ocr: { type: boolean, deprecated: true }
                 text_layer_only: { type: boolean }
-                pdf_password: { type: string, format: password }
+                password: { type: string, format: password }
+                pdf_password: { type: string, format: password, description: "Alias of password." }
                 force_full_page_ocr: { type: boolean }
                 no_table_former: { type: boolean }
                 no_text_panels: { type: boolean }
@@ -685,13 +687,17 @@ components:
             PDF/image — skip layout/OCR/TableFormer; emit the embedded text
             layer only (what `no_ocr` meant before 2.0, #611). Wins over
             `no_ocr` when both are set.
-        pdf_password:
+        password:
           type: string
           format: password
           description: >-
             The password of an encrypted PDF (docling's `--pdf-password`, #611)
             or Office document — .docx/.xlsx/.pptx/.doc/.xls/.ppt (#625). A
             missing or wrong one is a 422 saying so.
+        pdf_password:
+          type: string
+          format: password
+          description: Alias of `password` (docling's PDF-only name).
         force_full_page_ocr:
           type: boolean
           default: false
@@ -1091,7 +1097,7 @@ components:
         `pipeline` (vlm; others select by input format), `ocr_engine`
         (tesseract / tesserocr / tesseract_cli → Tesseract, the rest → the
         built-in PP-OCR), `ocr_lang`, `target_type` (zip). This server's own
-        option names (`strict`, `pdf_password`, …) are read too; everything
+        option names (`strict`, `password`, …) are read too; everything
         else is ignored.
       properties:
         to_formats: { type: array, items: { type: string } }
@@ -1118,8 +1124,10 @@ components:
       { name: skip_ocr, in: query, deprecated: true, schema: { type: boolean } }
     text_layer_only:
       { name: text_layer_only, in: query, schema: { type: boolean } }
+    password:
+      { name: password, in: query, schema: { type: string, format: password } }
     pdf_password:
-      { name: pdf_password, in: query, schema: { type: string, format: password } }
+      { name: pdf_password, in: query, schema: { type: string, format: password }, description: "Alias of password." }
     force_full_page_ocr:
       { name: force_full_page_ocr, in: query, schema: { type: boolean } }
     no_table_former:

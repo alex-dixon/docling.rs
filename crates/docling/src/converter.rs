@@ -115,9 +115,8 @@ pub struct DocumentConverter {
     /// Skip OCR, keep layout and tables — docling's `do_ocr=False` (#611:
     /// `--no-ocr`, `--skip-ocr`).
     no_ocr: bool,
-    /// The password of an encrypted PDF (docling's `--pdf-password`, #611)
-    /// or Office document (#625).
-    pdf_password: Option<String>,
+    /// The password of an encrypted PDF (#611) or Office document (#625).
+    password: Option<String>,
     force_full_page_ocr: bool,
     /// OCR mode id (docling's `OcrMode`, #254); parsed at the ML call sites.
     ocr_mode: Option<String>,
@@ -218,7 +217,7 @@ impl Default for DocumentConverter {
             no_text_panels: false,
             text_layer_only: false,
             no_ocr: false,
-            pdf_password: None,
+            password: None,
             force_full_page_ocr: false,
             ocr_mode: None,
             ocr_engine: None,
@@ -751,21 +750,27 @@ impl DocumentConverter {
         self.no_ocr(disable)
     }
 
-    /// The password of an encrypted PDF — docling's `--pdf-password` (#611).
-    /// A missing or wrong one fails the conversion with "the PDF is
-    /// encrypted: a password is required", as before. PDF sources on the ML
-    /// pipeline only (the `pdf-text` / wasm build reads unencrypted PDFs).
+    /// The password of an encrypted document: a PDF (docling's
+    /// `--pdf-password`, #611) or an Office document (#625, a docling.rs
+    /// extension — docling reads none): `.docx`/`.xlsx`/`.pptx` (Agile and
+    /// Standard encryption), `.doc`/`.xls`/`.ppt` (RC4 and RC4 CryptoAPI).
     ///
-    /// The same password opens an encrypted Office document (#625, a
-    /// docling.rs extension — docling reads none): `.docx`/`.xlsx`/`.pptx`
-    /// (Agile and Standard encryption), `.doc`/`.xls`/`.ppt` (RC4 and RC4
-    /// CryptoAPI), in every build. Without it, or when it is wrong, the
-    /// format's default password is tried (Excel's `VelvetSweatshop`,
-    /// PowerPoint's for modify-password-only files); otherwise the error says
-    /// the document is encrypted, or that the password is wrong.
-    pub fn pdf_password(mut self, password: Option<String>) -> Self {
-        self.pdf_password = password;
+    /// A missing or wrong PDF password fails the conversion with "the PDF is
+    /// encrypted: a password is required"; PDF passwords are read on the ML
+    /// pipeline only (the `pdf-text` / wasm build reads unencrypted PDFs).
+    /// Office documents decrypt in every build. Without a password, or when
+    /// it is wrong, the format's default password is tried (Excel's
+    /// `VelvetSweatshop`, PowerPoint's for modify-password-only files);
+    /// otherwise the error says the document is encrypted, or that the
+    /// password is wrong.
+    pub fn password(mut self, password: Option<String>) -> Self {
+        self.password = password;
         self
+    }
+
+    /// [`password`](Self::password) under docling's PDF-only name.
+    pub fn pdf_password(self, password: Option<String>) -> Self {
+        self.password(password)
     }
 
     /// OCR every PDF page from its rendered image even when the page carries
@@ -975,7 +980,7 @@ impl DocumentConverter {
             no_text_panels: self.no_text_panels,
             text_layer_only: self.text_layer_only,
             no_ocr: self.no_ocr,
-            pdf_password: self.pdf_password.clone(),
+            password: self.password.clone(),
             force_full_page_ocr: self.force_full_page_ocr,
             enrich: self.enrich,
             page_range: self.page_range,
@@ -1056,8 +1061,7 @@ impl DocumentConverter {
         // file the backend reads; without a key that opens it, the error
         // says the document is encrypted — not "bad zip" or an empty result.
         let unlocked;
-        let source = match crate::backend::offcrypto::unlock(source, self.pdf_password.as_deref())?
-        {
+        let source = match crate::backend::offcrypto::unlock(source, self.password.as_deref())? {
             Some(bytes) => {
                 unlocked = SourceDocument {
                     bytes,
@@ -1230,7 +1234,7 @@ impl DocumentConverter {
                             .pages(self.page_range)
                     })
                     .and_then(|mut p| {
-                        p.convert_outcome(&source.bytes, self.pdf_password.as_deref(), &source.name)
+                        p.convert_outcome(&source.bytes, self.password.as_deref(), &source.name)
                     })
                     .map_err(|e| ConversionError::with_source("pdf", e))?;
                 if let Some(message) = converted.completion.message() {

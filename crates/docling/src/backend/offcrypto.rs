@@ -25,8 +25,8 @@
 //!   streams are left as they are; XOR obfuscation is reported as
 //!   unsupported.
 //!
-//! The password is the converter's one password (`pdf_password` — named for
-//! docling's PDF option, which it also is). Without one, or when it does not
+//! The password is the converter's one password (`password`, which opens
+//! encrypted PDFs too; `pdf_password` is docling's name for it). Without one, or when it does not
 //! open the file, the format's documented default password is tried, as
 //! Office does: Excel encrypts a workbook whose only protection is
 //! structural with `VelvetSweatshop`, and PowerPoint encrypts a presentation

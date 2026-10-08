@@ -100,7 +100,7 @@ limit — a container cgroup or `systemd` `RuntimeMaxSec` / `MemoryMax`.
 - `DOCLING_SERVE_API_KEY` (or `--api-key`) is docling-serve's own access key
   (below). Prefer the variable: a command-line flag shows up in the process
   list.
-- A document password (`pdf_password`; CLI `--password`) is only handed to
+- A document password (`password`; CLI `--password`) is only handed to
   the decryption — never logged or echoed in an error. On a shared machine
   give the CLI `--password-file PATH` instead: `--password` shows up in the
   process list. Office documents also get their format's **published
