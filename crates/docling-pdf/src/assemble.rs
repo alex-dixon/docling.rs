@@ -1902,31 +1902,72 @@ fn assign_cells(regions: &[Region], cells: &[TextCell]) -> Vec<Vec<usize>> {
     owned
 }
 
-/// Give every line that has a drawn checkbox square in front of it its own
-/// checkbox region (#609). The layout model often reads a checklist as one
-/// `text` (or `list_item`) block — on the reporter's ReportLab page all four
-/// options are one region, which then printed as `First option Second option
-/// …`, and docling itself splits it into two garbled paragraphs. The squares
-/// ([`crate::checkbox`]) say where each item starts: a region whose lines
-/// carry one splits into a `checkbox_selected` / `checkbox_unselected` region
-/// per boxed line (its box spans the square and the line, and a following
-/// line without a square — a wrapped label — stays with it), so assembly
-/// emits [`Node::CheckboxItem`]s exactly as for the model's own checkbox
-/// labels. Lines above the first square stay one region of the original
-/// label. The first piece replaces the region in place and the rest are
-/// appended, so per-region slices indexed by the original order (table
-/// grids, enrichments — neither applies to text) stay aligned.
+/// The ballot-box glyph a checkbox line can open with (#609): `Some(checked)`.
+/// Empty boxes — `☐`, the white squares `□ ▢ ◻` and the shadowed `❏ ❐ ❑ ❒`
+/// Word's checkbox bullets use — are unchecked; `☑ ☒ ⊠ ⌧ ▣ 🗹 🗷 🗵` are
+/// checked. A bare tick or cross (`✓ ✗`) is a list bullet
+/// ([`LIST_BULLET_MARKERS`]), not a box. Symbol-font boxes that reach the text
+/// layer as Private Use Area codes or as their ASCII byte (Wingdings `o`,
+/// `þ`) are not recognized: without the font the code is ambiguous (`U+F06F`
+/// is Symbol's omicron too).
+pub(crate) fn checkbox_glyph(c: char) -> Option<bool> {
+    match c {
+        '☐' | '□' | '▢' | '◻' | '❏' | '❐' | '❑' | '❒' => Some(false),
+        '☑' | '☒' | '⊠' | '⌧' | '▣' | '\u{1F5F9}' | '\u{1F5F7}' | '\u{1F5F5}' => {
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+/// `text` without its leading ballot-box glyph and the space after it — a
+/// checkbox item's label is the option text, the box is its state.
+pub(crate) fn strip_checkbox_glyph(text: &str) -> &str {
+    let t = text.trim_start();
+    match t.chars().next() {
+        Some(c) if checkbox_glyph(c).is_some() => t[c.len_utf8()..].trim_start(),
+        _ => text,
+    }
+}
+
+/// Give every checklist line its own checkbox region (#609). The layout
+/// model often reads a checklist as one `text` (or `list_item`) block — on
+/// the reporter's ReportLab page all four options are one region, which then
+/// printed as `First option Second option …`, and docling itself splits it
+/// into two garbled paragraphs. What marks an item is on the page: a drawn
+/// square just left of the line ([`crate::checkbox`]), or a ballot-box glyph
+/// the line opens with ([`checkbox_glyph`]: `☐ Yes`, `☒ Done`). A region
+/// whose lines carry either splits into a `checkbox_selected` /
+/// `checkbox_unselected` region per marked line (its box spans the square
+/// and the line; a following unmarked line — a wrapped label — stays with
+/// it), so assembly emits [`Node::CheckboxItem`]s exactly as for the model's
+/// own checkbox labels, the glyph stripped from the label. Lines above the
+/// first mark stay one region of the original label. The first piece
+/// replaces the region in place and the rest are appended, so per-region
+/// slices indexed by the original order (table grids, enrichments — neither
+/// applies to text) stay aligned.
 ///
 /// A square counts for a line when its vertical centre lies on the line and
 /// it sits just left of the line's first cell: no more than 1.5 sides (at
 /// least 6 pt) of gap, at most 1 pt of overlap. Text set *inside* squares (a
-/// comb field) never matches. Without squares on the page this is a no-op.
+/// comb field) never matches. A glyph counts when it opens the line and is
+/// the line's only box glyph; a line with several (`☐ Yes ☐ No`) stays a text
+/// piece of its own rather than become one item labelled `Yes ☐ No`. A
+/// region the model already labelled a checkbox is not split, but its state
+/// follows its first line's mark when it has one — the glyph or the square
+/// is what the page says, the model's label a guess from the pixels (it read
+/// a `☑ Bread` line as unselected). With neither on the page this is a no-op.
 pub fn split_checkbox_lines(
     regions: &mut Vec<Region>,
     cells: &[TextCell],
     boxes: &[crate::checkbox::CheckBox],
 ) {
-    if boxes.is_empty() {
+    let has_glyph = || {
+        cells
+            .iter()
+            .any(|c| c.text.chars().any(|ch| checkbox_glyph(ch).is_some()))
+    };
+    if boxes.is_empty() && !has_glyph() {
         return;
     }
     let owned = assign_cells(regions, cells);
@@ -1934,84 +1975,150 @@ pub fn split_checkbox_lines(
     let mut appended: Vec<Region> = Vec::new();
     for (i, mine) in owned.iter().enumerate() {
         let region = regions[i].clone();
-        if !matches!(region.label, "text" | "list_item") || mine.is_empty() {
+        let model_checkbox = matches!(region.label, "checkbox_selected" | "checkbox_unselected");
+        if !(model_checkbox || matches!(region.label, "text" | "list_item")) || mine.is_empty() {
             continue;
         }
-        // The region's lines: cells sharing a vertical centre band, top down.
+        // The region's lines, top down: cells sharing a vertical centre band,
+        // with the row's text in left-to-right order (for the glyph check).
         let mut sorted: Vec<&TextCell> = mine.iter().map(|&c| &cells[c]).collect();
         sorted.sort_by(|a, b| a.t.total_cmp(&b.t).then(a.l.total_cmp(&b.l)));
-        let mut rows: Vec<(f32, f32, f32, f32)> = Vec::new(); // (l, t, r, b)
+        // (l, t, r, b) of each line, and its cells.
+        type Row<'c> = ((f32, f32, f32, f32), Vec<&'c TextCell>);
+        let mut rows: Vec<Row> = Vec::new();
         for c in sorted {
             let mid = (c.t + c.b) / 2.0;
             match rows.last_mut() {
-                Some(row) if mid >= row.1 && mid <= row.3 => {
+                Some((row, members)) if mid >= row.1 && mid <= row.3 => {
                     *row = (
                         row.0.min(c.l),
                         row.1.min(c.t),
                         row.2.max(c.r),
                         row.3.max(c.b),
                     );
+                    members.push(c);
                 }
-                _ => rows.push((c.l, c.t, c.r, c.b)),
+                _ => rows.push(((c.l, c.t, c.r, c.b), vec![c])),
             }
         }
-        let boxed: Vec<Option<usize>> = rows
-            .iter()
-            .map(|&(l, t, _, b)| {
-                boxes
-                    .iter()
-                    .enumerate()
-                    .filter(|&(k, sq)| {
-                        let side = sq.r - sq.l;
-                        let mid = (sq.t + sq.b) / 2.0;
-                        let gap = l - sq.r;
-                        !used[k]
-                            && mid >= t - 2.0
-                            && mid <= b + 2.0
-                            && gap >= -1.0
-                            && gap <= (1.5 * side).max(6.0)
-                    })
-                    .min_by(|a, b| (l - a.1.r).total_cmp(&(l - b.1.r)))
-                    .map(|(k, _)| k)
-            })
-            .collect();
-        if boxed.iter().all(Option::is_none) {
+        // What each row does to the grouping.
+        enum Mark {
+            /// Opens a checkbox item (`square`: the drawn one, if any).
+            Item {
+                square: Option<usize>,
+                checked: bool,
+            },
+            /// Several box glyphs on one line (`☐ Yes ☐ No`): a text piece of
+            /// its own, closing the open item.
+            Plain,
+            /// Unmarked: continues the open piece (a wrapped label).
+            Continue,
+        }
+        let mut marks: Vec<Mark> = Vec::with_capacity(rows.len());
+        for ((l, t, _, b), members) in &rows {
+            let square = boxes
+                .iter()
+                .enumerate()
+                .filter(|&(k, sq)| {
+                    let side = sq.r - sq.l;
+                    let mid = (sq.t + sq.b) / 2.0;
+                    let gap = l - sq.r;
+                    !used[k]
+                        && mid >= t - 2.0
+                        && mid <= b + 2.0
+                        && gap >= -1.0
+                        && gap <= (1.5 * side).max(6.0)
+                })
+                .min_by(|a, b| (l - a.1.r).total_cmp(&(l - b.1.r)))
+                .map(|(k, _)| k);
+            let mark = match square {
+                Some(k) => {
+                    used[k] = true;
+                    Mark::Item {
+                        square: Some(k),
+                        checked: boxes[k].checked,
+                    }
+                }
+                None => {
+                    let mut members = members.clone();
+                    members.sort_by(|a, b| a.l.total_cmp(&b.l));
+                    let text: String = members.iter().map(|c| c.text.as_str()).collect();
+                    let first = text.trim_start().chars().next().and_then(checkbox_glyph);
+                    let glyphs = text
+                        .chars()
+                        .filter(|&c| checkbox_glyph(c).is_some())
+                        .count();
+                    match (first, glyphs) {
+                        (Some(checked), 1) => Mark::Item {
+                            square: None,
+                            checked,
+                        },
+                        (_, 0) => Mark::Continue,
+                        _ => Mark::Plain,
+                    }
+                }
+            };
+            marks.push(mark);
+        }
+        // A region the model already labelled a checkbox keeps its extent;
+        // only its state follows the mark — a glyph or a drawn square is the
+        // page's own record, where the model reads it off the pixels (on a
+        // `☑ Bread` line Heron says unselected).
+        if model_checkbox {
+            if let Some(Mark::Item { checked, .. }) = marks.first() {
+                regions[i].label = if *checked {
+                    "checkbox_selected"
+                } else {
+                    "checkbox_unselected"
+                };
+            }
             continue;
         }
-        // Group rows: a boxed row opens an item; an unboxed one continues the
-        // open group (the leading group keeps the region's own label).
+        if !marks.iter().any(|m| matches!(m, Mark::Item { .. })) {
+            continue;
+        }
+        // Group rows: a marked row opens an item; an unmarked one continues
+        // the open group (the leading group keeps the region's own label).
         let mut pieces: Vec<Region> = Vec::new();
-        for (row, sq) in rows.iter().zip(&boxed) {
-            let row_box = (row.0, row.1, row.2, row.3);
-            match sq {
-                Some(k) => {
-                    used[*k] = true;
-                    let s = &boxes[*k];
+        for ((row, _), mark) in rows.iter().zip(&marks) {
+            match mark {
+                Mark::Item { square, checked } => {
+                    let (mut l, mut t, mut r, mut b) = *row;
+                    if let Some(s) = square.map(|k| &boxes[k]) {
+                        (l, t, r, b) = (l.min(s.l), t.min(s.t), r.max(s.r), b.max(s.b));
+                    }
                     pieces.push(Region {
-                        label: if s.checked {
+                        label: if *checked {
                             "checkbox_selected"
                         } else {
                             "checkbox_unselected"
                         },
                         score: region.score,
-                        l: row_box.0.min(s.l),
-                        t: row_box.1.min(s.t),
-                        r: row_box.2.max(s.r),
-                        b: row_box.3.max(s.b),
+                        l,
+                        t,
+                        r,
+                        b,
                     });
                 }
-                None => match pieces.last_mut() {
+                Mark::Plain => pieces.push(Region {
+                    l: row.0,
+                    t: row.1,
+                    r: row.2,
+                    b: row.3,
+                    ..region.clone()
+                }),
+                Mark::Continue => match pieces.last_mut() {
                     Some(p) => {
-                        p.l = p.l.min(row_box.0);
-                        p.t = p.t.min(row_box.1);
-                        p.r = p.r.max(row_box.2);
-                        p.b = p.b.max(row_box.3);
+                        p.l = p.l.min(row.0);
+                        p.t = p.t.min(row.1);
+                        p.r = p.r.max(row.2);
+                        p.b = p.b.max(row.3);
                     }
                     None => pieces.push(Region {
-                        l: row_box.0,
-                        t: row_box.1,
-                        r: row_box.2,
-                        b: row_box.3,
+                        l: row.0,
+                        t: row.1,
+                        r: row.2,
+                        b: row.3,
                         ..region.clone()
                     }),
                 },
@@ -3177,11 +3284,13 @@ pub fn assemble_page(
             // (`- [x] …`) — mirrored by [`Node::CheckboxItem`].
             // Located like every other text item, so the JSON item carries
             // its page and box (#609) — a chunk of checkboxes has a page.
+            // The label without a leading ballot-box glyph: the item's state
+            // already says what `☐` / `☒` drew (#609).
             "checkbox_selected" | "checkbox_unselected" => nodes.push(located(
                 loc,
                 Node::CheckboxItem {
                     checked: region.label == "checkbox_selected",
-                    text: md_escape(&text),
+                    text: md_escape(strip_checkbox_glyph(&text)),
                 },
             )),
             // docling renders both the document title and section headers as
@@ -5132,5 +5241,42 @@ mod tests {
             super::split_checkbox_lines(&mut regions, &cells, &[far]);
             assert_eq!(shape(&regions), shape(&block()));
         }
+    }
+
+    /// #609: a ballot-box glyph opening a line marks a checkbox item like a
+    /// drawn square — `☐` unchecked, `☒` checked, the glyph stripped from the
+    /// label at emission — while a line holding two boxes (`☐ Yes ☐ No`)
+    /// stays text of its own.
+    #[test]
+    fn checklist_lines_opening_with_a_ballot_box_split_into_checkbox_regions() {
+        let cells = vec![
+            cell("Options:", 100.0, 90.0, 150.0, 100.0),
+            cell("\u{2610} Tea", 100.0, 110.0, 140.0, 120.0),
+            cell("\u{2612} Coffee", 100.0, 130.0, 150.0, 140.0),
+            cell("\u{2610} Yes \u{2610} No", 100.0, 150.0, 170.0, 160.0),
+        ];
+        let mut regions = vec![region("text", 0.6, 100.0, 90.0, 170.0, 160.0)];
+        super::split_checkbox_lines(&mut regions, &cells, &[]);
+        let texts = super::region_texts_exclusive(&regions, &cells);
+        let got: Vec<(&str, &str)> = regions
+            .iter()
+            .zip(&texts)
+            .map(|(r, t)| match r.label {
+                "text" => (r.label, t.as_str()),
+                _ => (r.label, super::strip_checkbox_glyph(t)),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("text", "Options:"),
+                ("checkbox_unselected", "Tea"),
+                ("checkbox_selected", "Coffee"),
+                // Two boxes on one line: its own text, the item closed.
+                ("text", "\u{2610} Yes \u{2610} No"),
+            ]
+        );
+        assert_eq!(super::strip_checkbox_glyph("  \u{2611}  Done"), "Done");
+        assert_eq!(super::strip_checkbox_glyph("No box"), "No box");
     }
 }

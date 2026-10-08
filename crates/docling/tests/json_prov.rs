@@ -110,3 +110,45 @@ fn every_text_item_has_prov_and_axis_ticks_keep_their_boxes() {
         "{md}"
     );
 }
+
+/// #609: checkboxes set as ballot-box glyphs (`tests/fixtures/prov/
+/// checkbox_glyphs.pdf`, ReportLab with DejaVu Sans — regenerate with
+/// `make_checkbox_glyphs.py` next to it). Heron labels the four lines
+/// checkboxes itself but reads `☑ Bread` as unselected; docling 2.135 prints
+/// `- [ ] ☑ Bread`. The glyph is the page's own record: each item's state
+/// follows it and its label is the bare option text.
+#[test]
+fn ballot_box_glyphs_set_checkbox_state_and_leave_the_label() {
+    if !layout_ready() {
+        eprintln!("skipping: the layout model is not present");
+        return;
+    }
+    let path = repo_root().join("crates/docling/tests/fixtures/prov/checkbox_glyphs.pdf");
+    let doc = DocumentConverter::new()
+        .skip_ocr(true)
+        .convert(SourceDocument::from_file(&path).expect("fixture"))
+        .expect("conversion")
+        .document;
+    let json: serde_json::Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+    let items: Vec<(&str, &str)> = json["texts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["label"].as_str().unwrap().starts_with("checkbox_"))
+        .map(|t| (t["label"].as_str().unwrap(), t["text"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        items,
+        [
+            ("checkbox_unselected", "Milk"),
+            ("checkbox_selected", "Eggs"),
+            ("checkbox_selected", "Bread"),
+            ("checkbox_unselected", "Butter"),
+        ]
+    );
+    let md = doc.export_to_markdown();
+    assert!(
+        md.contains("- [ ] Milk\n\n- [x] Eggs\n\n- [x] Bread\n\n- [ ] Butter"),
+        "{md}"
+    );
+}

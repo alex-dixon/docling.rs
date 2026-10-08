@@ -16,7 +16,10 @@
 //! edges meeting at the corners (ReportLab draws each edge as its own
 //! `m … l S` path) — between [`MIN_SIDE`] and [`MAX_SIDE`] points with sides
 //! within 15 % of each other. Anything else painted inside it (a tick, a
-//! cross, a filled dot) marks it checked.
+//! cross, a filled dot) marks it checked. A square filled with colour — a
+//! stroked-and-filled `re`, or one under a fill of its own size — is a chart
+//! legend's swatch, not a checkbox; a white fill (a form's box background)
+//! draws nothing and changes nothing.
 
 /// A checkbox square, top-left page points (the [`TextCell`] frame).
 ///
@@ -137,6 +140,21 @@ pub(crate) fn find(inks: &[Ink], page_h: f32) -> Vec<CheckBox> {
             .flat_map(|o| o.1.iter().copied())
             .chain(own.iter().copied())
             .collect();
+        // A square under a coloured fill of its own size is a chart legend's
+        // swatch (matplotlib strokes and fills each patch), not a checkbox.
+        let swatch = inks.iter().any(|ink| {
+            matches!(ink, Ink::Blot { .. }) && {
+                let (il, ib, ir, it) = ink.bbox();
+                let fit = 1.5;
+                (il - l).abs() <= fit
+                    && (ir - r).abs() <= fit
+                    && (ib - b).abs() <= fit
+                    && (it - t).abs() <= fit
+            }
+        });
+        if swatch {
+            continue;
+        }
         let inset = 0.2 * (r - l);
         let checked = inks.iter().enumerate().any(|(i, ink)| {
             if edges.contains(&i) {
@@ -218,6 +236,20 @@ mod tests {
         let mut open = four_edges(50.0, 50.0);
         open.pop();
         assert!(find(&open, 800.0).is_empty());
+    }
+
+    /// A legend swatch — the square filled with colour by a separate fill of
+    /// its size — is not a checkbox.
+    #[test]
+    fn a_colour_filled_square_is_a_swatch() {
+        let mut inks = four_edges(10.0, 10.0);
+        inks.push(Ink::Blot {
+            l: 10.0,
+            b: 10.0,
+            r: 22.96,
+            t: 22.96,
+        });
+        assert!(find(&inks, 800.0).is_empty());
     }
 
     #[test]

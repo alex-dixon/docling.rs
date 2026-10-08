@@ -411,14 +411,22 @@ pointed at the wrong item).
   checkbox item is docling's `checkbox_selected` / `checkbox_unselected`
   text with the bare option label (it was a `text` item spelling `- [ ] …`;
   the task-list marker is Markdown's rendering). And, a deliberate
-  divergence (#609): a line with a **drawn** checkbox square in front of it —
-  a stroked `re`, or four stroked edges as ReportLab draws them, 5–24 pt —
-  is its own checkbox item even when the layout model read the checklist as
-  one text block (`checkbox.rs` finds the squares in the text parser's path
-  walk; ink inside a square checks it). docling has only the model's
-  labels: on the reporter's checklist it prints two garbled paragraphs
-  (`First option Third option` / `Second option Fourth option`); here it is
-  four `- [ ]` items.
+  divergence (#609): a line marked as a checkbox on the page is its own
+  checkbox item even when the layout model read the checklist as one text
+  block — marked by a **drawn** square in front of it (a stroked `re`, or
+  four stroked edges as ReportLab draws them, 5–24 pt, unfilled or filled
+  white; `checkbox.rs` finds them in the text parser's path walk, ink inside
+  checks it, a colour-filled square is a legend swatch and does not count)
+  or by a **ballot-box glyph** it opens with (`☐ □ ▢ ◻ ❏ ❐ ❑ ❒` unchecked,
+  `☑ ☒ ⊠ ⌧ ▣ 🗹 🗷 🗵` checked; a line with two, `☐ Yes ☐ No`, stays text). The
+  glyph leaves the label, and on a region the model did label a checkbox the
+  mark sets the state. docling has only the model's labels: on the
+  reporter's checklist it prints two garbled paragraphs (`First option Third
+  option` / `Second option Fourth option`), here four `- [ ]` items; on a
+  `☐ / ☒ / ☑` list it prints `- [ ] ☑ Bread` (Heron reads that box as
+  empty), here `- [x] Bread`. Symbol-font boxes that reach the text layer as
+  Private Use Area codes or ASCII bytes (Wingdings `o`, `þ`) are not read as
+  boxes — without the font the code is ambiguous.
 - **Image extraction** is wired for PDF/image (figure-region crops) and DOCX/PPTX
   (embedded blobs) by default, and — opt-in via
   `DocumentConverter::fetch_images` (`--fetch-images`) — for HTML/EPUB `<img src>`:

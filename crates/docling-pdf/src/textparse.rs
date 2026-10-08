@@ -1560,12 +1560,21 @@ fn run_content(
     // squares (#609). Text extraction never reads it.
     let mut path: Vec<PathPiece> = Vec::new();
     let (mut cur, mut start) = ((0.0, 0.0), (0.0, 0.0));
+    // Whether the fill colour is (near) white, saved/restored with `q`/`Q`:
+    // a white-filled stroked box is a checkbox outline, a coloured one a
+    // chart legend's swatch. The initial fill colour is black.
+    let mut fill_light = false;
+    let mut fill_stack: Vec<bool> = Vec::new();
 
     for op in &content.operations {
         let operands = &op.operands;
         match op.operator.as_str() {
-            "q" => gstate_stack.push((ctm, tc, tw, th, tl, trise, fsize, font)),
+            "q" => {
+                gstate_stack.push((ctm, tc, tw, th, tl, trise, fsize, font));
+                fill_stack.push(fill_light);
+            }
             "Q" => {
+                fill_light = fill_stack.pop().unwrap_or(false);
                 if let Some((c, a, b, h, l, r, fs, f)) = gstate_stack.pop() {
                     ctm = c;
                     tc = a;
@@ -1751,10 +1760,26 @@ fn run_content(
                 }
                 let stroke = matches!(op, "S" | "s" | "B" | "B*" | "b" | "b*");
                 let fill = !matches!(op, "S" | "s");
-                paint_path(&path, stroke, fill, inks);
+                paint_path(&path, stroke, fill, fill_light, inks);
                 path.clear();
             }
             "n" => path.clear(),
+            // The fill colour, by its components: gray `g`, `rg`, CMYK `k`,
+            // and `sc`/`scn` by operand count (a pattern name is not light).
+            "g" | "rg" | "k" | "sc" | "scn" => {
+                let v: Vec<f64> = operands
+                    .iter()
+                    .map(num)
+                    .collect::<Option<_>>()
+                    .unwrap_or_default();
+                fill_light = match v.as_slice() {
+                    [g] => *g >= 0.9,
+                    [r, g, b] => r.min(*g).min(*b) >= 0.9,
+                    [c, m, y, k] => c.max(*m).max(*y).max(*k) <= 0.1,
+                    _ => false,
+                };
+            }
+            "cs" => fill_light = false,
             "Do" => {
                 // Invoke a Form XObject: bulk body text in many PDFs lives inside
                 // a form, reached only here. Image XObjects are skipped (no text).
@@ -1864,11 +1889,18 @@ enum PathPiece {
 
 /// Record a painted path's pieces for the checkbox finder (#609): a stroked
 /// line is a [`Seg`](crate::checkbox::Ink::Seg), a stroked rectangle that
-/// stays axis-aligned a [`Rect`](crate::checkbox::Ink::Rect) (a stroked and
-/// filled one too — a white-filled box is still an outline), and a fill or a
-/// curve only its bounding box, a possible tick mark. Only pieces small
+/// stays axis-aligned a [`Rect`](crate::checkbox::Ink::Rect) (one filled
+/// white too — still an outline), and a coloured fill or a curve only its
+/// bounding box, a [`Blot`](crate::checkbox::Ink::Blot): a possible tick
+/// mark, or a swatch. White fills draw nothing and are dropped. Only pieces small
 /// enough to be a checkbox edge or a mark inside one are kept.
-fn paint_path(path: &[PathPiece], stroke: bool, fill: bool, inks: &mut Vec<crate::checkbox::Ink>) {
+fn paint_path(
+    path: &[PathPiece],
+    stroke: bool,
+    fill: bool,
+    fill_light: bool,
+    inks: &mut Vec<crate::checkbox::Ink>,
+) {
     use crate::checkbox::Ink;
     let bbox = |pts: &mut dyn Iterator<Item = (f64, f64)>| {
         pts.fold(
@@ -1886,8 +1918,10 @@ fn paint_path(path: &[PathPiece], stroke: bool, fill: bool, inks: &mut Vec<crate
             inks.push(ink);
         }
     };
-    if fill && !(stroke && matches!(path, [PathPiece::Rect(_)])) {
-        // A filled shape is a blot (a filled `re` + stroke is handled below).
+    if fill && !fill_light {
+        // A coloured fill is a blot — a tick mark, or (the size of a square)
+        // a legend swatch, which `checkbox::find` then rules out. A white
+        // fill is no ink on paper: it only leaves the stroke, if any, below.
         let (l, b, r, t) = bbox(&mut path.iter().flat_map(|p| match p {
             PathPiece::Line(a, z) => vec![*a, *z],
             PathPiece::Rect(c) => c.to_vec(),
@@ -2826,15 +2860,17 @@ mod base14_fonts {
 
     /// #609: the path walk finds drawn checkbox squares — ReportLab's four
     /// `m … l S` edges under a `cm`, and a stroked `re` with a tick inside
-    /// (checked) — in the text cells' top-left frame; a filled bar and a
-    /// big frame are not checkboxes.
+    /// (checked) — in the text cells' top-left frame, and a stroked box
+    /// filled white; a filled bar, a big frame and a colour-filled legend
+    /// swatch are not checkboxes.
     #[test]
     fn drawn_checkbox_squares_are_found() {
         let content = b"q 1 0 0 1 119.52 449.04 cm \
             n 0 12.96 m 12.96 12.96 l S n 0 0 m 12.96 0 l S \
             n 0 0 m 0 12.96 l S n 12.96 0 m 12.96 12.96 l S Q\n\
             200 400 10 10 re S 202 405 m 204.5 402 l 208.5 408.5 l S\n\
-            300 400 12 12 re f 50 50 100 100 re S\n";
+            300 400 12 12 re f 50 50 100 100 re S\n\
+            q 0.2 0.4 0.8 rg 400 400 12 12 re B Q q 1 g 500 400 12 12 re B Q\n";
         let pdf = pdf_with_content(b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>", content);
         let mut parser = super::PageTextParser::open(&pdf).expect("parses");
         let mut boxes = parser.cells(0).checkboxes;
@@ -2852,6 +2888,7 @@ mod base14_fonts {
             [
                 ([11952, 38000, 13248, 39296], false),
                 ([20000, 43200, 21000, 44200], true),
+                ([50000, 43000, 51200, 44200], false),
             ]
         );
     }
