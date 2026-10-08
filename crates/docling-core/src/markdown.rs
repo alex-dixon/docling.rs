@@ -959,6 +959,7 @@ fn render_item(node: &Node, blocks: &mut Vec<String>, ctx: &mut Ctx) {
         // nothing to Markdown — only DocLang/JSON keep it.
         Node::Paragraph { text } if text.is_empty() => {}
         Node::Paragraph { text } => blocks.push(ctx.breaks(&ctx.text(text))),
+        Node::LabeledText { .. } => render_item(&node.labeled_as_paragraph(), blocks, ctx),
         // A standalone caption item renders like a text item; its hyperlink
         // annotation becomes a Markdown link around the whole caption.
         Node::Caption { text, .. } if text.is_empty() => {}
