@@ -304,6 +304,57 @@ an `X-Docling-Confidence` summary header (grades `poor`/`fair`/`good`/
 `excellent` + layout/OCR/parse scores) on every format, and the full per-page
 report under a top-level `confidence` key in `to=json` bodies.
 
+### Drop-in for docling-serve (Open WebUI, n8n, Dify, LangChain)
+
+Clients written against Python docling-serve's API talk to this server
+unchanged (#615). It serves upstream's routes next to its own `/v1/convert`:
+
+| Route | Takes | Answers |
+|---|---|---|
+| `POST /v1/convert/file` | multipart `files` (repeatable) + option fields | docling's `ConvertDocumentResponse` |
+| `POST /v1/convert/source` | JSON `{"sources": [{"kind": "file"\|"http", …}], "options": {…}, "target": {"kind": "inbody"\|"zip"}}` (also 0.x `file_sources` / `http_sources`) | the same |
+| `POST /v1/convert/{file,source}/async` | the same | `TaskStatusResponse` (`task_id`, `task_status`, …) |
+| `GET /v1/status/poll/{task_id}` · `GET /v1/result/{task_id}` | — | the task's status · its `ConvertDocumentResponse` |
+| `/v1alpha/…` | aliases of the above for docling-serve 0.x clients | |
+
+One document answers `{"document": {"filename", "md_content", "json_content",
+"html_content", "text_content", "doctags_content", "doclang_content"},
+"status", "errors", "processing_time", "timings"}` with the `to_formats`
+asked for (default `md`) filled and the rest `null`; several documents (or
+`target_type=zip`) a zip of `<stem>.<ext>` files. A document that fails to
+convert is still a **200** with `status: "failure"` and the reason in
+`errors[0].error_message`, which is where these clients look. Options take
+upstream's names and types: `do_ocr`, `force_ocr`, `do_table_structure`,
+`page_range`, `image_export_mode` (default `embedded`, as upstream),
+`md_page_break_placeholder`, `do_pdf_heading_hierarchy`, `md_compact_tables`,
+the `do_*_enrichment` switches, `document_timeout`, `images_scale`,
+`pipeline=vlm`, `ocr_engine` (the Tesseract spellings select Tesseract;
+EasyOCR / RapidOCR / ocrmac use the built-in PP-OCR) and `ocr_lang` (the
+first code this build reads). Anything this server has no equivalent for —
+`pdf_backend`, `table_mode`, `abort_on_error`, picture-description and preset
+knobs — is accepted and ignored, so a client's extra parameters never fail a
+conversion. This server's own option names (`strict`, `pdf_password`, …) work
+there too. `doctags_content` stays `null`: there is no DocTags writer
+(`doclang_content` carries its successor). `--api-key KEY`, or upstream's
+`DOCLING_SERVE_API_KEY`, requires `X-Api-Key` on every `/v1` route; `/health`,
+`/ready`, `/metrics` and the docs page stay open.
+
+**Open WebUI**: *Admin Settings → Documents → Content Extraction Engine =
+Docling*, *Docling Server URL* = `http://<host>:5001` (and the API key if you
+set one). Its loader posts `files` with `image_export_mode=placeholder` and a
+form-feed `md_page_break_placeholder`, and reads `document.md_content` split
+into pages. Extra *Docling parameters* JSON (`{"do_ocr": true, "ocr_lang":
+["en"], "pdf_backend": "dlparse_v4"}`) is mapped where it means something here
+and ignored otherwise.
+
+```bash
+curl -F files=@report.pdf -F to_formats=md -F to_formats=text \
+     localhost:5001/v1/convert/file | jq '.status, .document.text_content'
+curl -H 'content-type: application/json' localhost:5001/v1/convert/source \
+     -d '{"sources": [{"kind": "http", "url": "https://arxiv.org/pdf/2206.01062"}],
+          "options": {"to_formats": ["md"], "do_ocr": false}}'  # needs --allow-url-fetch
+```
+
 A conversion that *panics* — a backend bug reached on some input — answers
 **500** with the error body, on every endpoint, instead of leaving the caller
 with a silent empty 200 or a hanging request (#396). The panic still prints its
@@ -333,7 +384,9 @@ check as URL inputs — pin it server-side via `DOCLING_RS_VLM_*` instead for th
 operator-controlled mode) — as query
 parameters, multipart fields, or JSON keys (body wins). Server flags: `--addr`,
 `--concurrency`, `--max-body-mb`, `--queue-size`, `--result-ttl`, `--warmup`,
-`--allow-url-fetch`, `--no-url-fetch`, `--strict`, `--max-memory-mb` (#263:
+`--allow-url-fetch`, `--no-url-fetch`, `--strict`, `--api-key` (#615:
+`X-Api-Key` on every `/v1` route; `DOCLING_SERVE_API_KEY` when absent),
+`--max-memory-mb` (#263:
 memory ceiling for admission control — explicit, or `DOCLING_RS_MAX_MEMORY_MB`,
 else the container's cgroup limit; once RSS crosses 85% of it — tunable via
 `DOCLING_RS_MEMORY_WATERMARK_PCT` — new conversions get 503 + Retry-After

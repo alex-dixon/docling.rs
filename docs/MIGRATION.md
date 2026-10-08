@@ -757,6 +757,25 @@ These are deliberate or unavoidable divergences, not bugs.
     docling's per-call window (#518; it was a native-only constructor
     kwarg).
 
+19. **docling-serve's own API** (#615). Besides `/v1/convert`, the server
+    answers upstream docling-serve's routes — `POST /v1/convert/file`,
+    `/v1/convert/source`, their `/async` variants, `GET
+    /v1/status/poll/{task_id}`, `/v1/result/{task_id}`, and the `/v1alpha`
+    aliases — with upstream's `ConvertDocumentResponse` /
+    `TaskStatusResponse` shapes, so Open WebUI's Docling loader, n8n, Dify
+    and LangChain's docling-serve client work unchanged; `--api-key` /
+    `DOCLING_SERVE_API_KEY` is upstream's `X-Api-Key`. Upstream's option
+    names map onto ours. Deliberate differences: options with no
+    equivalent (`pdf_backend`, `table_mode`, `abort_on_error`, picture
+    description, presets) are ignored rather than rejected, so a client's
+    `DOCLING_PARAMS` never fails a conversion. OCR engines other than
+    Tesseract run the built-in PP-OCR, and `ocr_lang` keeps the first code
+    this build has a recognizer for. `image_export_mode=referenced` is
+    answered as placeholders, since a response body has nowhere to put
+    files. `doctags_content` is `null`, because there is no DocTags writer.
+    `timings` is `{}`. A failed document answers a `200` envelope with
+    `status: "failure"`, as upstream does for a conversion error.
+
 ---
 
 ## 5. Not migrated / out of scope
