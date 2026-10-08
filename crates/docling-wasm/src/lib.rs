@@ -47,7 +47,7 @@ fn start() {
 /// [`convert_with_options`] takes.
 #[derive(Debug, Default, Deserialize)]
 struct Request {
-    /// `md` (default) | `json` | `doclang` | `latex` | `html` | `pandoc`.
+    /// `md` (default) | `json` | `text` | `doclang` | `latex` | `html` | `pandoc`.
     to: Option<String>,
     /// `placeholder` (default) | `embedded` — see [`image_mode`].
     images: Option<String>,
@@ -136,6 +136,8 @@ fn convert_request(bytes: &[u8], filename: &str, request: Request) -> Result<Str
         "json" => Ok(result.document.export_to_json()),
         "doclang" => Ok(result.document.export_to_doclang()),
         "latex" => Ok(result.document.export_to_latex()),
+        // #613: docling's plain text (`export_to_text`).
+        "text" => Ok(result.document.export_to_text()),
         // #492: like Markdown, pictures embed (`referenced` is unreachable
         // here for the same reason).
         "html" => Ok(result
@@ -145,7 +147,7 @@ fn convert_request(bytes: &[u8], filename: &str, request: Request) -> Result<Str
         // #515: Pandoc's JSON AST (`pandoc -f json`); pictures as above.
         "pandoc" => pandoc_json(&result.document, image_mode),
         other => Err(format!(
-            "unknown output format {other:?} (expected \"md\", \"json\", \"doclang\", \"latex\", \"html\" or \"pandoc\")"
+            "unknown output format {other:?} (expected \"md\", \"json\", \"text\", \"doclang\", \"latex\", \"html\" or \"pandoc\")"
         )),
     }
 }
@@ -189,7 +191,8 @@ pub(crate) fn pandoc_json(
 
 /// Convert a document (as bytes + filename, the extension drives format
 /// detection) to `to`: `"md"` (Markdown, default), `"json"` (docling-core's
-/// `DoclingDocument` wire format, schema 1.10.0), `"doclang"` (docling's
+/// `DoclingDocument` wire format, schema 1.10.0), `"text"` (plain text,
+/// docling's `export_to_text`, #613), `"doclang"` (docling's
 /// DocLang XML serialization), `"latex"` (docling 2.124's LaTeX document,
 /// #317), `"html"` or `"pandoc"` (Pandoc's JSON AST for `pandoc -f json`,
 /// #515).
