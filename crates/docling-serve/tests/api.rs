@@ -2107,3 +2107,53 @@ async fn api_key_guards_the_v1_routes() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+// --- #619: the request body cap -------------------------------------------
+
+/// A body over `--max-body-mb` is refused before conversion with 413 on
+/// both the native and the upstream-compatible routes (docs/SECURITY.md's
+/// resource-limit table names the status).
+#[tokio::test]
+async fn an_oversized_body_is_refused_with_413() {
+    let app = router(ServeConfig {
+        max_body_bytes: 1024,
+        ..ServeConfig::default()
+    });
+    let big = vec![b'a'; 4096];
+    for (uri, field) in [("/v1/convert", "file"), ("/v1/convert/file", "files")] {
+        let boundary = "body-limit-boundary";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"a.md\"\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&big);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{uri}");
+    }
+    // JSON bodies (URL / base64 sources) hit the same cap.
+    let json = format!(r#"{{"url": "https://example.com/{}"}}"#, "a".repeat(4096));
+    for uri in ["/v1/convert", "/v1/convert/source"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json.clone()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{uri} (JSON)"
+        );
+    }
+}

@@ -656,6 +656,34 @@ enum ApiError {
     Busy(String),
     /// The memory ceiling's watermark is crossed (#263) — 503, retry later.
     Overloaded(String),
+    /// The request body is over `--max-body-mb` (#619) — 413.
+    TooLarge(String),
+}
+
+/// A multipart read error: 413 when the body went past `--max-body-mb`
+/// (axum's `DefaultBodyLimit` surfaces it here, inside the extractor we drive
+/// ourselves), 400 for a malformed body.
+fn multipart_error(what: &str, e: axum::extract::multipart::MultipartError) -> ApiError {
+    if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::TooLarge(format!("{what}: {e} (the server's --max-body-mb)"))
+    } else {
+        ApiError::Bad(format!("{what}: {e}"))
+    }
+}
+
+/// A body read error (`axum::body::to_bytes` under the server's limit):
+/// 413 when the limit cut it off, 400 otherwise. The limit error is
+/// `http_body_util::LengthLimitError` somewhere in the source chain; it is
+/// recognized by its message so the crate needs no direct dependency.
+fn body_error(what: &str, e: axum::Error) -> ApiError {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+    while let Some(c) = cause {
+        if c.to_string().contains("length limit exceeded") {
+            return ApiError::TooLarge(format!("{what}: {e} (the server's --max-body-mb)"));
+        }
+        cause = c.source();
+    }
+    ApiError::Bad(format!("{what}: {e}"))
 }
 
 /// The HTTP status + message an [`ApiError`] answers with (also stored on a
@@ -667,6 +695,7 @@ fn api_error_parts(e: ApiError) -> (StatusCode, String) {
         ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         ApiError::Busy(m) => (StatusCode::TOO_MANY_REQUESTS, m),
         ApiError::Overloaded(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
+        ApiError::TooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m),
     }
 }
 
@@ -728,7 +757,7 @@ async fn parse_convert_request(
     } else if content_type.starts_with("application/json") {
         let bytes = axum::body::to_bytes(body.into_body(), state.cfg.max_body_bytes)
             .await
-            .map_err(|e| ApiError::Bad(format!("bad body: {e}")))?;
+            .map_err(|e| body_error("bad body", e))?;
         let req: UrlRequest = serde_json::from_slice(&bytes)
             .map_err(|e| ApiError::Bad(format!("bad JSON body: {e}")))?;
         let options = req.options.clone().merge_over(query);
@@ -1999,7 +2028,7 @@ async fn read_multipart(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| ApiError::Bad(format!("bad multipart field: {e}")))?
+        .map_err(|e| multipart_error("bad multipart field", e))?
     {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
@@ -2011,7 +2040,7 @@ async fn read_multipart(
                 let bytes = field
                     .bytes()
                     .await
-                    .map_err(|e| ApiError::Bad(format!("reading upload: {e}")))?;
+                    .map_err(|e| multipart_error("reading upload", e))?;
                 files.push((file_name, bytes.to_vec()));
             }
             // Every other text part is an option in its wire spelling —
@@ -2038,7 +2067,7 @@ async fn text_field(field: axum::extract::multipart::Field<'_>) -> Result<String
     field
         .text()
         .await
-        .map_err(|e| ApiError::Bad(format!("reading field: {e}")))
+        .map_err(|e| multipart_error("reading field", e))
 }
 
 /// The sources one named file contributes: itself, or — for a `.zip` — every
