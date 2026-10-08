@@ -303,18 +303,15 @@ fn has_list_ancestor(elem: NodeRef<'_, HtmlNode>, boundary: NodeRef<'_, HtmlNode
 }
 
 /// upstream's `_get_cell_spans`: `colspan` / `rowspan`, each the leading
-/// digit run when the attribute starts with a digit, else 1 (so `"0"` is 0).
+/// digit run when the attribute starts with a digit, else 1, clamped to
+/// `[1, MAX_*SPAN]` — the same reading as the Markdown grid (`html.rs`), so
+/// a `rowspan="0"` keeps its slot in the JSON too (docling#4287, 2.129).
 fn cell_spans(cell: ElementRef) -> (usize, usize) {
-    let num = |attr: &str| -> usize {
-        let raw = cell.value().attr(attr).unwrap_or("1");
-        if raw.starts_with(|c: char| c.is_ascii_digit()) {
-            let digits: String = raw.chars().take_while(|c| c.is_ascii_digit()).collect();
-            digits.parse().unwrap_or(1)
-        } else {
-            1
-        }
-    };
-    (num("colspan"), num("rowspan"))
+    use super::html::{span_value, MAX_COLSPAN, MAX_ROWSPAN};
+    (
+        span_value(cell.value().attr("colspan"), MAX_COLSPAN),
+        span_value(cell.value().attr("rowspan"), MAX_ROWSPAN),
+    )
 }
 
 /// An `href` as docling's `AnnotatedText.hyperlink` serializes it: a URL
@@ -1968,11 +1965,15 @@ mod tests {
     #[test]
     fn cell_spans_follow_get_cell_spans() {
         let html = Html::parse_fragment(
-            r#"<table><tr><td colspan="3x" rowspan="0">a</td><td rowspan="x2">b</td></tr></table>"#,
+            r#"<table><tr><td colspan="3x" rowspan="0">a</td><td rowspan="x2">b</td>
+               <td colspan="99999999999999999999999" rowspan="70000">c</td></tr></table>"#,
         );
         let cells: Vec<ElementRef> = html.select(sel!("td")).collect();
-        assert_eq!(cell_spans(cells[0]), (3, 0));
+        // A zero span keeps one slot (docling#4287), not none.
+        assert_eq!(cell_spans(cells[0]), (3, 1));
         assert_eq!(cell_spans(cells[1]), (1, 1));
+        // Past HTML's limits: clamped, even past `usize`.
+        assert_eq!(cell_spans(cells[2]), (1000, 65_534));
     }
 
     /// The shape upstream gives a small page: the `<title>` and the prelude
