@@ -36,9 +36,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
-    api_error_message, convert_document, html_string, markdown_string, parse_source_specs,
-    passthrough, require_outbound, sources_from_named_bytes, submit_job, text_string, trim_heap,
-    ApiError, AppState, ConvertOptions, Converted, JobState, SourceItem, StoredResponse,
+    api_error_message, body_error, convert_document, html_string, markdown_string, multipart_error,
+    parse_source_specs, passthrough, require_outbound, sources_from_named_bytes, submit_job,
+    text_string, trim_heap, ApiError, AppState, ConvertOptions, Converted, JobState, SourceItem,
+    StoredResponse,
 };
 
 /// One of upstream's `to_formats` this server fills.
@@ -458,7 +459,7 @@ async fn read_upload(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| ApiError::Bad(format!("bad multipart field: {e}")))?
+        .map_err(|e| multipart_error("bad multipart field", e))?
     {
         let name = field.name().unwrap_or("").to_string();
         if matches!(name.as_str(), "files" | "file") {
@@ -471,13 +472,13 @@ async fn read_upload(
             let bytes = field
                 .bytes()
                 .await
-                .map_err(|e| ApiError::Bad(format!("reading upload: {e}")))?;
+                .map_err(|e| multipart_error("reading upload", e))?;
             items.extend(named_items(&file_name, bytes.to_vec()));
         } else {
             let value = field
                 .text()
                 .await
-                .map_err(|e| ApiError::Bad(format!("reading field {name}: {e}")))?;
+                .map_err(|e| multipart_error(&format!("reading field {name}"), e))?;
             fields.push((name, value));
         }
     }
@@ -544,7 +545,7 @@ async fn read_source_request(
 ) -> Result<(Vec<(String, SourceItem)>, Vec<(String, String)>), ApiError> {
     let bytes = axum::body::to_bytes(body.into_body(), state.cfg.max_body_bytes)
         .await
-        .map_err(|e| ApiError::Bad(format!("bad body: {e}")))?;
+        .map_err(|e| body_error("bad body", e))?;
     let req: SourceRequest =
         serde_json::from_slice(&bytes).map_err(|e| ApiError::Bad(format!("bad JSON body: {e}")))?;
     let mut specs = req.sources;

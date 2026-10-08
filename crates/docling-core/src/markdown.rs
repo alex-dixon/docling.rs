@@ -2628,7 +2628,6 @@ mod tests {
     /// buffered export.
     #[test]
     fn streamer_matches_buffered_export_with_options() {
-        use crate::document::ContentLayer;
         let doc = options_doc();
         let options = MarkdownExportOptions {
             layers: ContentLayers::ALL,
@@ -2651,7 +2650,6 @@ mod tests {
             buffered.contains("(img)") && buffered.contains("R&D _ report"),
             "{buffered}"
         );
-        let _ = ContentLayer::Notes;
     }
 
     /// #613: the plain export of a document holding every decoration the

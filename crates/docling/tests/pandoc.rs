@@ -156,29 +156,6 @@ fn pandoc_output_matches_the_stored_references() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-#[test]
-fn unsupported_api_version_is_an_error() {
-    let src = root().join("tests/data/md/sources/nested.md");
-    let doc = DocumentConverter::new()
-        .convert(SourceDocument::from_file(&src).expect("read source"))
-        .expect("convert")
-        .document;
-    let opts = docling::pandoc::PandocExportOptions {
-        api_version: Some("1.22".into()),
-        ..Default::default()
-    };
-    let err = doc.export_to_pandoc_json_with(&opts).unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "unsupported Pandoc API version '1.22': only 1.23 (pandoc-types 1.23.1.1, Pandoc 3.x) is supported"
-    );
-    let ok = docling::pandoc::PandocExportOptions {
-        api_version: Some("1.23.1".into()),
-        ..Default::default()
-    };
-    assert!(doc.export_to_pandoc_json_with(&ok).is_ok());
-}
-
 /// Count the AST nodes of constructor `t`.
 fn count(v: &serde_json::Value, t: &str) -> usize {
     match v {

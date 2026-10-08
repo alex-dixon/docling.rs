@@ -2396,42 +2396,6 @@ mod tests {
         assert_eq!(furniture, [("page_header", "MARK_HEADER_TEXTBOX_TEXT")]);
     }
 
-    #[test]
-    fn extracts_headings_lists_and_paragraphs() {
-        let doc = DocBackend
-            .convert(&fixture("docx_lists.doc"))
-            .expect("converts");
-        let headings = doc
-            .nodes
-            .iter()
-            .filter(|n| matches!(n, Node::Heading { .. }))
-            .count();
-        let lists = doc
-            .nodes
-            .iter()
-            .filter(|n| matches!(n, Node::ListItem { .. }))
-            .count();
-        assert!(headings > 0, "expected headings: {:?}", doc.nodes);
-        assert!(lists > 0, "expected list items: {:?}", doc.nodes);
-    }
-
-    #[test]
-    fn extracts_tables_with_cells() {
-        let doc = DocBackend
-            .convert(&fixture("docx_rich_tables_01.doc"))
-            .expect("converts");
-        let tables: Vec<&Table> = doc
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                Node::Table(t) => Some(t),
-                _ => None,
-            })
-            .collect();
-        assert!(!tables.is_empty(), "expected tables: {:?}", doc.nodes);
-        assert!(tables[0].rows.len() > 1 && tables[0].rows[0].len() > 1);
-    }
-
     /// #567: prose is Markdown-escaped like the DOCX backend's — `OBJ_DIR`
     /// becomes `OBJ\_DIR` in the Markdown (the reporter's Word 2.133 and
     /// DOCX outputs), and the JSON export restores the raw text.

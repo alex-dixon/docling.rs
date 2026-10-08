@@ -155,7 +155,7 @@ docker compose -f docker-compose.cuda.yml up -d
 |---|---|---|
 | `--addr HOST:PORT` | `127.0.0.1:5001` | Server bind address (`0.0.0.0:5001` inside container) |
 | `--concurrency N` | `2` | Max conversions processed in parallel; excess requests queue |
-| `--max-body-mb N` | `256` | Maximum request body size for uploads (MiB) |
+| `--max-body-mb N` | `256` | Maximum request body size, uploads and JSON bodies alike (MiB); a larger body is refused with 413 |
 | `--queue-size N` | `16` | Maximum async jobs held in queue / unfetched before returning HTTP 429 |
 | `--result-ttl SECS` | `600` | Retention duration for finished async job results (seconds) |
 | `--max-memory-mb N` | auto | RSS ceiling for admission control (MB); 0 disables |

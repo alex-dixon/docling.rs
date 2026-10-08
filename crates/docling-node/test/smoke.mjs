@@ -545,7 +545,7 @@ async function main() {
             vlmMaxTokens: 0,
           },
         ),
-      /vlmMaxTokens must be greater than 0/,
+      /vlmMaxTokens must be a positive integer/,
     )
   })
 

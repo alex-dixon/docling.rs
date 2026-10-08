@@ -139,16 +139,13 @@ fn page_break_placeholder_separates_pages() {
         env!("CARGO_MANIFEST_DIR"),
         "/../docling/tests/data/djvu/sources/example.djvu"
     );
-    let (code, plain, stderr) = run(&[fixture]);
-    assert_eq!(code, 0, "stderr: {stderr}");
+    // The flag reaches the serializer: three pages → two breaks. Where the
+    // breaks go is the library's (`crates/docling/tests/page_breaks.rs`).
     let (code, with, stderr) = run(&["--page-break-placeholder", "<!-- page break -->", fixture]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    // Three pages → two breaks, each a block of its own between two others.
     assert_eq!(with.matches("<!-- page break -->").count(), 2, "{with}");
-    assert_eq!(with.replace("<!-- page break -->\n\n", ""), plain);
-    assert!(!with.starts_with("<!-- page break -->"), "{with}");
-    assert!(!with.trim_end().ends_with("<!-- page break -->"), "{with}");
-    // `--no-stream` (the buffered serializer) agrees byte for byte.
+    // The default streamed output and `--no-stream` (the buffered
+    // serializer) agree byte for byte.
     let (_, buffered, _) = run(&[
         "--page-break-placeholder",
         "<!-- page break -->",

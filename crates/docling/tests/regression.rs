@@ -1,7 +1,7 @@
 //! Output regression suite.
 //!
 //! Every source the suite covers is converted to legacy Markdown, strict
-//! Markdown, docling JSON and LaTeX, and compared against the committed
+//! Markdown, docling JSON, LaTeX and HTML, and compared against the committed
 //! fixtures in `tests/data/<format>/expected/`. This pins the Rust converter's
 //! output so any unintended change is caught.
 //!

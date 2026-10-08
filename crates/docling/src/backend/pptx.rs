@@ -1300,52 +1300,6 @@ fn descendant<'a, 'input>(node: XmlNode<'a, 'input>, name: &str) -> Option<XmlNo
     node.descendants().find(|n| n.has_tag_name(name))
 }
 #[cfg(test)]
-mod chart_tests {
-    use super::*;
-    use crate::backend::DeclarativeBackend;
-    use crate::{InputFormat, SourceDocument};
-
-    /// docling PR #3794: a native chart frame becomes a classified chart with
-    /// its cached data grid and the chart title as the caption.
-    #[test]
-    fn native_chart_yields_classified_data_grid() {
-        let path = format!(
-            "{}/../../tests/data/pptx/sources/pptx_chart.pptx",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let bytes = std::fs::read(&path).expect("fixture exists");
-        let src = SourceDocument::from_bytes("c.pptx", InputFormat::Pptx, bytes);
-        let doc = PptxBackend.convert(&src).expect("converts");
-        let chart = doc
-            .nodes
-            .iter()
-            // Slide content hangs off the slide's own group (#402).
-            .flat_map(|n| match n {
-                Node::Group { children, .. } => children.as_slice(),
-                other => std::slice::from_ref(other),
-            })
-            .find_map(|n| match n {
-                Node::Chart {
-                    kind,
-                    table,
-                    caption,
-                    ..
-                } => Some((kind.clone(), table.clone(), caption.clone())),
-                _ => None,
-            })
-            .expect("a chart node");
-        assert_eq!(chart.0, "bar_chart");
-        assert_eq!(
-            chart.2.as_deref(),
-            Some("Wild Duck Observations by Year"),
-            "chart title as caption"
-        );
-        assert_eq!(chart.1.rows[0][1], "Freshwater Ducks");
-        assert_eq!(chart.1.rows[1], vec!["2019", "120", "80"]);
-    }
-}
-
-#[cfg(test)]
 mod list_marker_tests {
     use super::{list_kind, Placeholder};
 

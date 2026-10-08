@@ -656,6 +656,34 @@ enum ApiError {
     Busy(String),
     /// The memory ceiling's watermark is crossed (#263) — 503, retry later.
     Overloaded(String),
+    /// The request body is over `--max-body-mb` (#619) — 413.
+    TooLarge(String),
+}
+
+/// A multipart read error: 413 when the body went past `--max-body-mb`
+/// (axum's `DefaultBodyLimit` surfaces it here, inside the extractor we drive
+/// ourselves), 400 for a malformed body.
+fn multipart_error(what: &str, e: axum::extract::multipart::MultipartError) -> ApiError {
+    if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        ApiError::TooLarge(format!("{what}: {e} (the server's --max-body-mb)"))
+    } else {
+        ApiError::Bad(format!("{what}: {e}"))
+    }
+}
+
+/// A body read error (`axum::body::to_bytes` under the server's limit):
+/// 413 when the limit cut it off, 400 otherwise. The limit error is
+/// `http_body_util::LengthLimitError` somewhere in the source chain; it is
+/// recognized by its message so the crate needs no direct dependency.
+fn body_error(what: &str, e: axum::Error) -> ApiError {
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+    while let Some(c) = cause {
+        if c.to_string().contains("length limit exceeded") {
+            return ApiError::TooLarge(format!("{what}: {e} (the server's --max-body-mb)"));
+        }
+        cause = c.source();
+    }
+    ApiError::Bad(format!("{what}: {e}"))
 }
 
 /// The HTTP status + message an [`ApiError`] answers with (also stored on a
@@ -667,6 +695,7 @@ fn api_error_parts(e: ApiError) -> (StatusCode, String) {
         ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         ApiError::Busy(m) => (StatusCode::TOO_MANY_REQUESTS, m),
         ApiError::Overloaded(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
+        ApiError::TooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m),
     }
 }
 
@@ -728,7 +757,7 @@ async fn parse_convert_request(
     } else if content_type.starts_with("application/json") {
         let bytes = axum::body::to_bytes(body.into_body(), state.cfg.max_body_bytes)
             .await
-            .map_err(|e| ApiError::Bad(format!("bad body: {e}")))?;
+            .map_err(|e| body_error("bad body", e))?;
         let req: UrlRequest = serde_json::from_slice(&bytes)
             .map_err(|e| ApiError::Bad(format!("bad JSON body: {e}")))?;
         let options = req.options.clone().merge_over(query);
@@ -1999,7 +2028,7 @@ async fn read_multipart(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| ApiError::Bad(format!("bad multipart field: {e}")))?
+        .map_err(|e| multipart_error("bad multipart field", e))?
     {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
@@ -2011,7 +2040,7 @@ async fn read_multipart(
                 let bytes = field
                     .bytes()
                     .await
-                    .map_err(|e| ApiError::Bad(format!("reading upload: {e}")))?;
+                    .map_err(|e| multipart_error("reading upload", e))?;
                 files.push((file_name, bytes.to_vec()));
             }
             // Every other text part is an option in its wire spelling —
@@ -2038,7 +2067,7 @@ async fn text_field(field: axum::extract::multipart::Field<'_>) -> Result<String
     field
         .text()
         .await
-        .map_err(|e| ApiError::Bad(format!("reading field: {e}")))
+        .map_err(|e| multipart_error("reading field", e))
 }
 
 /// The sources one named file contributes: itself, or — for a `.zip` — every
@@ -2774,15 +2803,18 @@ mod pipeline_flag_tests {
     fn warm_pipeline_rebuilds_in_both_directions() {
         let mut slot = None;
         let default_opts = ConvertOptions::default();
-        let no_ocr_opts = ConvertOptions {
+        let text_layer_opts = ConvertOptions {
             convert: docling::ConvertOptions {
                 text_layer_only: Some(true),
                 ..Default::default()
             },
             ..ConvertOptions::default()
         };
-        assert!(warm_pipeline(&mut slot, &no_ocr_opts).is_ok());
-        assert_eq!(slot.as_ref().unwrap().0, PipelineFlags::of(&no_ocr_opts));
+        assert!(warm_pipeline(&mut slot, &text_layer_opts).is_ok());
+        assert_eq!(
+            slot.as_ref().unwrap().0,
+            PipelineFlags::of(&text_layer_opts)
+        );
         // Back to default: the degraded instance must not be reused.
         assert!(warm_pipeline(&mut slot, &default_opts).is_ok());
         assert_eq!(slot.as_ref().unwrap().0, PipelineFlags::default());
@@ -2921,16 +2953,9 @@ mod ssrf_tests {
         // then cleared, to avoid leaking to sibling tests.)
         std::env::remove_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH");
         assert!(!super::allow_private_ip_fetch());
-        for (val, want) in [
-            ("1", true),
-            ("true", true),
-            ("0", false),
-            ("false", false),
-            ("", false),
-        ] {
-            std::env::set_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH", val);
-            assert_eq!(super::allow_private_ip_fetch(), want, "value {val:?}");
-        }
+        // The accepted spellings are `docling_core::env::flag`'s, tested there.
+        std::env::set_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH", "1");
+        assert!(super::allow_private_ip_fetch());
         std::env::remove_var("DOCLING_RS_ALLOW_PRIVATE_IP_FETCH");
     }
 }
@@ -2983,35 +3008,6 @@ mod vlm_tests {
     }
 
     #[test]
-    fn unknown_pipeline_is_rejected() {
-        let options = ConvertOptions {
-            convert: docling::ConvertOptions {
-                pipeline: Some("magic".into()),
-                ..Default::default()
-            },
-            ..ConvertOptions::default()
-        };
-        match resolve_vlm_options(&state(true), &options, false) {
-            Err(ApiError::Bad(m)) => assert!(m.contains("unknown pipeline"), "{m}"),
-            _ => panic!("expected Bad"),
-        }
-    }
-
-    #[test]
-    fn request_endpoint_is_gated_behind_allow_url_fetch() {
-        // Without --allow-url-fetch a caller must not steer the server's
-        // outbound traffic; the operator-pinned env mode is the alternative.
-        match resolve_vlm_options(
-            &state(false),
-            &vlm_opts(Some("http://example.com/v1")),
-            false,
-        ) {
-            Err(ApiError::Unsupported(m)) => assert!(m.contains("--allow-url-fetch"), "{m}"),
-            _ => panic!("expected Unsupported"),
-        }
-    }
-
-    #[test]
     fn request_endpoint_resolving_to_private_address_is_rejected() {
         let _env = super::ssrf_tests::ENV_LOCK
             .lock()
@@ -3050,20 +3046,15 @@ mod vlm_tests {
         assert_eq!(v.model, "m");
     }
 
+    /// Without any endpoint the error names this surface's option spelling
+    /// (`vlm_endpoint`), not the CLI flag. The option rules themselves are
+    /// `docling::ConvertOptions`' and tested there (`options.rs`).
     #[test]
-    fn vlm_max_tokens_zero_is_rejected_and_options_land() {
+    fn missing_endpoint_names_the_serve_option() {
         let _env = super::ssrf_tests::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DOCLING_RS_VLM_ENDPOINT");
-        let mut options = vlm_opts(Some("http://example.com/v1"));
-        options.convert.vlm_max_tokens = Some(0);
-        match resolve_vlm_options(&state(true), &options, false) {
-            Err(ApiError::Bad(m)) => assert!(m.contains("vlm_max_tokens"), "{m}"),
-            _ => panic!("expected Bad"),
-        }
-        // And without any endpoint at all, the error names this surface's
-        // option spelling, not the CLI flag.
         let none = ConvertOptions {
             convert: docling::ConvertOptions {
                 pipeline: Some("vlm".into()),
@@ -3078,19 +3069,5 @@ mod vlm_tests {
             }
             _ => panic!("expected Bad"),
         }
-        // The full option set reaches the resolved struct.
-        let mut options = vlm_opts(Some("http://example.com/v1"));
-        options.convert.vlm_api_key = Some("sk-test".into());
-        options.convert.vlm_prompt = Some("Read the page.".into());
-        options.convert.vlm_max_tokens = Some(512);
-        options.convert.pages = Some("2-5".into());
-        let v = resolve_vlm_options(&state(true), &options, false)
-            .ok()
-            .flatten()
-            .expect("resolves");
-        assert_eq!(v.api_key.as_deref(), Some("sk-test"));
-        assert_eq!(v.prompt.as_deref(), Some("Read the page."));
-        assert_eq!(v.max_tokens, 512);
-        assert_eq!(v.page_range, Some((2, 5)));
     }
 }

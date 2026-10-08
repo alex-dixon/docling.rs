@@ -275,13 +275,13 @@ jobs:
         run: scripts/ci/cargo_retry_ort.sh cargo check -p docling-cli --features "${{ matrix.features }}"
 
       # docling-rag mirrors the same EP features (ingest conversion + the
-      # onnx-embed embedder session route through docling-pdf's ep module).
+      # onnx-embed embedder session route through docling-onnx).
       - name: Check docling-rag with GPU features
         shell: bash
         run: scripts/ci/cargo_retry_ort.sh cargo check -p docling-rag --features "${{ matrix.features }},onnx-embed"
 
-      - name: Test docling-pdf EP selection with GPU features
-        run: 'cargo test -p docling-pdf --lib --features "${{ matrix.features }}" ep::'
+      - name: Test docling-onnx EP selection with GPU features
+        run: 'cargo test -p docling-onnx --lib --features "${{ matrix.features }}"'
 
       # actions/cache saves target/ in its post-step, i.e. after this runs:
       # drop what is cheap to recreate (incremental data shouldn't exist with

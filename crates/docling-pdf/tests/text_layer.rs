@@ -47,11 +47,8 @@ fn text_layer_matches_no_ocr() {
 #[test]
 fn scanned_page_extracts_table_and_keeps_chart() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    if std::env::var("PDFIUM_DYNAMIC_LIB_PATH").is_err() {
-        std::env::set_var("PDFIUM_DYNAMIC_LIB_PATH", root.join(".pdfium/lib"));
-    }
+    // The page renders through the pure-Rust raster; pdfium is not needed.
     for needed in [
-        ".pdfium/lib/libpdfium.so",
         ".models/layout_heron_int8.onnx",
         ".models/ocr_rec_en.onnx",
         ".models/tableformer/encoder.onnx",
@@ -98,10 +95,8 @@ fn scanned_pdf_yields_empty_document() {
     .unwrap();
     let doc = docling_pdf::convert_text_layer(&scan, "scan.pdf").expect("no error");
     assert!(doc.nodes.is_empty());
-    // Bytes that are no readable PDF at all are an error about the file,
-    // not an empty "scanned" document.
-    let err = docling_pdf::convert_text_layer(b"%PDF-1.4\n%%EOF", "x.pdf").unwrap_err();
-    assert!(err.to_string().contains("not a readable PDF"), "{err}");
+    // (Bytes no reader opens are an error, not an empty document:
+    // `lib.rs`'s `text_layer_path_reports_an_unreadable_file`.)
 }
 
 /// #211: HEIC is detected by content, and without the `heif` feature the

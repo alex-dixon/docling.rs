@@ -63,18 +63,15 @@ impl TesseractOptions {
     /// `ocr_lang`), the rest from the environment. A `DOCLING_RS_TESSERACT_PSM`
     /// outside 0–13 warns and is ignored.
     pub fn from_env(lang: Option<String>) -> Self {
-        let psm = docling_core::env::nonempty("DOCLING_RS_TESSERACT_PSM").and_then(|raw| match raw
-            .trim()
-            .parse::<u8>()
-        {
-            Ok(n) if n <= 13 => Some(n),
-            _ => {
+        let psm = docling_core::env::nonempty("DOCLING_RS_TESSERACT_PSM").and_then(|raw| {
+            let psm = parse_psm(&raw);
+            if psm.is_none() {
                 eprintln!(
                     "docling-pdf: DOCLING_RS_TESSERACT_PSM={raw:?} is not a page \
                          segmentation mode 0-13; using Tesseract's default"
                 );
-                None
             }
+            psm
         });
         Self {
             cmd: docling_core::env::nonempty("DOCLING_TESSERACT")
@@ -84,6 +81,12 @@ impl TesseractOptions {
             tessdata_dir: docling_core::env::nonempty("DOCLING_RS_TESSDATA_DIR"),
         }
     }
+}
+
+/// A `DOCLING_RS_TESSERACT_PSM` value: a page segmentation mode 0–13, or
+/// `None` for anything else.
+fn parse_psm(raw: &str) -> Option<u8> {
+    raw.trim().parse::<u8>().ok().filter(|&n| n <= 13)
 }
 
 /// Tesseract's `-l` argument for an `ocr_lang` value under this engine.
@@ -929,9 +932,12 @@ mod tests {
     }
 
     #[test]
-    fn psm_env_is_range_checked() {
-        let opts = TesseractOptions::from_env(Some("eng".into()));
-        assert_eq!(opts.lang.as_deref(), Some("eng"));
-        assert!(opts.psm.is_none() || opts.psm.is_some_and(|p| p <= 13));
+    fn psm_is_range_checked() {
+        assert_eq!(parse_psm("6"), Some(6));
+        assert_eq!(parse_psm(" 13 "), Some(13));
+        assert_eq!(parse_psm("0"), Some(0));
+        for bad in ["14", "-1", "300", "six", ""] {
+            assert_eq!(parse_psm(bad), None, "{bad:?}");
+        }
     }
 }

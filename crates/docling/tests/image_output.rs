@@ -22,7 +22,7 @@ fn convert(converter: DocumentConverter) -> Value {
     let path = repo_root().join("tests/data/pdf/sources/picture_classification.pdf");
     let source = SourceDocument::from_file(&path).expect("picture fixture");
     let doc = converter
-        .skip_ocr(true)
+        .no_ocr(true)
         .convert(source)
         .expect("convert")
         .document;

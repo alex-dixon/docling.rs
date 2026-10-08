@@ -2240,14 +2240,37 @@ fn is_row_header(cells: &[ElementRef]) -> bool {
 /// HTML5's "rowspan=0 spans to the end of the row group" is not modelled,
 /// the cell simply keeps one slot).
 fn span_attr(cell: ElementRef, name: &str) -> usize {
-    let Some(v) = cell.value().attr(name) else {
+    let limit = if name == "colspan" {
+        MAX_COLSPAN
+    } else {
+        MAX_ROWSPAN
+    };
+    span_value(cell.value().attr(name), limit)
+}
+
+/// docling's `MAX_COLSPAN` / `MAX_ROWSPAN` (`backend/utils/table_spans.py`,
+/// HTML's own limits): a declared span past them is clamped, so a
+/// `colspan="999999999"` cannot make the grid builder allocate billions of
+/// slots.
+pub(super) const MAX_COLSPAN: usize = 1000;
+pub(super) const MAX_ROWSPAN: usize = 65_534;
+
+/// One span attribute as `_get_cell_spans` reads it — [`span_attr`]'s rule,
+/// clamped to `[1, limit]` (`clamp_span`); a digit run too long to parse is
+/// over every limit, so it is the limit. Shared with the JSON item tree
+/// (`html_tree`), which must see the same grid.
+pub(super) fn span_value(raw: Option<&str>, limit: usize) -> usize {
+    let Some(v) = raw else {
         return 1;
     };
     if !v.starts_with(|c: char| c.is_numeric()) {
         return 1;
     }
     let digits: String = v.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse::<usize>().map_or(1, |n| n.max(1))
+    match digits.trim_start_matches('0') {
+        "" => 1,
+        d => d.parse::<usize>().map_or(limit, |n| n.clamp(1, limit)),
+    }
 }
 
 /// Render a table cell to Markdown. docling treats a cell as "rich" (and
