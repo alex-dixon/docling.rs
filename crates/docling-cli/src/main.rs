@@ -2359,6 +2359,11 @@ fn run_serve(args: Vec<String>) -> ExitCode {
             "--allow-url-fetch" => cfg.allow_url_fetch = true,
             "--no-url-fetch" => cfg.allow_url_fetch = false,
             "--strict" => cfg.strict = true,
+            // #615: docling-serve's API key (`DOCLING_SERVE_API_KEY` when absent).
+            "--api-key" => match it.next() {
+                Some(v) if !v.is_empty() => cfg.api_key = Some(v),
+                _ => return serve_usage("--api-key needs a key"),
+            },
             other => return serve_usage(&format!("unknown argument '{other}'")),
         }
     }
@@ -2381,7 +2386,7 @@ fn run_serve(args: Vec<String>) -> ExitCode {
 #[cfg(feature = "serve")]
 fn serve_usage(err: &str) -> ExitCode {
     eprintln!("error: {err}");
-    eprintln!("usage: docling-rs serve [--addr HOST:PORT] [--concurrency N] [--max-body-mb N] [--queue-size N] [--result-ttl SECS] [--warmup] [--allow-url-fetch] [--strict]");
+    eprintln!("usage: docling-rs serve [--addr HOST:PORT] [--concurrency N] [--max-body-mb N] [--queue-size N] [--result-ttl SECS] [--max-memory-mb N] [--warmup] [--allow-url-fetch] [--strict] [--api-key KEY]");
     ExitCode::from(2)
 }
 

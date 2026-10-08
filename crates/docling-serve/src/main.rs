@@ -2,7 +2,7 @@
 //!
 //! Usage: docling-serve [--addr HOST:PORT] [--concurrency N] [--max-body-mb N]
 //!                      [--queue-size N] [--result-ttl SECS] [--max-memory-mb N]
-//!                      [--warmup] [--allow-url-fetch] [--strict]
+//!                      [--warmup] [--allow-url-fetch] [--strict] [--api-key KEY]
 //!
 //!   --addr HOST:PORT  bind address (default: 127.0.0.1:5001). Bind 0.0.0.0
 //!                     only behind a trusted proxy.
@@ -21,6 +21,10 @@
 //!   --no-url-fetch    accepted for compatibility (URL fetch is now off by
 //!                     default; this is a no-op)
 //!   --strict          default to the cleaner strict Markdown dialect
+//!   --api-key KEY     require `X-Api-Key: KEY` on every /v1 request (#615,
+//!                     docling-serve's DOCLING_SERVE_API_KEY, which is read
+//!                     when the flag is absent — prefer it: a flag shows up in
+//!                     the process list)
 
 use std::process::ExitCode;
 
@@ -73,6 +77,10 @@ fn main() -> ExitCode {
             // existing invocations don't break.
             "--no-url-fetch" => cfg.allow_url_fetch = false,
             "--strict" => cfg.strict = true,
+            "--api-key" => match args.next() {
+                Some(v) if !v.is_empty() => cfg.api_key = Some(v),
+                _ => return usage("--api-key needs a key"),
+            },
             "--help" | "-h" => return usage(""),
             other => return usage(&format!("unknown argument '{other}'")),
         }
@@ -99,7 +107,7 @@ fn usage(err: &str) -> ExitCode {
         eprintln!("error: {err}");
     }
     eprintln!(
-        "usage: docling-serve [--addr HOST:PORT] [--concurrency N] [--max-body-mb N] [--queue-size N] [--result-ttl SECS] [--max-memory-mb N] [--warmup] [--allow-url-fetch] [--strict]"
+        "usage: docling-serve [--addr HOST:PORT] [--concurrency N] [--max-body-mb N] [--queue-size N] [--result-ttl SECS] [--max-memory-mb N] [--warmup] [--allow-url-fetch] [--strict] [--api-key KEY]"
     );
     if err.is_empty() {
         ExitCode::SUCCESS

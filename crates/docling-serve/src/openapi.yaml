@@ -12,6 +12,11 @@ info:
 
     Options may be sent as query parameters, multipart text fields, or JSON
     keys; a body value wins over the same option in the query string.
+
+    Python docling-serve's own routes (`/v1/convert/file`, `/v1/convert/source`,
+    their `/async` variants, `/v1/status/poll/{id}`, `/v1alpha/…`) are served
+    too, in upstream's request and response shapes (#615). With `--api-key`
+    (or `DOCLING_SERVE_API_KEY`) set, every `/v1` route needs `X-Api-Key`.
   version: 1.0.0
   license:
     name: MIT
@@ -327,6 +332,145 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/convert/file:
+    post:
+      summary: Convert uploads — upstream docling-serve's API (#615)
+      description: |
+        Python docling-serve's route, for the clients written against it
+        (Open WebUI, n8n, Dify, LangChain's docling-serve client). Uploads go
+        in repeatable `files` parts; options are upstream's names
+        (`UpstreamOptions`) as form fields, a list option one field per item.
+        Options with no equivalent here are accepted and ignored. One document
+        answers a `ConvertDocumentResponse`; several (or `target_type=zip`) a
+        zip of `<stem>.<ext>` outputs. A document that fails to convert is a
+        200 with `status: failure`. Also served at `/v1alpha/convert/file`.
+      operationId: compatConvertFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              allOf:
+                - type: object
+                  properties:
+                    files:
+                      type: array
+                      items: { type: string, format: binary }
+                  required: [files]
+                - $ref: "#/components/schemas/UpstreamOptions"
+      responses:
+        "200":
+          description: The conversion (a failed document included).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConvertDocumentResponse" }
+            application/zip:
+              schema: { type: string, format: binary }
+        "400":
+          description: Malformed request (no `files` part, unreadable option value).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: An API key is configured and `X-Api-Key` is missing or wrong.
+
+  /v1/convert/source:
+    post:
+      summary: Convert URL / base64 sources — upstream docling-serve's API (#615)
+      description: |
+        `sources` are `kind`-tagged: `{"kind": "file", "base64_string",
+        "filename"}` always, `{"kind": "http", "url", "headers"}` with
+        `--allow-url-fetch`; docling-serve 0.x's `file_sources` /
+        `http_sources` lists are read too. `options` holds `UpstreamOptions`;
+        `target` is `{"kind": "inbody"}` (default) or `{"kind": "zip"}`. Also
+        served at `/v1alpha/convert/source`.
+      operationId: compatConvertSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sources: { type: array, items: { type: object } }
+                file_sources: { type: array, items: { type: object } }
+                http_sources: { type: array, items: { type: object } }
+                options: { $ref: "#/components/schemas/UpstreamOptions" }
+                target:
+                  type: object
+                  properties:
+                    kind: { type: string, enum: [inbody, zip] }
+      responses:
+        "200":
+          description: The conversion (a failed document included).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConvertDocumentResponse" }
+            application/zip:
+              schema: { type: string, format: binary }
+        "400":
+          description: Malformed body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: A URL source without `--allow-url-fetch`, or an unsupported target kind.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/convert/file/async:
+    post:
+      summary: Queue an upload conversion — upstream docling-serve's API (#615)
+      description: |
+        The `/v1/convert/file` request, answered at once with a
+        `TaskStatusResponse`; poll `GET /v1/status/poll/{id}`, then fetch the
+        `ConvertDocumentResponse` from `GET /v1/result/{id}`.
+      operationId: compatConvertFileAsync
+      responses:
+        "200":
+          description: The queued task.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskStatusResponse" }
+        "429":
+          description: The job queue is full.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/convert/source/async:
+    post:
+      summary: Queue a source conversion — upstream docling-serve's API (#615)
+      operationId: compatConvertSourceAsync
+      responses:
+        "200":
+          description: The queued task.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskStatusResponse" }
+        "429":
+          description: The job queue is full.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/status/poll/{id}:
+    get:
+      summary: Task status in upstream's shape (#615)
+      description: Any task's status (compat or `/v1/convert/async`). Also at `/v1alpha/status/poll/{id}`.
+      operationId: compatStatusPoll
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The task's state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskStatusResponse" }
+        "404":
+          description: "Unknown or expired task — `{\"detail\": \"Task not found.\"}`."
 
   /v1/config:
     get:
@@ -894,6 +1038,69 @@ components:
       properties:
         error: { type: string }
       required: [error]
+
+    ConvertDocumentResponse:
+      type: object
+      description: Upstream docling-serve's answer for one document (#615).
+      properties:
+        document:
+          type: object
+          properties:
+            filename: { type: string }
+            md_content: { type: [string, "null"] }
+            json_content: { type: [object, "null"], description: docling `DoclingDocument` JSON }
+            html_content: { type: [string, "null"] }
+            text_content: { type: [string, "null"] }
+            doctags_content: { type: "null", description: always null — no DocTags writer }
+            doclang_content: { type: [string, "null"] }
+        status: { type: string, enum: [success, partial_success, failure] }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              component_type: { type: string }
+              module_name: { type: string }
+              error_message: { type: string }
+        processing_time: { type: number }
+        timings: { type: object }
+        confidence: { type: object, description: PDF/image conversions only }
+    TaskStatusResponse:
+      type: object
+      properties:
+        task_id: { type: string }
+        task_type: { type: string, enum: [convert] }
+        task_status: { type: string, enum: [pending, started, success, failure] }
+        task_position: { type: ["null", integer] }
+        task_meta: { type: ["null", object] }
+        error_message: { type: string }
+    UpstreamOptions:
+      type: object
+      description: |
+        Python docling-serve's option names (#615). Read: `to_formats`
+        (md, json, html, text, doclang; doctags is always null),
+        `image_export_mode` (embedded default | placeholder; referenced is
+        answered as placeholder), `md_page_break_placeholder`, `do_ocr`,
+        `force_ocr`, `do_table_structure`, `page_range`,
+        `do_pdf_heading_hierarchy`, `md_compact_tables`,
+        `do_code_enrichment`, `do_formula_enrichment`,
+        `do_picture_classification`, `document_timeout`, `images_scale`,
+        `pipeline` (vlm; others select by input format), `ocr_engine`
+        (tesseract / tesserocr / tesseract_cli → Tesseract, the rest → the
+        built-in PP-OCR), `ocr_lang`, `target_type` (zip). This server's own
+        option names (`strict`, `pdf_password`, …) are read too; everything
+        else is ignored.
+      properties:
+        to_formats: { type: array, items: { type: string } }
+        image_export_mode: { type: string, enum: [embedded, placeholder, referenced] }
+        md_page_break_placeholder: { type: string }
+        do_ocr: { type: boolean }
+        force_ocr: { type: boolean }
+        do_table_structure: { type: boolean }
+        page_range: { type: array, items: { type: integer }, minItems: 2, maxItems: 2 }
+        ocr_engine: { type: string }
+        ocr_lang: { type: array, items: { type: string } }
+        target_type: { type: string, enum: [inbody, zip] }
 
   parameters:
     to:

@@ -180,6 +180,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Semaphore;
 
+mod compat;
 pub mod o11y;
 mod passthrough;
 
@@ -218,6 +219,12 @@ pub struct ServeConfig {
     /// answer 503 instead of being accepted and OOM-killing the whole server
     /// (exit 137 takes every in-flight request with it).
     pub max_memory_mb: Option<u64>,
+    /// docling-serve's API key (#615): when set, every `/v1` and `/v1alpha`
+    /// request must carry it as `X-Api-Key` (401 otherwise); health,
+    /// readiness, metrics and the docs page stay open. `None` falls back to
+    /// `DOCLING_SERVE_API_KEY`, upstream's variable — the way to configure it
+    /// without putting the key on a command line.
+    pub api_key: Option<String>,
 }
 
 impl Default for ServeConfig {
@@ -232,6 +239,7 @@ impl Default for ServeConfig {
             queue_size: 16,
             result_ttl_secs: 600,
             max_memory_mb: None,
+            api_key: None,
         }
     }
 }
@@ -299,6 +307,12 @@ pub fn router(cfg: ServeConfig) -> Router {
     if let Some(c) = memory_ceiling_mb.filter(|&c| c > 0) {
         eprintln!("docling-serve: memory ceiling {c} MB (admission control, #263)");
     }
+    let api_key: Option<Arc<str>> = cfg
+        .api_key
+        .clone()
+        .filter(|k| !k.is_empty())
+        .or_else(|| docling_core::env::nonempty("DOCLING_SERVE_API_KEY"))
+        .map(Arc::from);
     let state = Arc::new(AppState {
         pipeline: Mutex::new(None),
         permits: Arc::new(Semaphore::new(cfg.concurrency.max(1))),
@@ -385,7 +399,25 @@ pub fn router(cfg: ServeConfig) -> Router {
         .route("/v1/convert/async", post(convert_async))
         .route("/v1/status/{id}", get(job_status))
         .route("/v1/result/{id}", get(job_result))
+        // #615: upstream docling-serve's API — what Open WebUI, n8n, Dify
+        // and LangChain's docling-serve client call (`compat.rs`).
+        .route("/v1/convert/file", post(compat::convert_file))
+        .route("/v1/convert/source", post(compat::convert_source))
+        .route("/v1/convert/file/async", post(compat::convert_file_async))
+        .route(
+            "/v1/convert/source/async",
+            post(compat::convert_source_async),
+        )
+        .route("/v1/status/poll/{id}", get(compat::status_poll))
+        .route("/v1alpha/convert/file", post(compat::convert_file))
+        .route("/v1alpha/convert/source", post(compat::convert_source))
+        .route("/v1alpha/status/poll/{id}", get(compat::status_poll))
+        .route("/v1alpha/result/{id}", get(job_result))
         .layer(DefaultBodyLimit::max(cfg.max_body_bytes))
+        .layer(axum::middleware::from_fn_with_state(
+            api_key,
+            compat::require_api_key,
+        ))
         // Request span/log + metrics (#297) — outermost, so it times the whole
         // request including body-limit rejections.
         .layer(axum::middleware::from_fn(o11y::track))
@@ -615,6 +647,7 @@ struct UrlRequest {
     options: ConvertOptions,
 }
 
+#[derive(Debug)]
 enum ApiError {
     Bad(String),
     Unsupported(String),
@@ -1056,6 +1089,29 @@ async fn convert_async(
         return Err(e);
     }
 
+    let id = submit_job(&state, move |st, rt| {
+        run_conversion(st, sources, &options, &to, image_mode, target.as_ref(), rt)
+    })?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "task_id": id, "task_status": "pending" })),
+    )
+        .into_response())
+}
+
+/// Queue `work` as an async job (#182): a task id now, the work later on
+/// the shared conversion semaphore (so it reuses the warm pipeline and
+/// counts against the same concurrency as sync requests), its outcome kept
+/// for `/v1/result/{id}` until the TTL evicts it. Refused with 429 when the
+/// job map is full. Shared by `/v1/convert/async` and the upstream-shaped
+/// async routes (#615).
+fn submit_job<F>(state: &Arc<AppState>, work: F) -> Result<String, ApiError>
+where
+    F: FnOnce(&AppState, &tokio::runtime::Handle) -> Result<StoredResponse, ApiError>
+        + Send
+        + 'static,
+{
     let id = task_id();
     {
         let mut jobs = state.jobs.lock().unwrap();
@@ -1093,10 +1149,9 @@ async fn convert_async(
             return; // evicted while queued (TTL abuse would need days)
         }
         let stx = st.clone();
-        let opts = options;
         let rt = tokio::runtime::Handle::current();
         let outcome = tokio::task::spawn_blocking(move || {
-            let out = run_conversion(&stx, sources, &opts, &to, image_mode, target.as_ref(), &rt);
+            let out = work(&stx, &rt);
             trim_heap();
             out
         })
@@ -1115,12 +1170,7 @@ async fn convert_async(
             job.done_at = Some(std::time::Instant::now());
         }
     });
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({ "task_id": id, "task_status": "pending" })),
-    )
-        .into_response())
+    Ok(id)
 }
 
 /// `GET /v1/status/{id}` (#182).

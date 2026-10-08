@@ -138,6 +138,14 @@ async fn serves_its_logo_and_openapi_description() {
         "/v1/config",
         "/health",
         "/ready",
+        // #615: upstream docling-serve's routes.
+        "/v1/convert/file",
+        "/v1/convert/source",
+        "/v1/convert/file/async",
+        "/v1/convert/source/async",
+        "/v1/status/poll/{id}",
+        "ConvertDocumentResponse",
+        "UpstreamOptions",
     ] {
         assert!(spec.contains(path), "{path} missing from openapi.yaml");
     }
@@ -1813,4 +1821,289 @@ async fn zip_upload_converts_each_document() {
     let (ct, body) = multipart("bundle.zip", &only_exe, &[]);
     let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// --- #615: upstream docling-serve's API ----------------------------------
+
+/// A multipart body the way upstream's clients send it: every upload as a
+/// `files` part, options as repeated text parts.
+fn upload(files: &[(&str, &[u8])], fields: &[(&str, &str)]) -> (String, Vec<u8>) {
+    let boundary = "docling-serve-compat-boundary";
+    let mut body = Vec::new();
+    for (file_name, content) in files {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"{file_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(content);
+        body.extend_from_slice(b"\r\n");
+    }
+    for (k, v) in fields {
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n")
+                .as_bytes(),
+        );
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+fn post(uri: &str, content_type: &str, body: Vec<u8>) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn json_body(response: axum::response::Response) -> serde_json::Value {
+    serde_json::from_str(&body_string(response).await).unwrap()
+}
+
+/// Open WebUI's `DoclingLoader` request, replayed: `files` named after the
+/// upload's path, `image_export_mode=placeholder`, a form-feed page-break
+/// marker and a `DOCLING_PARAMS` full of upstream-only knobs. The answer is
+/// docling's `ConvertDocumentResponse` with the pages split on `\f`.
+#[tokio::test]
+async fn open_webui_request_gets_a_convert_document_response() {
+    let pptx =
+        std::fs::read(repo_root().join("tests/data/pptx/sources/powerpoint_sample.pptx")).unwrap();
+    let (ct, body) = upload(
+        &[(
+            "/app/backend/data/uploads/1b2c_powerpoint_sample.pptx",
+            &pptx,
+        )],
+        &[
+            ("image_export_mode", "placeholder"),
+            ("md_page_break_placeholder", "\u{c}"),
+            ("do_ocr", "true"),
+            ("ocr_engine", "easyocr"),
+            ("ocr_lang", "en"),
+            ("pdf_backend", "dlparse_v4"),
+            ("table_mode", "accurate"),
+            ("do_picture_description", "false"),
+        ],
+    );
+    let response = app()
+        .oneshot(post("/v1/convert/file", &ct, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    let v = json_body(response).await;
+    assert_eq!(v["status"], "success", "{v}");
+    assert_eq!(v["errors"], serde_json::json!([]), "{v}");
+    assert!(v["processing_time"].as_f64().is_some(), "{v}");
+    let doc = &v["document"];
+    assert_eq!(doc["filename"], "1b2c_powerpoint_sample.pptx");
+    let md = doc["md_content"].as_str().expect("md_content");
+    assert!(md.split('\u{c}').count() >= 2, "pages split on \\f: {md:?}");
+    assert!(!md.contains("data:image"), "placeholder images: {md}");
+    assert!(doc["json_content"].is_null() && doc["text_content"].is_null());
+}
+
+#[tokio::test]
+async fn to_formats_fill_their_content_fields() {
+    let (ct, body) = upload(
+        &[("note.md", b"# Title\n\nSome **bold** text.\n")],
+        &[
+            ("to_formats", "md"),
+            ("to_formats", "json"),
+            ("to_formats", "text"),
+        ],
+    );
+    let response = app()
+        .oneshot(post("/v1/convert/file", &ct, body))
+        .await
+        .unwrap();
+    let v = json_body(response).await;
+    let doc = &v["document"];
+    assert_eq!(doc["json_content"]["schema_name"], "DoclingDocument", "{v}");
+    assert_eq!(doc["text_content"], "Title\n\nSome bold text.");
+    assert!(doc["md_content"].as_str().unwrap().contains("# Title"));
+    assert!(doc["html_content"].is_null());
+}
+
+/// A document that does not convert is a `200` envelope with `status:
+/// "failure"` and the reason in `errors[0].error_message` — upstream's
+/// clients read failures there, not from the HTTP status.
+#[tokio::test]
+async fn a_corrupt_upload_is_a_failure_envelope() {
+    let (ct, body) = upload(&[("broken.docx", b"not a zip at all")], &[]);
+    let response = app()
+        .oneshot(post("/v1/convert/file", &ct, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v = json_body(response).await;
+    assert_eq!(v["status"], "failure", "{v}");
+    assert!(
+        !v["errors"][0]["error_message"].as_str().unwrap().is_empty(),
+        "{v}"
+    );
+    assert!(v["document"]["md_content"].is_null());
+    assert_eq!(v["document"]["filename"], "broken.docx");
+}
+
+/// Several documents answer docling-serve's zip of `<stem>.<ext>` outputs.
+#[tokio::test]
+async fn several_files_answer_a_zip() {
+    let (ct, body) = upload(
+        &[("a.md", b"# A\n"), ("b.csv", b"x,y\n1,2\n")],
+        &[("to_formats", "md"), ("to_formats", "json")],
+    );
+    let response = app()
+        .oneshot(post("/v1/convert/file", &ct, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    for name in ["a.md", "a.json", "b.md", "b.json"] {
+        assert!(
+            bytes.windows(name.len()).any(|w| w == name.as_bytes()),
+            "{name} missing"
+        );
+    }
+}
+
+#[tokio::test]
+async fn convert_source_takes_base64_files_and_gates_http() {
+    let b64 = docling_b64("# From base64\n");
+    let body = format!(
+        r#"{{"sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "doc.md"}}],
+            "options": {{"to_formats": ["md", "text"], "do_ocr": false, "page_range": [1, 9223372036854775807]}}}}"#
+    );
+    let response = app()
+        .oneshot(post(
+            "/v1/convert/source",
+            "application/json",
+            body.into_bytes(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v = json_body(response).await;
+    assert_eq!(v["status"], "success", "{v}");
+    assert_eq!(v["document"]["filename"], "doc.md");
+    assert_eq!(v["document"]["md_content"], "# From base64\n");
+    assert_eq!(v["document"]["text_content"], "From base64");
+
+    // docling-serve 0.x's `file_sources`, on the `/v1alpha` alias.
+    let body =
+        format!(r#"{{"file_sources": [{{"base64_string": "{b64}", "filename": "old.md"}}]}}"#);
+    let response = app()
+        .oneshot(post(
+            "/v1alpha/convert/source",
+            "application/json",
+            body.into_bytes(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(json_body(response).await["status"], "success");
+
+    // A URL source needs --allow-url-fetch; nothing is fetched without it.
+    let body = r#"{"sources": [{"kind": "http", "url": "https://example.com/a.pdf"}]}"#;
+    let response = app()
+        .oneshot(post(
+            "/v1/convert/source",
+            "application/json",
+            body.as_bytes().to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error(), "{}", response.status());
+    assert!(body_string(response).await.contains("--allow-url-fetch"));
+}
+
+/// The async variants: a `TaskStatusResponse`, `/v1/status/poll/{id}` until
+/// `success`, then the `ConvertDocumentResponse` from `/v1/result/{id}`.
+#[tokio::test]
+async fn async_file_conversion_polls_to_a_result() {
+    let app = app();
+    let (ct, body) = upload(&[("note.md", b"# Async\n")], &[]);
+    let response = app
+        .clone()
+        .oneshot(post("/v1/convert/file/async", &ct, body))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let task = json_body(response).await;
+    assert_eq!(task["task_type"], "convert", "{task}");
+    let id = task["task_id"].as_str().unwrap().to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/status/poll/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = json_body(response).await;
+        match status["task_status"].as_str().unwrap() {
+            "success" => break,
+            "pending" | "started" => {}
+            other => panic!("task {other}: {status}"),
+        }
+        assert!(std::time::Instant::now() < deadline, "task never finished");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/result/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let v = json_body(response).await;
+    assert_eq!(v["status"], "success", "{v}");
+    assert_eq!(v["document"]["md_content"], "# Async\n");
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/status/poll/no-such-task")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// `X-Api-Key` (docling-serve's `DOCLING_SERVE_API_KEY`): every `/v1` route
+/// needs it once a key is configured; health and the docs page stay open.
+#[tokio::test]
+async fn api_key_guards_the_v1_routes() {
+    let app = router(ServeConfig {
+        api_key: Some("s3cret".into()),
+        ..ServeConfig::default()
+    });
+    let (ct, body) = upload(&[("note.md", b"# Key\n")], &[]);
+    let response = app
+        .clone()
+        .oneshot(post("/v1/convert/file", &ct, body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let mut request = post("/v1/convert/file", &ct, body);
+    request
+        .headers_mut()
+        .insert("x-api-key", "s3cret".parse().unwrap());
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
