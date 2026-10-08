@@ -304,6 +304,12 @@ pub struct MarkdownStreamer {
     /// so the break it implies is paid by that batch's first block).
     page_break: Option<String>,
     pending_page_break: bool,
+    /// Whether an earlier push rendered an *item* — the page-break scan's
+    /// state ([`Ctx`]'s `emitted_any`). It differs from `emitted_any` (text
+    /// written) only when every block of the earlier pushes was empty and
+    /// dropped (#605): a page break before the next item is still owed then,
+    /// exactly as in the buffered export.
+    items_emitted: bool,
     /// The export options beyond the image mode (#599): layers, picture
     /// traversal, escaping, the placeholder — [`with_export_options`](Self::with_export_options).
     layers: ContentLayers,
@@ -347,6 +353,7 @@ impl MarkdownStreamer {
             pic_index: 0,
             page_break: None,
             pending_page_break: false,
+            items_emitted: false,
             layers: ContentLayers::BODY,
             traverse_pictures: false,
             escape_html: true,
@@ -405,7 +412,7 @@ impl MarkdownStreamer {
             in_table_cell: false,
             page_break: std::mem::take(&mut self.page_break),
             pending_page_break: self.pending_page_break,
-            emitted_any: self.emitted_any,
+            emitted_any: self.items_emitted,
             layers: self.layers,
             current_layer: None,
             traverse_pictures: self.traverse_pictures,
@@ -421,6 +428,7 @@ impl MarkdownStreamer {
         self.pic_index = ctx.pic_index;
         self.page_break = std::mem::take(&mut ctx.page_break);
         self.pending_page_break = ctx.pending_page_break;
+        self.items_emitted = ctx.emitted_any;
         if blocks.is_empty() {
             return String::new();
         }
@@ -549,6 +557,17 @@ fn render(nodes: &[Node], blocks: &mut Vec<String>, ctx: &mut Ctx) {
             }
         }
         if blocks.len() > before {
+            // docling-core joins only the parts that carry text
+            // (`"\n\n".join(p.text for p in parts if p.text)`, at the
+            // document and every group scope), so an item that renders an
+            // empty block — a picture or chart under `image_placeholder: ""`,
+            // an empty field part or inline group — adds no blank lines
+            // (#605). It still counts as an item for the page-break scan:
+            // upstream's page-break marker sits between the *items* of two
+            // pages and is never empty itself, so the placeholder below still
+            // goes in (an empty placeholder keeps its doubled delimiter).
+            let kept: Vec<String> = blocks.drain(before..).filter(|b| !b.is_empty()).collect();
+            blocks.extend(kept);
             if ctx.pending_page_break {
                 // The placeholder is a block of its own, joined by the document
                 // delimiter like docling's `_PageBreakSerResult` part — an
@@ -2255,6 +2274,121 @@ mod tests {
         });
         assert!(md.contains("Figure 1\n\n[figure]\n"), "{md}");
         assert!(!md.contains("<!-- image -->"));
+    }
+
+    /// #605: an empty `image_placeholder` prints nothing — no empty block, so
+    /// no extra blank lines — while the page-break scan still counts the
+    /// picture as an item. Every expectation is docling-core 2.99's own
+    /// `export_to_markdown(image_placeholder="", page_break_placeholder=…)`
+    /// (plus the trailing newline this port always writes).
+    #[test]
+    fn empty_image_placeholder_prints_nothing() {
+        fn picture(caption: Option<&str>) -> Node {
+            Node::Picture {
+                caption: caption.map(Into::into),
+                caption_href: None,
+                image: None,
+                classification: None,
+                caption_parent: Default::default(),
+            }
+        }
+        fn page(no: usize) -> Node {
+            Node::PageInfo {
+                page_no: no,
+                width: 100.0,
+                height: 100.0,
+            }
+        }
+        fn para(text: &str) -> Node {
+            Node::Paragraph { text: text.into() }
+        }
+        let options = MarkdownExportOptions {
+            image_placeholder: String::new(),
+            ..MarkdownExportOptions::default()
+        };
+        // (nodes, page-break placeholder, expected)
+        let cases: Vec<(Vec<Node>, Option<&str>, &str)> = vec![
+            (
+                vec![page(1), para("a"), picture(None), para("b")],
+                None,
+                "a\n\nb\n",
+            ),
+            (
+                vec![page(1), para("a"), picture(Some("Figure 1")), para("b")],
+                None,
+                "a\n\nFigure 1\n\nb\n",
+            ),
+            (
+                vec![
+                    page(1),
+                    para("a"),
+                    page(2),
+                    picture(None),
+                    page(3),
+                    para("b"),
+                ],
+                Some("<!-- pb -->"),
+                "a\n\n<!-- pb -->\n\n<!-- pb -->\n\nb\n",
+            ),
+            (
+                vec![
+                    page(1),
+                    para("a"),
+                    page(2),
+                    picture(None),
+                    page(3),
+                    para("b"),
+                ],
+                Some(""),
+                "a\n\n\n\n\n\nb\n",
+            ),
+            (
+                vec![page(1), picture(None), page(2), para("b")],
+                Some("<!-- pb -->"),
+                "<!-- pb -->\n\nb\n",
+            ),
+            (
+                vec![page(1), picture(None), page(2), para("b")],
+                Some(""),
+                "\n\nb\n",
+            ),
+            (
+                vec![page(1), para("a"), page(2), picture(None)],
+                Some("<!-- pb -->"),
+                "a\n\n<!-- pb -->\n",
+            ),
+        ];
+        for (nodes, placeholder, expected) in cases {
+            let mut doc = DoclingDocument::new("t");
+            doc.page_break_placeholder = placeholder.map(Into::into);
+            for node in nodes {
+                doc.push(node);
+            }
+            let (md, _) = doc.export_to_markdown_with_options(&options);
+            assert_eq!(md, expected, "page break {placeholder:?}");
+            // The streamer agrees at every chunking, one node per push
+            // included — an all-empty push still owes the next page break.
+            for size in 1..=doc.nodes.len() {
+                let mut streamer = MarkdownStreamer::new(false, ImageMode::Placeholder, false)
+                    .with_export_options(&options)
+                    .with_page_break_placeholder(placeholder.map(Into::into));
+                let mut out = String::new();
+                for chunk in doc.nodes.chunks(size) {
+                    out.push_str(&streamer.push(chunk, &[]));
+                }
+                out.push_str(&streamer.finish());
+                assert_eq!(
+                    out, expected,
+                    "chunks of {size}, page break {placeholder:?}"
+                );
+            }
+        }
+        // The default placeholder is untouched.
+        let mut doc = DoclingDocument::new("t");
+        doc.push(para("a"));
+        doc.push(picture(None));
+        doc.push(para("b"));
+        assert_eq!(doc.export_to_markdown(), "a\n\n<!-- image -->\n\nb\n");
     }
 
     /// The streamer takes the same options and its chunks concatenate to the
