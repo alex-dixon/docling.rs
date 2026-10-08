@@ -2633,6 +2633,34 @@ mod base14_fonts {
         assert!((g.height() - 14.0).abs() < 0.05, "{}", g.height());
     }
 
+    /// #609: ReportLab's chart axis sets each tick label with the *same* `Tm`
+    /// inside its own `q … cm … Q`, so only the CTM stacks `3`…`8` one under
+    /// another at one x. Each tick is its own line cell with its own box (as
+    /// docling-parse reads it), not one `345678` cell boxed like the first.
+    #[test]
+    fn ticks_stacked_by_cm_are_separate_line_cells() {
+        let mut content = String::new();
+        for (k, tick) in "345678".chars().enumerate() {
+            let y = 300.0 + 25.92 * k as f64;
+            content.push_str(&format!(
+                "q 1 0 0 1 125 {y} cm BT /F1 10 Tf 1 0 0 1 -5 -4 Tm ({tick}) Tj ET Q\n"
+            ));
+        }
+        let pdf = pdf_with_content(
+            b"<</Type/Font/Subtype/Type1/BaseFont/Times-Roman>>",
+            content.as_bytes(),
+        );
+        let cells = cells(&pdf);
+        let texts: Vec<&str> = cells.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["3", "4", "5", "6", "7", "8"]);
+        for (k, c) in cells.iter().enumerate() {
+            // Top-left y of a tick whose baseline is 4 pt under its cm origin.
+            let base = 842.0 - (300.0 + 25.92 * k as f32 - 4.0);
+            assert!((c.l - 120.0).abs() < 0.1, "{k}: l {}", c.l);
+            assert!(c.t < base && base - c.t < 10.0, "{k}: t {} base {base}", c.t);
+        }
+    }
+
     /// Every standard-14 alias/style decodes with real (positive-width) boxes.
     #[test]
     fn standard14_faces_get_builtin_widths() {

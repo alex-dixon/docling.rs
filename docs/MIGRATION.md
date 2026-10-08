@@ -405,7 +405,9 @@ pointed at the wrong item).
   docling's `ReadingOrderModel._add_caption_or_footnote` assigns it, within
   1.5 pt of upstream's boxes on the groundtruth corpus (the 0–511 grid's step) — and a
   checkbox item its region, so chunks made of captions or checkboxes have a
-  page.
+  page. Glyphs stacked at one x (a chart's y-axis ticks, each set by its own
+  `cm`) are separate text cells with their own boxes, as in docling-parse —
+  the text layer used to glue them into one cell boxed like the first.
 - **Image extraction** is wired for PDF/image (figure-region crops) and DOCX/PPTX
   (embedded blobs) by default, and — opt-in via
   `DocumentConverter::fetch_images` (`--fetch-images`) — for HTML/EPUB `<img src>`:
