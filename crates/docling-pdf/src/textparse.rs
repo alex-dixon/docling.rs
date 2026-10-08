@@ -2657,7 +2657,11 @@ mod base14_fonts {
             // Top-left y of a tick whose baseline is 4 pt under its cm origin.
             let base = 842.0 - (300.0 + 25.92 * k as f32 - 4.0);
             assert!((c.l - 120.0).abs() < 0.1, "{k}: l {}", c.l);
-            assert!(c.t < base && base - c.t < 10.0, "{k}: t {} base {base}", c.t);
+            assert!(
+                c.t < base && base - c.t < 10.0,
+                "{k}: t {} base {base}",
+                c.t
+            );
         }
     }
 

@@ -1,10 +1,12 @@
-07
-
-1234567891
-
 0
 
+10
+
+1
+
 Document Depth Percent (%)
+
+7
 
 14
 
@@ -40,4 +42,18 @@ Document Depth Percent (%)
 
 Context Length (#Tokens)
 
-Score
+9
+
+8
+
+7
+
+6 Score
+
+5
+
+4
+
+3
+
+2

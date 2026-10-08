@@ -366,9 +366,8 @@ fn build_cells(glyphs: &[Glyph], euclidean: bool) -> Vec<Cell> {
         // the x span alone glued those into one `345678` cell carrying the
         // first tick's box (#609), where docling-parse keeps six.
         if let Some(last) = cells.last_mut() {
-            let near = |ax: f64, ay: f64, bx: f64, by: f64| {
-                (ax - bx).abs() < 0.5 && (ay - by).abs() < 0.5
-            };
+            let near =
+                |ax: f64, ay: f64, bx: f64, by: f64| (ax - bx).abs() < 0.5 && (ay - by).abs() < 0.5;
             if near(last.rx0, last.ry0, q[0], q[1]) && near(last.rx1, last.ry1, q[2], q[3]) {
                 // Overprint duplicate: the *same* character re-stamped, offset by a
                 // fraction of its width (a kashida/elongation segment re-drawn for

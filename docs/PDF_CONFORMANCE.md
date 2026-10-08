@@ -27,9 +27,10 @@ older, pypdfium2-era docling's and the pipeline was scored with OCR on.
 **9 / 18 strict** · **10 / 18 whitespace-normalized** against upstream's
 current groundtruth (docling ≥ 2.123: docling-parse render, `do_ocr=False`,
 `compact_tables=True`; 18 fixtures — `table_misidentified_as_form`
-(docling#4064) joined the corpus with this refresh). Total 346 diff lines with
+(docling#4064) joined the corpus with this refresh). Total 342 diff lines with
 the docling-parse renderer the baselines are measured with (374 before #528
-recovered redp5110's rotated table headers); the default build's pure-Rust
+recovered redp5110's rotated table headers, 346 before #609 kept glyphs stacked
+at one x apart); the default build's pure-Rust
 renderer scored 454 on the same files before that change ("The PDF stack"
 below). (The two Korean image-only pages `skipped_1page` /
 `skipped_2pages` carry no text groundtruth and are not scored.)
@@ -48,7 +49,7 @@ below). (The two Korean image-only pages `skipped_1page` /
 | 2305.03393v1 | 4 | one author-block cluster (model-borderline) |
 | normal_4pages | 12 | docling folds the page-number glyph into the heading cluster (`## 들어가며 1`) where we emit it as its own item, and the `※` footnotes order |
 | 2203.01017v2 | 19 | caption vs enumerated-list order around Figure 1, accent spacing in the references (`Herv´e D´ejean`) |
-| 2206.01062 | 22 | author-block cluster splits (model-borderline) |
+| 2206.01062 | 18 | author-block cluster splits (model-borderline) |
 | table_misidentified_as_form | 48 | the form container's nested table / picture (docling#4064): docling nests them inside the form region and keeps the heading, we flatten the region |
 | table_mislabeled_as_picture | 85 | the survey over-detected as tables; docling keeps a cell's leading indentation (`\|   They work in parallel…`) |
 | redp5110_sampled | 152 | TOC: docling's cell matching puts the dot leaders into the page-number column (`. . . . . . . vii`), ours keeps them with the title (`. vii`); cover-page ordering |
