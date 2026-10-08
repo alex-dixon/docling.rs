@@ -471,6 +471,7 @@ impl Walker<'_> {
                 let self_ref = self.alloc.text();
                 self.emit_inline(text, self_ref);
             }
+            Node::LabeledText { .. } => self.one(&node.labeled_as_paragraph()),
             Node::CheckboxItem { checked, text } => {
                 let self_ref = self.alloc.text();
                 let mark = if *checked { "- [x] " } else { "- [ ] " };
@@ -1120,6 +1121,7 @@ fn cell_chunk_text(t: &Table, r: usize, c: usize) -> String {
 fn block_chunk_text(node: &Node) -> String {
     match node {
         Node::Paragraph { text } => unescape_text(text),
+        Node::LabeledText { .. } => block_chunk_text(&node.labeled_as_paragraph()),
         Node::InlineGroup { md_text, .. } => unescape_text(md_text),
         Node::Code { text, .. } => format!("```\n{}\n```", unescape_text(text)),
         Node::Table(inner) => triplet_table_text(inner),

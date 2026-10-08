@@ -458,6 +458,9 @@ fn render_one(node: &Node, list_level: usize, inline: bool, parts: &mut Vec<Stri
         }
         // A standalone caption item is a text item to the LaTeX serializer.
         Node::Caption { text, .. } => push(parts, inline_md(text)),
+        Node::LabeledText { .. } => {
+            render_one(&node.labeled_as_paragraph(), list_level, inline, parts)
+        }
         Node::Paragraph { text } => {
             // A whole-paragraph `$$…$$` is a formula item in the JSON — never
             // escaped, re-wrapped by the serializer.

@@ -3516,18 +3516,27 @@ pub fn assemble_page(
                 let hyperlink = (region.label == "footnote")
                     .then(|| region_hyperlink(region, &page.links))
                     .flatten();
-                let text = match hyperlink {
-                    Some(uri) => {
-                        // The strict-mode anchor pairs this item covers are
-                        // superseded by the baked whole-item link.
-                        links.retain(|(anchor, href)| {
-                            !(href == &uri && region_texts[i].contains(anchor.as_str()))
-                        });
-                        format!("[{escaped}]({uri})")
+                if let Some(uri) = &hyperlink {
+                    // The strict-mode anchor pairs this item covers are
+                    // superseded by the whole-item link.
+                    links.retain(|(anchor, href)| {
+                        !(href == uri && region_texts[i].contains(anchor.as_str()))
+                    });
+                }
+                // A footnote keeps docling's label and carries its link as
+                // the item's `hyperlink` (the JSON's `text` stays the raw
+                // footnote, not Markdown); every other serializer renders it
+                // as the `[text](uri)` paragraph it was before.
+                let node = if region.label == "footnote" {
+                    Node::LabeledText {
+                        label: "footnote".into(),
+                        text: escaped,
+                        href: hyperlink,
                     }
-                    None => escaped,
+                } else {
+                    Node::Paragraph { text: escaped }
                 };
-                nodes.push(located(loc, Node::Paragraph { text }))
+                nodes.push(located(loc, node))
             }
         }
     }
@@ -3711,7 +3720,20 @@ fn is_merge_trailer(n: &Node) -> bool {
                 | Node::PictureChildren(_)
         )
         || matches!(n, Node::Located { inner, .. } if matches!(inner.as_ref(), Node::Table(_)))
+        || is_footnote_node(n)
         || as_paragraph(n).is_some_and(looks_like_caption)
+}
+
+/// Whether a node is a footnote item (a [`Node::LabeledText`] labelled
+/// `footnote`), looking through a [`Node::Located`] wrapper — one of
+/// docling's merge skip-labels: a footnote between the two halves of a
+/// paragraph is looked past, never merged into.
+fn is_footnote_node(n: &Node) -> bool {
+    let n = match n {
+        Node::Located { inner, .. } => inner.as_ref(),
+        other => other,
+    };
+    matches!(n, Node::LabeledText { label, .. } if label == "footnote")
 }
 
 /// Rebuild node `i` as a paragraph with `text`, preserving its `<location>`

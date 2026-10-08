@@ -173,6 +173,18 @@ pub enum Node {
     /// renders it as `[text](href)`, JSON puts `hyperlink` on the caption
     /// item, DocLang emits the block-form `<caption>` with an `<href>` head.
     Caption { text: String, href: Option<String> },
+    /// A body text item with a docling label of its own and an optional
+    /// hyperlink — the PDF pipeline's `footnote` regions, whose item docling
+    /// keeps as a `footnote` text with the link annotation covering it as its
+    /// `hyperlink` (`PageAssembleModel._match_hyperlink`). The JSON writes
+    /// exactly that (label, raw text, `hyperlink`); every other serializer
+    /// renders it as the paragraph [`Self::labeled_markdown`] spells —
+    /// docling's Markdown wraps a linked item's whole text, `[text](uri)`.
+    LabeledText {
+        label: String,
+        text: String,
+        href: Option<String>,
+    },
     /// A chart (docling's `PictureItem` classified as a chart, carrying a
     /// `PictureTabularChartData` annotation). Markdown and JSON render it exactly
     /// like a [`Node::Picture`] placeholder (an `<!-- image -->` / `picture`
@@ -656,6 +668,23 @@ pub struct ListItemDclx {
     pub marker: Option<String>,
     pub text: String,
     pub runs: Vec<InlineRun>,
+}
+
+impl Node {
+    /// The paragraph a [`Node::LabeledText`] renders as outside the JSON:
+    /// its text, wrapped as `[text](uri)` when it carries a hyperlink. Any
+    /// other node is returned unchanged.
+    pub fn labeled_as_paragraph(&self) -> std::borrow::Cow<'_, Node> {
+        match self {
+            Node::LabeledText { text, href, .. } => std::borrow::Cow::Owned(Node::Paragraph {
+                text: match href {
+                    Some(uri) => format!("[{text}]({uri})"),
+                    None => text.clone(),
+                },
+            }),
+            other => std::borrow::Cow::Borrowed(other),
+        }
+    }
 }
 
 impl InlineRun {

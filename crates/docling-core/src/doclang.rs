@@ -901,6 +901,17 @@ fn emit_nodes(out: &mut Out, depth: i32, nodes: &[Node], i: &mut usize, level: u
                 emit_caption(out, depth, text, href.as_deref());
                 *i += 1;
             }
+            Node::LabeledText { .. } => {
+                let para = nodes[*i].labeled_as_paragraph();
+                emit_nodes(
+                    out,
+                    depth,
+                    std::slice::from_ref(para.as_ref()),
+                    &mut 0,
+                    level,
+                );
+                *i += 1;
+            }
             Node::CheckboxItem { checked, text } => {
                 // A `<text>` with a `<checkbox class="selected|unselected"/>` head
                 // element and the label text child (block form).
@@ -1721,6 +1732,9 @@ fn emit_located(out: &mut Out, depth: i32, location: &[u16; 4], inner: &Node) {
         }
         Node::Paragraph { text } => {
             emit_text_element(out, depth, "text", "text", text, Some(location));
+        }
+        Node::LabeledText { .. } => {
+            emit_located(out, depth, location, &inner.labeled_as_paragraph())
         }
         Node::Picture {
             caption,

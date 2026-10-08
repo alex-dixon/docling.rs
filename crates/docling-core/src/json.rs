@@ -1103,6 +1103,15 @@ impl Builder {
                 };
                 Some(self.add_text("caption", text, parent, extra))
             }
+            // A PDF footnote: docling's own label, and its link as the item's
+            // `hyperlink` rather than Markdown baked into the text.
+            Node::LabeledText { label, text, href } => {
+                let extra = match href {
+                    Some(url) => json!({ "hyperlink": url }),
+                    None => json!({}),
+                };
+                Some(self.add_text(label, text, parent, extra))
+            }
             Node::Paragraph { text } => {
                 // A whole-paragraph display equation is a formula item (docling
                 // wraps it in `$$…$$` and, unlike a text item, never escapes it).
@@ -3623,5 +3632,40 @@ mod tests {
         assert_eq!(v["texts"][1]["parent"]["$ref"], "#/groups/0");
         assert_eq!(v["pictures"][0]["children"], serde_json::json!([]));
         assert_eq!(v["tables"][0]["children"], serde_json::json!([]));
+    }
+
+    /// A PDF footnote (#620 follow-up): the JSON keeps docling's
+    /// `footnote` label, the raw text and the link as `hyperlink`; the
+    /// Markdown still wraps the whole item as `[text](uri)`, and the plain
+    /// text drops the link like docling-core's `export_to_text`.
+    #[test]
+    fn a_labeled_text_keeps_its_label_and_hyperlink_out_of_the_text() {
+        let mut doc = DoclingDocument::new("t");
+        doc.push(Node::LabeledText {
+            label: "footnote".into(),
+            text: "1 https://example.com/a\\_b".into(),
+            href: Some("https://example.com/a_b".into()),
+        });
+        doc.push(Node::LabeledText {
+            label: "footnote".into(),
+            text: "© 2022 the authors".into(),
+            href: None,
+        });
+        let v: Value = serde_json::from_str(&doc.export_to_json()).unwrap();
+        let t = &v["texts"][0];
+        assert_eq!(t["label"], "footnote");
+        assert_eq!(t["text"], "1 https://example.com/a_b");
+        assert_eq!(t["orig"], "1 https://example.com/a_b");
+        assert_eq!(t["hyperlink"], "https://example.com/a_b");
+        assert_eq!(v["texts"][1]["label"], "footnote");
+        assert!(v["texts"][1].get("hyperlink").is_none());
+        assert_eq!(
+            doc.export_to_markdown(),
+            "[1 https://example.com/a\\_b](https://example.com/a_b)\n\n© 2022 the authors\n"
+        );
+        assert_eq!(
+            doc.export_to_text(),
+            "1 https://example.com/a_b\n\n© 2022 the authors"
+        );
     }
 }
