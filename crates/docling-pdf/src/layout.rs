@@ -167,7 +167,7 @@ impl LayoutModel {
                  scripts/install/download_dependencies.sh from a docling.rs \
                  checkout (https://github.com/docling-project/docling.rs), or \
                  set DOCLING_LAYOUT_ONNX. A digital PDF's embedded text layer \
-                 converts without models in no-OCR mode (CLI: --no-ocr)"
+                 converts without models in text-layer-only mode (CLI: --text-layer-only)"
             ));
         }
         let mut builder = docling_onnx::session_builder()

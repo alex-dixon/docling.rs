@@ -151,6 +151,8 @@ async fn serves_its_logo_and_openapi_description() {
         "images:",
         "no_ocr:",
         "skip_ocr:",
+        "text_layer_only:",
+        "pdf_password:",
         "force_full_page_ocr:",
         "no_table_former:",
         "fetch_images:",
@@ -500,11 +502,13 @@ async fn rasterizes_pdf_pages_to_png() {
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
 }
 
-/// #246 end-to-end: a `no_ocr=true` request must not degrade the shared warm
-/// pipeline for later default requests. The table fixture makes the difference
-/// decisive — the full pipeline emits a Markdown table (pipes), the no-OCR
-/// text-layer path emits flat paragraphs. Needs the layout/OCR/TableFormer
-/// models, so it skips on a model-free checkout.
+/// #246 end-to-end: a `text_layer_only=true` request (`no_ocr` before 2.0,
+/// #611) must not degrade the shared warm pipeline for later default
+/// requests. The table fixture makes the difference decisive — the full
+/// pipeline emits a Markdown table (pipes), the text-layer path emits flat
+/// paragraphs — and `no_ocr=true`, docling's `--no-ocr` since 2.0, keeps the
+/// table. Needs the layout/OCR/TableFormer models, so it skips on a
+/// model-free checkout.
 #[tokio::test]
 async fn no_ocr_request_does_not_stick_to_the_warm_pipeline() {
     if !ml_models_ready() {
@@ -514,8 +518,12 @@ async fn no_ocr_request_does_not_stick_to_the_warm_pipeline() {
     let pdf =
         std::fs::read(repo_root().join("tests/data/pdf/sources/2305.03393v1-pg9.pdf")).unwrap();
     let app = app();
-    let run = |no_ocr: &'static str, app: axum::Router| {
-        let (ct, body) = multipart("t.pdf", &pdf, &[("to", "md"), ("no_ocr", no_ocr)]);
+    let run = |text_layer_only: &'static str, app: axum::Router| {
+        let (ct, body) = multipart(
+            "t.pdf",
+            &pdf,
+            &[("to", "md"), ("text_layer_only", text_layer_only)],
+        );
         async move {
             let response = app.oneshot(convert_request(&ct, body, "")).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -525,14 +533,41 @@ async fn no_ocr_request_does_not_stick_to_the_warm_pipeline() {
     let full1 = run("false", app.clone()).await;
     assert!(full1.contains('|'), "full pipeline must emit the table");
     let reduced = run("true", app.clone()).await;
-    assert!(!reduced.contains('|'), "no_ocr path has no TableFormer");
+    assert!(
+        !reduced.contains('|'),
+        "the text-layer path has no TableFormer"
+    );
     // The bug: this third request reused the degraded pipeline and returned
-    // the flat no_ocr output until the server restarted.
-    let full2 = run("false", app).await;
+    // the flat text-layer output until the server restarted.
+    let full2 = run("false", app.clone()).await;
     assert_eq!(
         full1, full2,
-        "default request after no_ocr must fully recover"
+        "default request after text_layer_only must fully recover"
     );
+    // docling's `--no-ocr`: layout and TableFormer still run.
+    let (ct, body) = multipart("t.pdf", &pdf, &[("to", "md"), ("no_ocr", "true")]);
+    let response = app.oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        body_string(response).await.contains('|'),
+        "no_ocr keeps the table (docling's do_ocr=False)"
+    );
+}
+
+/// #611: `skip_ocr` is `no_ocr`'s pre-2.0 name, still read — and a JSON body
+/// carrying both spellings (a pre-2.0 client that sent both switches) is a
+/// conversion, not a duplicate-field 400.
+#[tokio::test]
+async fn both_ocr_spellings_in_one_json_body_convert() {
+    let b64 = docling::base64::encode(b"a,b\n1,2\n");
+    let body = format!(
+        r#"{{"no_ocr": false, "skip_ocr": true, "text_layer_only": false,
+            "sources": [{{"kind": "file", "base64_string": "{b64}", "filename": "t.csv"}}]}}"#
+    );
+    let response = app().oneshot(json_convert(&body, false)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_string(response).await;
+    assert!(text.contains("|   1 |   2 |"), "{text}");
 }
 
 /// #263: with the RSS already past the watermark of a tiny ceiling, both

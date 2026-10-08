@@ -16,7 +16,7 @@ default = ["ml"]
 # The full pipeline: the pure-Rust page renderer/raster + ONNX
 # layout/OCR/TableFormer/enrichment. Without it only the pure-Rust text-layer path remains
 # (`convert_text_layer` — lopdf content-stream parsing + the docling-parse
-# line sanitizer, the same extraction `--no-ocr` uses), which compiles for
+# line sanitizer, the same extraction `--text-layer-only` uses), which compiles for
 # wasm32-unknown-unknown.
 # The ONNX-free OCR pre/post half (`ocr_prep`) alone — what the wasm build
 # (#79 phase 2) pulls: pure Rust + the `image` crate, no ort/pdfium.

@@ -60,6 +60,8 @@ paths:
         - { $ref: "#/components/parameters/images" }
         - { $ref: "#/components/parameters/no_ocr" }
         - { $ref: "#/components/parameters/skip_ocr" }
+        - { $ref: "#/components/parameters/text_layer_only" }
+        - { $ref: "#/components/parameters/pdf_password" }
         - { $ref: "#/components/parameters/force_full_page_ocr" }
         - { $ref: "#/components/parameters/no_table_former" }
         - { $ref: "#/components/parameters/no_text_panels" }
@@ -116,7 +118,9 @@ paths:
                 strict: { type: boolean }
                 images: { $ref: "#/components/schemas/Images" }
                 no_ocr: { type: boolean }
-                skip_ocr: { type: boolean }
+                skip_ocr: { type: boolean, deprecated: true }
+                text_layer_only: { type: boolean }
+                pdf_password: { type: string, format: password }
                 force_full_page_ocr: { type: boolean }
                 no_table_former: { type: boolean }
                 no_text_panels: { type: boolean }
@@ -513,18 +517,30 @@ components:
           default: false
           description: Cleaner strict Markdown dialect instead of byte-for-byte docling-legacy output.
         images: { $ref: "#/components/schemas/Images" }
-        skip_ocr:
+        no_ocr:
           type: boolean
           default: false
           description: >
             PDF/image — keep layout detection and TableFormer but never run OCR
-            (docling's independent `do_ocr=False`, #244): structure survives,
-            text that exists only as pixels comes back empty. `no_ocr` (the
-            whole-stack skip) wins when both are set.
-        no_ocr:
+            (docling's `do_ocr=False`, its `--no-ocr`; #244, and since 2.0 the
+            meaning of `no_ocr`, #611): structure survives, text that exists
+            only as pixels comes back empty.
+        skip_ocr:
           type: boolean
           default: false
-          description: PDF/image — skip layout/OCR/TableFormer; emit the embedded text layer only.
+          deprecated: true
+          description: "`no_ocr` under its pre-2.0 name, still read."
+        text_layer_only:
+          type: boolean
+          default: false
+          description: >
+            PDF/image — skip layout/OCR/TableFormer; emit the embedded text
+            layer only (what `no_ocr` meant before 2.0, #611). Wins over
+            `no_ocr` when both are set.
+        pdf_password:
+          type: string
+          format: password
+          description: The password of an encrypted PDF (docling's `--pdf-password`, #611).
         force_full_page_ocr:
           type: boolean
           default: false
@@ -885,7 +901,11 @@ components:
     no_ocr:
       { name: no_ocr, in: query, schema: { type: boolean } }
     skip_ocr:
-      { name: skip_ocr, in: query, schema: { type: boolean } }
+      { name: skip_ocr, in: query, deprecated: true, schema: { type: boolean } }
+    text_layer_only:
+      { name: text_layer_only, in: query, schema: { type: boolean } }
+    pdf_password:
+      { name: pdf_password, in: query, schema: { type: string, format: password } }
     force_full_page_ocr:
       { name: force_full_page_ocr, in: query, schema: { type: boolean } }
     no_table_former:

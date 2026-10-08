@@ -292,8 +292,12 @@ order, so batch throughput comes from keeping the models warm, not from
 parallel calls.
 
 The constructor takes the same PDF/image options as the one-shot calls —
-`ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`, `skipOcr`, `forceFullPageOcr`,
-`noTextPanels`, `headingHierarchy`, `pages`, `imagesScale` / `pageImages`
+`ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`, `noOcr` (docling's `--no-ocr`:
+never OCR, keep layout and tables; `skipOcr` is its pre-2.0 name),
+`textLayerOnly` (the text layer only, no models — what `noOcr` meant before
+2.0, #611), `pdfPassword` (an encrypted PDF's password, #611),
+`forceFullPageOcr`, `noTextPanels`, `headingHierarchy`, `pages`,
+`imagesScale` / `pageImages`
 (picture-crop resolution in px per point and the JSON page images, docling's
 `images_scale` / `generate_page_images`, #520), `documentTimeout` (a per-document
 budget in seconds, docling's `document_timeout`: once spent, the pages done so
@@ -415,8 +419,9 @@ models, #388), and `pages: 'A-B'` converts only that
 then `convertFile` / `convert` / `convertFileAsync` / `convertAsync` /
 `convertFileStreaming` / `streamFileMarkdown`. It reads `strict`, the
 enrichment switches and every PDF/image option (`ocrEngine`, `ocrLang`,
-`ocrMode`, `ocrScale`, `skipOcr`, `forceFullPageOcr`, `noTextPanels`,
-`headingHierarchy`, `pages`, `imagesScale`, `pageImages`) from
+`ocrMode`, `ocrScale`, `noOcr`, `textLayerOnly`, `pdfPassword`,
+`forceFullPageOcr`, `noTextPanels`, `headingHierarchy`, `pages`, `imagesScale`,
+`pageImages`) from
 `converterOptions` (#471).
 
 `DocumentConverter` is the reusable form: `new DocumentConverter(converterOptions)`

@@ -9,7 +9,7 @@ page. Python docling cannot do this.
 
 The crate is `docling` with `default-features = false` plus `pdf-text`:
 digital PDFs convert through docling-pdf's pure-Rust content-stream parser —
-the exact extraction the native `--no-ocr` flag does (flat, line-grouped
+the exact extraction the native `--text-layer-only` flag does (flat, line-grouped
 paragraphs in reading order; no headings/lists/tables/pictures, since those
 need the layout model). The ML pipelines (pdfium + ONNX Runtime) and the HTTP
 image fetcher are compiled out: scanned/image-only PDFs get a clear "no

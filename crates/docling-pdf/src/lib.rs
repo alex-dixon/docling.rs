@@ -252,7 +252,7 @@ impl From<pdfium_render::prelude::PdfiumError> for PdfError {
 /// Convert a PDF's **embedded text layer only** — no ONNX, no
 /// threads: the pure-Rust content-stream parser ([`textparse`]) feeds the same
 /// orphan-region assembly the `no_ocr` pipeline flag uses, so text-layer PDFs
-/// come out identical to `--no-ocr` (flat, line-grouped paragraphs in reading
+/// come out identical to `--text-layer-only` (flat, line-grouped paragraphs in reading
 /// order; no headings/lists/tables/pictures, and no hyperlink recovery).
 ///
 /// This is the only conversion entry compiled without the `ml` feature (it is

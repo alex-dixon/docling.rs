@@ -1,6 +1,6 @@
 //! #497: `DocumentConverter::document_timeout` — docling's `document_timeout`.
 //!
-//! Runs on the `no_ocr` path (text layer only, no models): the budget is
+//! Runs on the `text_layer_only` path (text layer only, no models): the budget is
 //! checked between pages regardless of what each page costs, so a budget of
 //! one nanosecond is spent before the first page arrives and the conversion
 //! returns an empty, partial document instead of failing.
@@ -20,7 +20,7 @@ fn pdf_source() -> SourceDocument {
 #[test]
 fn a_spent_budget_is_a_partial_success_with_a_timeout_error() {
     let result = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .document_timeout(Some(Duration::from_nanos(1)))
         .convert(pdf_source())
         .expect("a timeout is not a failure");
@@ -41,12 +41,12 @@ fn a_spent_budget_is_a_partial_success_with_a_timeout_error() {
 #[test]
 fn an_ample_budget_converts_the_whole_document() {
     let whole = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .convert(pdf_source())
         .expect("convert")
         .document;
     let result = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .document_timeout(Some(Duration::from_secs(3600)))
         .convert(pdf_source())
         .expect("convert");
@@ -61,7 +61,7 @@ fn an_ample_budget_converts_the_whole_document() {
 #[test]
 fn a_streaming_conversion_ends_with_the_timeout_item() {
     let stream = DocumentConverter::new()
-        .no_ocr(true)
+        .text_layer_only(true)
         .document_timeout(Some(Duration::from_nanos(1)))
         .convert_streaming(pdf_source())
         .expect("stream starts");

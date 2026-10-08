@@ -47,9 +47,11 @@ fn layout_ready_ocr_sabotaged() -> bool {
     true
 }
 
-/// A digital page with a real table: `skip_ocr` must keep the layout + table
-/// structure that `no_ocr` throws away — with the OCR model unloadable, which
-/// also proves `skip_ocr` never touches it.
+/// A digital page with a real table: `no_ocr` — docling's `--no-ocr` since
+/// 2.0 (#611), `skip_ocr` its pre-2.0 name — must keep the layout + table
+/// structure that `text_layer_only` throws away, with the OCR model
+/// unloadable, which also proves it never touches it. Both spellings give
+/// the same document.
 #[test]
 fn skip_ocr_keeps_layout_and_tables() {
     if !layout_ready_ocr_sabotaged() {
@@ -65,13 +67,20 @@ fn skip_ocr_keeps_layout_and_tables() {
         .document;
     let md = doc.export_to_markdown();
     // Structure survived: the fixture's table serializes as a Markdown grid
-    // (the no_ocr path yields flat paragraphs — no pipes).
+    // (the text-layer path yields flat paragraphs — no pipes).
     assert!(
         md.contains('|'),
         "expected a Markdown table from layout + TableFormer, got:\n{md}"
     );
     // ...and its digital text layer still reads out.
     assert!(!md.trim().is_empty());
+    let no_ocr = DocumentConverter::new()
+        .no_ocr(true)
+        .convert(SourceDocument::from_file(&path).expect("table fixture"))
+        .expect("no_ocr conversion succeeds")
+        .document
+        .export_to_markdown();
+    assert_eq!(no_ocr, md, "no_ocr and skip_ocr are one switch");
 }
 
 /// A scanned page (no text layer) with `skip_ocr`: converts cleanly to a

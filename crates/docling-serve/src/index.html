@@ -107,8 +107,8 @@ The API is described by <a href="/openapi.yaml"><code>/openapi.yaml</code></a> (
     <label><input type="checkbox" id="strict"> strict Markdown</label>
     <label><input type="checkbox" id="embed" checked> embed images</label>
     <label id="fetch-images-label" title="HTML/EPUB/MHTML/JATS: resolve external <img src> and embed the bytes (outbound fetch)"><input type="checkbox" id="fetch_images"> fetch images</label>
-    <label><input type="checkbox" id="no_ocr"> no OCR</label>
-    <label title="Keep layout + TableFormer, never OCR (docling's do_ocr=False): structure survives, pixel-only text comes back empty"><input type="checkbox" id="skip_ocr"> skip OCR</label>
+    <label title="Keep layout + TableFormer, never OCR (docling's --no-ocr, do_ocr=False): structure survives, pixel-only text comes back empty"><input type="checkbox" id="no_ocr"> no OCR</label>
+    <label title="No models at all: the embedded text layer as flat paragraphs (what no_ocr meant before 2.0)"><input type="checkbox" id="text_layer_only"> text layer only</label>
     <label><input type="checkbox" id="no_table_former"> no TableFormer</label>
     <label title="Keep every detected picture as a picture (disable text-panel demotion)"><input type="checkbox" id="no_text_panels"> keep pictures</label>
     <label title="OCR every page from its render, ignoring the embedded text layer (docling's force_full_page_ocr)"><input type="checkbox" id="force_full_page_ocr"> force full-page OCR</label>
@@ -197,8 +197,9 @@ The API is described by <a href="/openapi.yaml"><code>/openapi.yaml</code></a> (
   <tr><td><code>pandoc_api_version</code></td><td><code>1.23</code></td><td><code>to=pandoc</code>: the Pandoc API your <code>pandoc</code> reads. Only 1.23 (Pandoc 3.x) is written; another version is a 400 instead of a document Pandoc would reject.</td></tr>
   <tr><td><code>strict</code></td><td><code>true</code>/<code>false</code></td><td>Cleaner strict Markdown dialect instead of byte-for-byte docling-legacy output.</td></tr>
   <tr><td><code>images</code></td><td><code>placeholder</code> (default) | <code>embedded</code></td><td>Markdown picture handling (embedded = base64 data URIs).</td></tr>
-  <tr><td><code>no_ocr</code></td><td><code>true</code>/<code>false</code></td><td>PDF/image: skip layout/OCR/TableFormer entirely; emit the embedded text layer only.</td></tr>
-  <tr><td><code>skip_ocr</code></td><td><code>true</code>/<code>false</code></td><td>PDF/image: keep layout + TableFormer, never OCR (docling's independent <code>do_ocr=False</code>, #244) — structure survives, pixel-only text comes back empty. A missing OCR model now degrades to this instead of erroring.</td></tr>
+  <tr><td><code>no_ocr</code></td><td><code>true</code>/<code>false</code></td><td>PDF/image: keep layout + TableFormer, never OCR (docling's <code>--no-ocr</code>, <code>do_ocr=False</code>; #244, and since 2.0 the meaning of <code>no_ocr</code>, #611) — structure survives, pixel-only text comes back empty. A missing OCR model degrades to this instead of erroring. <code>skip_ocr</code>, its pre-2.0 name, is still read.</td></tr>
+  <tr><td><code>text_layer_only</code></td><td><code>true</code>/<code>false</code></td><td>PDF/image: skip layout/OCR/TableFormer entirely; emit the embedded text layer only (what <code>no_ocr</code> meant before 2.0, #611).</td></tr>
+  <tr><td><code>pdf_password</code></td><td>text</td><td>The password of an encrypted PDF (docling's <code>--pdf-password</code>, #611).</td></tr>
   <tr><td><code>no_table_former</code></td><td><code>true</code>/<code>false</code></td><td>PDF/image: geometric table reconstruction instead of the TableFormer model.</td></tr>
   <tr><td><code>no_text_panels</code></td><td><code>true</code>/<code>false</code></td><td>PDF/image: keep every detected picture as a picture — disable the demotion of uncaptioned dense-text "picture" regions into paragraphs.</td></tr>
   <tr><td><code>list_attachments</code></td><td><code>true</code>/<code>false</code></td><td>Email (.eml/.msg): append an <em>Attachments</em> section — names and content types only, never the payload.</td></tr>
@@ -353,7 +354,7 @@ $('go').addEventListener('click', async () => {
     images: $('embed').checked ? 'embedded' : 'placeholder',
     fetch_images: $('fetch_images').checked,
     no_ocr: $('no_ocr').checked,
-    skip_ocr: $('skip_ocr').checked,
+    text_layer_only: $('text_layer_only').checked,
     no_table_former: $('no_table_former').checked,
     no_text_panels: $('no_text_panels').checked,
     force_full_page_ocr: $('force_full_page_ocr').checked,
