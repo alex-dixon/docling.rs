@@ -405,6 +405,53 @@ def test_ensure_env_still_respects_explicit_ocr_pins(tmp_path, monkeypatch):
     assert os.environ["DOCLING_OCR_DICT"] == "/custom/dict.txt"
 
 
+def test_ensure_env_pins_no_model_file(tmp_path, monkeypatch):
+    """#602: ensure_env hands the cache over as DOCLING_RS_MODELS_DIR only.
+    A per-file pin (DOCLING_LAYOUT_ONNX → layout_heron_int8.onnx) outranks
+    the engine's provider-aware choice, so CoreML/CUDA ran the CPU-calibrated
+    int8 graph. The directory is handed over even when the working directory
+    has a .models/ of its own: the resolver tries that first, per file, and
+    the cache fills in what it lacks."""
+    from docling_rs import models as m
+
+    cache = tmp_path / "cache"
+    for rel in (
+        "models/layout_heron.onnx",
+        "models/layout_heron_int8.onnx",
+        "models/tableformer/decoder_kv_int8.onnx",
+        "models/picture_classifier.onnx",
+    ):
+        p = cache / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"stub")
+    work = tmp_path / "work"
+    (work / ".models").mkdir(parents=True)
+    monkeypatch.chdir(work)
+    pins = (
+        "DOCLING_LAYOUT_ONNX",
+        "DOCLING_TABLEFORMER_ENCODER",
+        "DOCLING_TABLEFORMER_DECODER",
+        "DOCLING_TABLEFORMER_BBOX",
+        "DOCLING_PICTURE_CLASSIFIER_ONNX",
+        "DOCLING_CODE_FORMULA_DIR",
+    )
+    for var in ("DOCLING_RS_MODELS_DIR", *pins):
+        monkeypatch.delenv(var, raising=False)
+
+    m.ensure_env(cache)
+
+    import os
+
+    assert os.environ.get("DOCLING_RS_MODELS_DIR") == str(cache / "models")
+    for var in pins:
+        assert var not in os.environ, var
+
+    # A caller's own directory is kept.
+    monkeypatch.setenv("DOCLING_RS_MODELS_DIR", "/custom/models")
+    m.ensure_env(cache)
+    assert os.environ["DOCLING_RS_MODELS_DIR"] == "/custom/models"
+
+
 # --- #508: ASR model downloads ----------------------------------------------
 
 

@@ -28,18 +28,20 @@
 //!   back down the list — ultimately to CPU — at session creation. The "try GPU if there is
 //!   one" mode for images built once and deployed on mixed fleets.
 //!
-//! CoreML registers with the `MLProgram` model format by default (#324):
-//! the ONNX Runtime default, `NeuralNetwork`, cannot place operators the
-//! layout model carries (`GridSample`, `ScatterND`, dynamic output shapes)
-//! and aborts inference on Apple silicon instead of falling back.
-//! `DOCLING_RS_COREML_FORMAT=neuralnetwork` restores the old format for
-//! pre-macOS-12 systems. Two safety defaults ride along (issue-#324
+//! CoreML registers with the `NeuralNetwork` model format by default (#602):
+//! measured on Apple silicon it reproduces the CPU provider's output byte
+//! for byte, while `MLProgram` (the #324 default, ~1.8× faster on the GPU)
+//! changes the layout detections — `DOCLING_RS_COREML_FORMAT=mlprogram`
+//! opts into it, with a notice. Two safety defaults ride along (issue-#324
 //! testing, M4 Max): only *static-shaped* partitions are handed to CoreML
 //! (`DOCLING_RS_COREML_STATIC_SHAPES=0` opts out) — dynamic partitions under
 //! MLProgram fail an MPSGraph assertion as an uncatchable SIGABRT — and
 //! compute units default to `cpu_and_gpu` rather than `all`
 //! (`DOCLING_RS_COREML_UNITS`: `all`|`cpu_and_gpu`|`cpu_and_ne`|`cpu_only`),
 //! since the fp16 Neural Engine silently corrupts this model's logits.
+//! Static partitions need static graphs, so CoreML also keeps docling-pdf's
+//! layout per-page ([`prefers_batching`]): a batched session leaves the batch
+//! axis free and CoreML is handed nothing.
 //! `DOCLING_RS_XNNPACK_THREADS` sizes XNNPACK's own thread pool.
 //!
 //! The int8 model defaults in docling-pdf are skipped whenever a GPU provider
@@ -196,6 +198,12 @@ fn compiled(ep: Ep) -> bool {
 }
 
 fn any_gpu_compiled() -> bool {
+    any_gpu(compiled)
+}
+
+/// Any GPU provider among the compiled ones — [`compiled`] in production,
+/// a stand-in set in the tests (the features differ per build).
+fn any_gpu(compiled: impl Fn(Ep) -> bool) -> bool {
     [Ep::Cuda, Ep::TensorRt, Ep::DirectMl, Ep::CoreMl]
         .into_iter()
         .any(compiled)
@@ -262,41 +270,109 @@ pub fn choice() -> Ep {
 /// A no-op for ASR: the Whisper exports ship without int8 variants, so there
 /// is no model selection for this to influence on that path.
 pub fn prefers_fp32() -> bool {
-    match choice() {
+    prefers_fp32_for(choice(), compiled)
+}
+
+fn prefers_fp32_for(ep: Ep, compiled: impl Fn(Ep) -> bool) -> bool {
+    match ep {
         // XNNPACK is CPU-class: the int8 QDQ graphs were calibrated for CPU
         // kernels and stay valid on it.
         Ep::Cpu | Ep::Xnnpack => false,
         Ep::Cuda | Ep::TensorRt | Ep::DirectMl | Ep::CoreMl => true,
-        Ep::Auto => any_gpu_compiled(),
+        Ep::Auto => any_gpu(compiled),
     }
 }
 
-/// The CoreML provider, configured from the environment (#324). `MLProgram`
-/// is the default model format: ONNX Runtime's own default, `NeuralNetwork`,
-/// cannot place operators the layout model carries (`GridSample`,
-/// `ScatterND`, dynamic output shapes) and aborts inference with error -1 on
-/// Apple silicon instead of falling back. `MLProgram` needs macOS 12+ —
-/// older systems can restore the old format explicitly.
+/// True when a multi-image batch is the better default for a model that
+/// accepts one (docling-pdf's layout batch, #338): the CUDA-class providers
+/// pay a real per-call dispatch cost that batching amortizes. Not CoreML
+/// (#602): its static-partitions default (#324) only places a graph whose
+/// shapes are all fixed, and a batched session keeps the batch axis free —
+/// so under the old batch-of-4 default CoreML was handed nothing it was
+/// allowed to run (0% GPU; fp32 heron 8.4 s vs 3.7 s on the CPU provider for
+/// the issue's 25-page manual, M4 Max), while per-page mode pins the axis to
+/// 1 and the same model runs on the GPU. Nor the CPU-class providers, where
+/// per-page measured faster (#338). `Auto` batches only when a CUDA-class
+/// provider is compiled in — a CoreML-only `auto` build registers CoreML
+/// first and wants the static graph.
+pub fn prefers_batching() -> bool {
+    prefers_batching_for(choice(), compiled)
+}
+
+fn prefers_batching_for(ep: Ep, compiled: impl Fn(Ep) -> bool) -> bool {
+    match ep {
+        Ep::Cpu | Ep::Xnnpack | Ep::CoreMl => false,
+        Ep::Cuda | Ep::TensorRt | Ep::DirectMl => true,
+        Ep::Auto => [Ep::Cuda, Ep::TensorRt, Ep::DirectMl]
+            .into_iter()
+            .any(compiled),
+    }
+}
+
+/// CoreML's model format as `DOCLING_RS_COREML_FORMAT` selects it — kept
+/// apart from `ort`'s `ModelFormat` (compiled only with the `coreml`
+/// feature) so the default is testable on every host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "coreml"), allow(dead_code))]
+enum CoreMlFormat {
+    NeuralNetwork,
+    MlProgram,
+}
+
+/// Parse `DOCLING_RS_COREML_FORMAT`; `Err` carries an unrecognized value
+/// (the caller warns and uses the default). The default is `NeuralNetwork`
+/// (#602): measured on the issue's 25-page manual (M4 Max, per-page
+/// layout), NeuralNetwork reproduces the CPU provider's Markdown byte for
+/// byte, while MLProgram — ~1.8× faster on the GPU — changes the layout
+/// detections on 14 of 25 pages (neighbouring boxes merge, reading order
+/// shifts; 448 texts vs 489), under `cpu_only` units too, so it is
+/// MLProgram's op lowering, not just GPU fp16. Correct output is the
+/// default; MLProgram stays an opt-in with a notice. (#324 had moved to
+/// MLProgram because NeuralNetwork aborted on the dynamic-shaped layout
+/// graph; the static-partitions default since then keeps such partitions
+/// off CoreML, and per-page mode makes the layout graph static.)
+#[cfg_attr(not(feature = "coreml"), allow(dead_code))]
+fn coreml_format(raw: Option<&str>) -> Result<CoreMlFormat, String> {
+    match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("" | "neuralnetwork" | "nn") => Ok(CoreMlFormat::NeuralNetwork),
+        Some("mlprogram") => Ok(CoreMlFormat::MlProgram),
+        Some(other) => Err(other.to_string()),
+    }
+}
+
+/// The CoreML provider, configured from the environment (#324, #602). The
+/// model format defaults to `NeuralNetwork` — see [`coreml_format`] for why;
+/// `DOCLING_RS_COREML_FORMAT=mlprogram` trades CPU-identical layout output
+/// for speed (macOS 12+).
 #[cfg(feature = "coreml")]
 fn coreml_ep() -> ort::ep::CoreML {
     use ort::ep::coreml::{ComputeUnits, ModelFormat};
     static WARNED: OnceLock<()> = OnceLock::new();
-    let format = match docling_core::env::nonempty("DOCLING_RS_COREML_FORMAT")
-        .map(|v| v.to_ascii_lowercase())
-        .as_deref()
-    {
-        None | Some("mlprogram") => ModelFormat::MLProgram,
-        Some("neuralnetwork") => ModelFormat::NeuralNetwork,
-        Some(other) => {
-            let other = other.to_string();
-            WARNED.get_or_init(|| {
-                eprintln!(
-                    "docling-rs: DOCLING_RS_COREML_FORMAT={other:?} is not                      mlprogram|neuralnetwork; using mlprogram"
-                );
-            });
-            ModelFormat::MLProgram
-        }
-    };
+    static FORMAT_NOTICE: OnceLock<()> = OnceLock::new();
+    let format =
+        match coreml_format(docling_core::env::nonempty("DOCLING_RS_COREML_FORMAT").as_deref()) {
+            Ok(CoreMlFormat::NeuralNetwork) => ModelFormat::NeuralNetwork,
+            Ok(CoreMlFormat::MlProgram) => {
+                FORMAT_NOTICE.get_or_init(|| {
+                    eprintln!(
+                        "docling-rs: DOCLING_RS_COREML_FORMAT=mlprogram is faster on the Apple \
+                     GPU, but its layout detections differ from the CPU provider's \
+                     (neighbouring boxes merge, reading order shifts); the default \
+                     neuralnetwork format matches CPU output"
+                    );
+                });
+                ModelFormat::MLProgram
+            }
+            Err(other) => {
+                WARNED.get_or_init(|| {
+                    eprintln!(
+                        "docling-rs: DOCLING_RS_COREML_FORMAT={other:?} is not \
+                     neuralnetwork|mlprogram; using neuralnetwork"
+                    );
+                });
+                ModelFormat::NeuralNetwork
+            }
+        };
     let mut ep = ort::ep::CoreML::default().with_model_format(format);
     // Static-shaped partitions only, ON by default (#324 follow-up): with the
     // stock dynamic-batch layout model, MLProgram otherwise fails an MPSGraph
@@ -332,7 +408,8 @@ fn coreml_ep() -> ort::ep::CoreML {
             let other = other.to_string();
             WARNED.get_or_init(|| {
                 eprintln!(
-                    "docling-rs: DOCLING_RS_COREML_UNITS={other:?} is not                      all|cpu_and_gpu|cpu_and_ne|cpu_only; using cpu_and_gpu"
+                    "docling-rs: DOCLING_RS_COREML_UNITS={other:?} is not \
+                     all|cpu_and_gpu|cpu_and_ne|cpu_only; using cpu_and_gpu"
                 );
             });
             ComputeUnits::CPUAndGPU
@@ -829,6 +906,51 @@ fn cpu_features() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #602: the provider-dependent defaults, per provider and per
+    /// compiled-in set (the closures stand in for the builds — the real
+    /// features differ per host).
+    #[test]
+    fn provider_defaults_follow_the_provider() {
+        let cpu_only = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto);
+        let mac = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::CoreMl);
+        let cuda = |ep: Ep| matches!(ep, Ep::Cpu | Ep::Auto | Ep::Cuda);
+        // fp32 under every GPU provider, CoreML included; int8 on CPU-class.
+        for ep in [Ep::Cuda, Ep::TensorRt, Ep::DirectMl, Ep::CoreMl] {
+            assert!(prefers_fp32_for(ep, mac), "{ep:?}");
+        }
+        assert!(!prefers_fp32_for(Ep::Cpu, mac));
+        assert!(!prefers_fp32_for(Ep::Xnnpack, mac));
+        assert!(prefers_fp32_for(Ep::Auto, mac));
+        assert!(!prefers_fp32_for(Ep::Auto, cpu_only));
+        // Batched layout only for the CUDA class: CoreML needs the static,
+        // per-page graph to be handed anything at all.
+        assert!(!prefers_batching_for(Ep::CoreMl, mac));
+        assert!(!prefers_batching_for(Ep::Auto, mac));
+        assert!(!prefers_batching_for(Ep::Auto, cpu_only));
+        assert!(!prefers_batching_for(Ep::Cpu, cuda));
+        assert!(!prefers_batching_for(Ep::Xnnpack, cuda));
+        assert!(prefers_batching_for(Ep::Auto, cuda));
+        for ep in [Ep::Cuda, Ep::TensorRt, Ep::DirectMl] {
+            assert!(prefers_batching_for(ep, cuda), "{ep:?}");
+        }
+    }
+
+    /// #602: NeuralNetwork is the CoreML default (CPU-identical output);
+    /// MLProgram is an explicit opt-in; anything else is reported.
+    #[test]
+    fn coreml_format_defaults_to_neuralnetwork() {
+        assert_eq!(coreml_format(None), Ok(CoreMlFormat::NeuralNetwork));
+        assert_eq!(
+            coreml_format(Some(" NeuralNetwork ")),
+            Ok(CoreMlFormat::NeuralNetwork)
+        );
+        assert_eq!(
+            coreml_format(Some("MLProgram")),
+            Ok(CoreMlFormat::MlProgram)
+        );
+        assert_eq!(coreml_format(Some("onnx")), Err("onnx".into()));
+    }
 
     /// #452: the creation lock exists only for GPU providers. A CPU-only build
     /// has nothing to serialize (the OCR lanes keep their parallel start-up);

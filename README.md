@@ -1996,32 +1996,44 @@ provider is registered; inference stays fully parallel, and CPU builds (or
 `DOCLING_RS_EP=cpu`) keep the parallel start-up. No configuration needed —
 the `=1` workarounds are no longer necessary.
 
-CoreML registers with the **`MLProgram`** model format by default (#324):
-ONNX Runtime's own default, `NeuralNetwork`, cannot place operators the
-layout model carries (`GridSample`, `ScatterND`, dynamic output shapes) and
-aborts inference on Apple silicon instead of falling back.
-`DOCLING_RS_COREML_FORMAT=neuralnetwork` restores the old format on
-pre-macOS-12 systems. Two safety defaults come from the issue's follow-up
-testing on an M4 Max: CoreML takes only **static-shaped partitions** by
-default (`DOCLING_RS_COREML_STATIC_SHAPES=0` opts back into dynamic
-placement) — with the stock dynamic-batch layout model, dynamic partitions
-under MLProgram fail an MPSGraph assertion as an uncatchable SIGABRT — and
-compute units default to **`cpu_and_gpu`** (`DOCLING_RS_COREML_UNITS`:
-`all`|`cpu_and_gpu`|`cpu_and_ne`|`cpu_only`): `all` may schedule the fp16
-Neural Engine, which silently corrupts this model's logits (measured
-max|Δlogits| = 6.5 with no error raised) and ran slower than the GPU path.
-Known residual: the deformable-attention `GridSample` can still return wrong
-boxes on CoreML even with static shapes — the durable fix is on the model
-export side (#339).
+CoreML defaults (#324, #602), measured on an M4 Max:
 
-**When CoreML pays off** (measured on an M4 Max, #324 follow-up): session
-creation costs **~2 s per worker and does not parallelize**, so the fixed
-setup only amortizes over long-lived processes (`docling-serve`) and large
-batches — a one-shot CLI conversion is typically a net **loss** vs. the CPU
-provider (~2× on a 130-page document) despite byte-identical output, with the
-crossover around a few hundred pages per process. A `coreml`/`auto` build
-prints this once at registration so the trade-off is visible when it is
-incurred; `DOCLING_RS_EP=cpu` opts a short run out without rebuilding.
+- **Model format `NeuralNetwork`** (`DOCLING_RS_COREML_FORMAT`:
+  `neuralnetwork`|`mlprogram`). It reproduces the CPU provider's Markdown
+  byte for byte. `MLProgram` is ~1.8× faster on the GPU but changes the
+  layout detections (on a 25-page manual, 14 pages differ: neighbouring
+  boxes merge, two-line headings join, reading order shifts — under
+  `cpu_only` units too, so it is the format's op lowering, not GPU fp16), so
+  it is an opt-in that prints a notice. `MLProgram` was the #324 default,
+  adopted because `NeuralNetwork` aborted on the dynamic-shaped layout graph;
+  the two defaults below keep such graphs off CoreML now.
+- **Per-page layout** (`DOCLING_RS_PDF_LAYOUT_BATCH` defaults to 1 under
+  CoreML, not the CUDA-class 4): per-page mode pins the layout graph's batch
+  axis, and only a fully static graph is handed to CoreML. The batched
+  default left CoreML nothing to run — 0% GPU, and slower than CPU.
+- **Static-shaped partitions only** (`DOCLING_RS_COREML_STATIC_SHAPES=0`
+  opts back into dynamic placement): dynamic partitions under MLProgram fail
+  an MPSGraph assertion as an uncatchable SIGABRT.
+- **Compute units `cpu_and_gpu`** (`DOCLING_RS_COREML_UNITS`:
+  `all`|`cpu_and_gpu`|`cpu_and_ne`|`cpu_only`): `all` may schedule the fp16
+  Neural Engine, which silently corrupts this model's logits (measured
+  max|Δlogits| = 6.5 with no error raised) and ran slower than the GPU path.
+
+| CoreML, heron layout (25 pages, 13 tables, M4 Max) | convert | GPU | output |
+|---|---|---|---|
+| CPU provider, fp32 | 3.7 s | 0% | reference |
+| CoreML, batch 4, MLProgram (old defaults) | 8.4 s | 0% | identical |
+| CoreML, batch 1, NeuralNetwork (**new defaults**) | 3.5 s | ~41% | byte-identical |
+| CoreML, batch 1, MLProgram (opt-in) | 2.05 s | ~64% | differs on 14/25 pages |
+
+**When CoreML pays off** (#324 follow-up): session creation costs **~2 s
+per worker and does not parallelize**, so the fixed setup only amortizes
+over long-lived processes (`docling-serve`) and large batches — for a
+one-shot CLI conversion the CPU provider is usually as fast or faster. A
+`coreml`/`auto` build prints this once at registration so the trade-off is
+visible when it is incurred; `DOCLING_RS_EP=cpu` opts a short run out
+without rebuilding. Note that a `coreml` build registers CoreML even with
+`DOCLING_RS_EP` unset (the default is `auto` in any GPU build).
 The `xnnpack` feature adds the XNNPACK provider
 (`DOCLING_RS_EP=xnnpack`, thread pool sized by `DOCLING_RS_XNNPACK_THREADS`)
 — a CPU-class accelerator for machines without a usable GPU provider; note
@@ -2029,7 +2041,8 @@ that pyke ships no prebuilt ONNX Runtime with the XNNPACK EP, so this
 feature requires linking a self-built ONNX Runtime (`ORT_LIB_LOCATION`,
 built with `--use_xnnpack`). When a GPU provider is selected, the pipeline automatically prefers
 the fp32 models over the int8 defaults — the int8 exports are calibrated for
-CPU kernels (an explicit `DOCLING_*_ONNX` path still wins). CUDA needs the
+CPU kernels (an explicit `DOCLING_*_ONNX` path still wins; the Python
+bindings no longer set one themselves, #602, so this holds there too). CUDA needs the
 CUDA 12 runtime + cuDNN 9 on the machine; the `ort` crate downloads the
 matching ONNX Runtime binaries at build time and copies the provider
 libraries next to the binary.

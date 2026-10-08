@@ -585,7 +585,9 @@ The speed-up scales with cores and memory bandwidth. Tune per machine with
 `DOCLING_RS_PDF_WORKERS` (pool size) and `DOCLING_RS_PDF_INTRA` (intra-op threads
 per worker). Each worker layout-detects up to `DOCLING_RS_PDF_LAYOUT_BATCH`
 already-rendered pages per inference call (issue #73; default: per-page on
-the CPU provider, 4 when a GPU provider is selected — #338: every CPU
+the CPU provider and under CoreML, 4 under CUDA/TensorRT/DirectML — CoreML
+only takes static-shaped graphs and only the per-page graph is static,
+#602; #338: every CPU
 measurement favors per-page, 8.5 vs 9.3 s/conv on a 4-core x86 box and ~2×
 on a 16-core M4 Max, while GPU dispatch overhead still amortizes). In
 per-page mode the model's dynamic `batch` axis is pinned to 1 at session
@@ -1238,7 +1240,18 @@ When a GPU provider is selected the model resolution skips the int8 defaults
 in favor of fp32 (`decoder_kv.onnx` stays preferred): the int8 exports are
 QDQ graphs calibrated for CPU kernels — on GPU they add de-quantize traffic
 and their conformance was only ever validated on CPU. An explicit
-`DOCLING_*_ONNX` path override still wins over this policy.
+`DOCLING_*_ONNX` path override still wins over this policy. (Until #602 the
+Python bindings set `DOCLING_LAYOUT_ONNX` to the cached int8 graph
+themselves, so a source-built GPU wheel ran int8 layout; they now hand the
+cache over as `DOCLING_RS_MODELS_DIR` only.)
+
+CoreML specifics (#602, M4 Max, 25-page manual): the `NeuralNetwork` model
+format is the default — byte-identical to the CPU provider (3.5 s vs 3.7 s,
+~41% GPU) — while `MLProgram` (`DOCLING_RS_COREML_FORMAT=mlprogram`, 2.05 s)
+changes the layout detections on 14 of 25 pages and is an opt-in with a
+notice; the layout batch stays per-page, since CoreML takes static-shaped
+partitions only and a batched session leaves the batch axis free (the old
+batch-4 default ran 0% on the GPU, 8.4 s).
 
 Verified without GPU hardware (this is what CI's `ep-features` matrix
 covers): default/`cpu`/`auto`/unknown/uncompiled-request configurations all

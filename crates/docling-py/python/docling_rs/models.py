@@ -368,102 +368,31 @@ def _fetch_onnxruntime(root: Path, progress: bool, force: bool) -> bool:
     return (dest / "libonnxruntime.so").exists()
 
 
-def _point_at(var: str, local: "list[str]", cached: Path) -> None:
-    """Set ``var`` to ``cached`` unless configuration already exists.
-
-    Two things outrank the cache: an env var the caller already set, and a
-    matching asset in the working directory (any of the ``local`` relative
-    paths) — the native pipeline resolves those CWD paths itself when the env
-    var stays unset, exactly like the Rust CLI run from a checkout. The env
-    is also left untouched when ``cached`` doesn't exist."""
-    if var in os.environ:
-        return
-    if any(Path(rel).exists() for rel in local):
-        return
-    if cached.exists():
-        os.environ[var] = str(cached)
-
-
-def _local(rels: "list[str]") -> "list[str]":
-    """Working-directory candidates for cache-relative ``models/…`` paths —
-    the checkout keeps them under ``.models/``."""
-    for rel in rels:
-        assert rel.startswith("models/"), rel
-    return [f".{rel}" for rel in rels]
-
-
 def ensure_env(dest: "str | Path | None" = None) -> Path:
-    """Point the native pipeline at the cached assets via the ``DOCLING_*``
-    env vars. Local assets win: a variable is only filled when it is not
-    already set AND no matching ``.models/`` asset exists in the working
-    directory (the native code resolves those itself, so a repo
-    checkout keeps using its own exports). Prefers the INT8 models when
-    present, matching the Rust pipeline's default; ``DOCLING_RS_FP32=1`` opts
-    out. OCR is handed over as ``DOCLING_RS_MODELS_DIR`` (the cache's models
-    directory) rather than per-file pins, so the ``ocr_lang`` kwarg keeps
-    selecting the en/ch recognition pair (#285). Safe to call when nothing is
-    downloaded yet — missing files simply leave the env untouched (and the
-    converter will fail with its usual clear "model not found" message)."""
+    """Point the native pipeline at the cached assets. The cache's models
+    directory is handed over as ``DOCLING_RS_MODELS_DIR`` — the asset
+    resolver's whole-directory fallback behind the working directory — and
+    nothing is pinned per file, so the engine's own selection logic runs
+    against the cache exactly as it does against a checkout's ``.models/``:
+    the ``ocr_lang`` kwarg picks the en/ch recognition pair (#285), and the
+    int8/fp32 choice follows the execution provider — fp32 under a GPU
+    provider, int8 on CPU, ``DOCLING_RS_FP32=1`` forcing fp32 (#602: a
+    ``DOCLING_LAYOUT_ONNX`` pin set here used to outrank that and loaded the
+    CPU-calibrated int8 layout graph under CoreML/CUDA; it also disabled the
+    engine's int8→fp32 escalation for a page the int8 graph fumbles).
+
+    Local assets still win: the resolver tries the working directory's
+    ``.models/…`` before the cache, per file. A variable the caller already
+    set is never touched — the per-file ``DOCLING_*_ONNX`` vars remain the
+    pin-any-model hatch. Safe to call when nothing is downloaded yet — a
+    missing cache leaves the env untouched (and the converter fails with its
+    usual clear "model not found" message)."""
     # Absolute paths in the env: a later os.chdir() must not orphan them.
     root = (Path(dest) if dest else cache_dir()).expanduser().resolve()
-    fp32 = _fp32()
     m = root / "models"
-
-    layout_chain = ["models/layout_heron.onnx"]
-    if not fp32:
-        layout_chain.insert(0, "models/layout_heron_int8.onnx")
-    layout = m / "layout_heron_int8.onnx"
-    if fp32 or not layout.exists():
-        layout = m / "layout_heron.onnx"
-    _point_at("DOCLING_LAYOUT_ONNX", _local(layout_chain), layout)
-
-    # TableFormer decoder preference, mirroring the Rust pipeline's default
-    # chain (tableformer.rs): the #97 hoisted-KV graph ranks ahead of the
-    # legacy layer-output-cache graph within each precision, and decoder_kv
-    # (fp32) ranks above the quantized *legacy* decoder — it is faster on
-    # every machine measured and byte-exact.
-    if fp32:
-        chain = ["tableformer/decoder_kv.onnx", "tableformer/decoder.onnx"]
-    else:
-        chain = [
-            "tableformer/decoder_kv_int8.onnx",
-            "tableformer/decoder_kv.onnx",
-            "tableformer/decoder_int8.onnx",
-            "tableformer/decoder.onnx",
-        ]
-    decoder = next((p for rel in chain if (p := m / rel).exists()), m / "tableformer/decoder.onnx")
-    _point_at("DOCLING_TABLEFORMER_DECODER", _local([f"models/{rel}" for rel in chain]), decoder)
-
-    classifier_chain = ["models/picture_classifier.onnx"]
-    if not fp32:
-        classifier_chain.insert(0, "models/picture_classifier_int8.onnx")
-    classifier = m / "picture_classifier_int8.onnx"
-    if fp32 or not classifier.exists():
-        classifier = m / "picture_classifier.onnx"
-    _point_at("DOCLING_PICTURE_CLASSIFIER_ONNX", _local(classifier_chain), classifier)
-
-    # OCR is deliberately NOT pinned per file (#285): DOCLING_OCR_REC_ONNX /
-    # DOCLING_OCR_DICT override the engine's en/ch pair selection outright,
-    # which made the ocr_lang kwarg silently inert. Handing over the models
-    # *directory* instead lets the engine resolve the pair for the requested
-    # language itself (missing English pair → its usual warn-and-fall-back
-    # to ch_; re-run download_models() to fetch it). The per-file vars stay
-    # honored when the caller sets them — that is the pin-any-model hatch.
-    _point_at("DOCLING_RS_MODELS_DIR", [".models"], m)
-    # Encoder: the fp16-weight repack (#374 — fp32 compute, half the download)
-    # ranks ahead of the fp32 file unless full precision is forced, mirroring
-    # tableformer.rs.
-    enc_chain = ["tableformer/encoder.onnx"] if fp32 else ["tableformer/encoder_fp16.onnx", "tableformer/encoder.onnx"]
-    encoder = next((p for rel in enc_chain if (p := m / rel).exists()), m / "tableformer/encoder.onnx")
-    _point_at("DOCLING_TABLEFORMER_ENCODER", _local([f"models/{rel}" for rel in enc_chain]), encoder)
-    _point_at(
-        "DOCLING_TABLEFORMER_BBOX",
-        _local(["models/tableformer/bbox.onnx"]),
-        m / "tableformer/bbox.onnx",
-    )
-    _point_at(
-        "DOCLING_CODE_FORMULA_DIR",
-        _local(["models/code_formula"]),
-        m / "code_formula",
-    )
+    # No working-directory short-circuit: the resolver
+    # already prefers a local file, and a checkout's partial .models/ must
+    # still fall back to the cache for whatever it lacks.
+    if "DOCLING_RS_MODELS_DIR" not in os.environ and m.exists():
+        os.environ["DOCLING_RS_MODELS_DIR"] = str(m)
     return root

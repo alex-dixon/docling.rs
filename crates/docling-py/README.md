@@ -213,8 +213,11 @@ accepted for API compatibility but do not change the pipeline. `InputFormat`,
 to CPU: the prebuilt PyPI wheels ship ONNX Runtime with the CPU execution
 provider only. The engine itself supports CUDA / TensorRT / DirectML / CoreML
 behind cargo features (issue #74) — build the wheel from source with e.g.
-`maturin build --features cuda` and select the provider per process with
-`DOCLING_RS_EP=cuda` (see the workspace README).
+`maturin build --features cuda` (or `--features docling/coreml` on macOS) and
+select the provider per process with `DOCLING_RS_EP=cuda` (see the workspace
+README). Under a GPU provider the engine picks the fp32 models over the int8
+ones on its own: `ensure_env()` hands the model cache over as
+`DOCLING_RS_MODELS_DIR` and pins no file (#602).
 
 ## Chunking
 
