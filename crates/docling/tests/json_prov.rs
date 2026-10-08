@@ -5,7 +5,9 @@
 //! text a `prov`; so must we. The chart's y-axis ticks `3`…`8`, each set by
 //! its own `cm` under one shared `Tm`, are six picture children with their
 //! own boxes there — the text layer used to glue them into one `345678`
-//! cell carrying the first tick's box.
+//! cell carrying the first tick's box. And the checklist under "3. Options"
+//! — one text block to the layout model — is four checkbox items, one per
+//! drawn square.
 //!
 //! Needs the layout model only (`--skip-ocr`), so it skips on a checkout
 //! without `.models/`.
@@ -72,5 +74,39 @@ fn every_text_item_has_prov_and_axis_ticks_keep_their_boxes() {
     assert!(
         ticks.windows(2).all(|w| w[1].1 - w[0].1 > 20.0),
         "each tick sits ~26 pt above the last: {ticks:?}"
+    );
+
+    // The checklist: Heron reads the four options as one text block, but
+    // each line has its own drawn square, so each is its own unchecked
+    // checkbox item (docling's label, bare option text), top to bottom,
+    // its box spanning square and label.
+    let boxes: Vec<(&str, f64, f64)> = texts
+        .iter()
+        .filter(|t| t["label"] == "checkbox_unselected")
+        .map(|t| {
+            let b = &t["prov"][0]["bbox"];
+            (
+                t["text"].as_str().unwrap(),
+                b["l"].as_f64().unwrap(),
+                b["t"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    let labels: Vec<&str> = boxes.iter().map(|b| b.0).collect();
+    assert_eq!(
+        labels,
+        [
+            "First option",
+            "Second option",
+            "Third option",
+            "Fourth option"
+        ]
+    );
+    assert!(boxes.iter().all(|b| (b.1 - 119.5).abs() < 2.0), "{boxes:?}");
+    assert!(boxes.windows(2).all(|w| w[0].2 > w[1].2), "{boxes:?}");
+    let md = doc.export_to_markdown();
+    assert!(
+        md.contains("- [ ] First option\n\n- [ ] Second option"),
+        "{md}"
     );
 }

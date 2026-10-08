@@ -20,6 +20,8 @@
 pub mod assemble;
 #[cfg(not(feature = "ocr-prep"))]
 mod assemble;
+// Vector checkbox squares from the text parser's path walk (#609).
+pub mod checkbox;
 mod dp_lines;
 #[cfg(feature = "ml")]
 pub mod enrich;
@@ -3197,6 +3199,7 @@ impl Pipeline {
             scale: 1.0,
             cells: Vec::new(),
             code_cells: Vec::new(),
+            checkboxes: Vec::new(),
             word_cells: Vec::new(),
             // A standalone image *is* its own scale-1.0 page image, so the
             // layout model sees it through the docling-exact PIL kernel.
@@ -3455,6 +3458,7 @@ mod ocr_scale_tests {
             scale,
             cells: Vec::new(),
             code_cells: Vec::new(),
+            checkboxes: Vec::new(),
             word_cells: Vec::new(),
             image: image::RgbImage::new(1, 1),
             image_layout: None,

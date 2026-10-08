@@ -1113,10 +1113,17 @@ impl Builder {
                 }
             }
             Node::CheckboxItem { checked, text } => {
-                // JSON keeps the task-list form as a plain text item (the
-                // `checkbox_selected`/`checkbox_unselected` label is DocLang-only).
-                let mark = if *checked { "- [x] " } else { "- [ ] " };
-                Some(self.add_text("text", &format!("{mark}{text}"), parent, json!({})))
+                // docling's checkbox item: the `checkbox_selected` /
+                // `checkbox_unselected` label carries the state and the text
+                // is the bare option label (right_to_left_03's `خير`,
+                // docx_checkboxes' `Orange juice`). The `- [x]` task-list
+                // marker is Markdown's rendering of it, not item text (#609).
+                let label = if *checked {
+                    "checkbox_selected"
+                } else {
+                    "checkbox_unselected"
+                };
+                Some(self.add_text(label, text, parent, json!({})))
             }
             Node::Code {
                 language,
@@ -2455,7 +2462,8 @@ mod tests {
         assert_eq!(bbox(&tab), [64.0, 412.0, 300.0, 400.0]);
         assert_eq!(v["tables"][0]["prov"][0]["bbox"]["t"], 392.0);
         // The checkbox item.
-        let cb = by_text("- [ ] First option");
+        let cb = by_text("First option");
+        assert_eq!(cb["label"], "checkbox_unselected");
         assert_eq!(cb["prov"][0]["page_no"], 2);
         assert_eq!(bbox(&cb), [64.0, 192.0, 200.0, 180.0]);
         assert!(texts

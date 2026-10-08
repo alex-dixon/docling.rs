@@ -1129,6 +1129,8 @@ pub struct PageParserCells {
     pub prose: Vec<crate::pdfium_backend::TextCell>,
     pub words: Vec<crate::pdfium_backend::TextCell>,
     pub code: Vec<crate::pdfium_backend::TextCell>,
+    /// Drawn checkbox squares (#609), in the cells' frame.
+    pub checkboxes: Vec<crate::checkbox::CheckBox>,
 }
 
 /// The parser text layer, driven one page at a time: the document is loaded
@@ -1221,12 +1223,13 @@ impl PageTextParser {
             return PageParserCells::default();
         };
         let (_w, h) = page_size(&self.doc, pid);
-        let glyphs = page_glyphs_cached(&self.doc, pid, &mut self.caches);
+        let (glyphs, inks) = page_glyphs_and_inks(&self.doc, pid, &mut self.caches);
         let (prose, words) = crate::dp_lines::line_and_word_cells(&glyphs, h, true);
         PageParserCells {
             prose,
             words,
             code: crate::pdfium_backend::code_cells_from_glyphs(&glyphs, h),
+            checkboxes: crate::checkbox::find(&inks, h),
         }
     }
 }
@@ -1259,7 +1262,7 @@ pub fn pdf_text_pages(bytes: &[u8]) -> Vec<crate::pdfium_backend::PdfPage> {
         .into_iter()
         .map(|(_, pid)| {
             let (w, h) = page_size(&doc, pid);
-            let glyphs = page_glyphs_cached(&doc, pid, &mut caches);
+            let (glyphs, inks) = page_glyphs_and_inks(&doc, pid, &mut caches);
             let (mut prose, mut words) = crate::dp_lines::line_and_word_cells(&glyphs, h, true);
             drop_overpainted_cells(&mut prose);
             drop_overpainted_cells(&mut words);
@@ -1273,6 +1276,7 @@ pub fn pdf_text_pages(bytes: &[u8]) -> Vec<crate::pdfium_backend::PdfPage> {
                 cells: prose,
                 code_cells: crate::pdfium_backend::code_cells_from_glyphs(&glyphs, h),
                 word_cells: words,
+                checkboxes: crate::checkbox::find(&inks, h),
                 #[cfg(feature = "ocr-prep")]
                 image: image::RgbImage::new(1, 1),
                 links: Vec::new(),
@@ -1438,12 +1442,24 @@ fn page_glyphs_cached(
     page_id: lopdf::ObjectId,
     caches: &mut DocCaches,
 ) -> Vec<Glyph> {
+    page_glyphs_and_inks(doc, page_id, caches).0
+}
+
+/// [`page_glyphs_cached`] plus the small painted path pieces the same walk
+/// passed — what [`crate::checkbox::find`] looks for checkbox squares in
+/// (#609) — in the glyphs' frame.
+fn page_glyphs_and_inks(
+    doc: &Document,
+    page_id: lopdf::ObjectId,
+    caches: &mut DocCaches,
+) -> (Vec<Glyph>, Vec<crate::checkbox::Ink>) {
     let mut out = Vec::new();
+    let mut inks = Vec::new();
     // lopdf 0.44: get_page_content returns the assembled content-stream bytes
     // directly (an empty Vec when the page has none).
     let content_bytes = doc.get_page_content(page_id);
     let Ok(content) = lopdf::content::Content::decode(&content_bytes) else {
-        return out;
+        return (out, inks);
     };
     if let Some(res) = page_res(doc, page_id) {
         // pdfium's page matrix: user space translated so the display box's
@@ -1463,10 +1479,11 @@ fn page_glyphs_cached(
             0,
             caches,
             &mut out,
+            &mut inks,
         );
         out.retain(|g| on_page(g, pb.w, pb.h));
     }
-    out
+    (out, inks)
 }
 
 /// Whether a glyph is on the page (#529): docling-parse keeps a character
@@ -1511,6 +1528,7 @@ fn run_content(
     depth: u32,
     caches: &mut DocCaches,
     out: &mut Vec<Glyph>,
+    inks: &mut Vec<crate::checkbox::Ink>,
 ) {
     let fonts = fonts_from_res(doc, res, caches);
     let xobjects = res
@@ -1537,6 +1555,11 @@ fn run_content(
     let mut trise = init.trise;
 
     let op_f = |operands: &[Object], i: usize| operands.get(i).and_then(num).unwrap_or(0.0);
+    // The path under construction, already in page space (a path is built
+    // under one CTM — `cm` is not allowed inside it), for the checkbox
+    // squares (#609). Text extraction never reads it.
+    let mut path: Vec<PathPiece> = Vec::new();
+    let (mut cur, mut start) = ((0.0, 0.0), (0.0, 0.0));
 
     for op in &content.operations {
         let operands = &op.operands;
@@ -1679,6 +1702,59 @@ fn run_content(
                     }
                 }
             }
+            "m" => {
+                cur = ctm.apply(op_f(operands, 0), op_f(operands, 1));
+                start = cur;
+            }
+            "l" => {
+                let p = ctm.apply(op_f(operands, 0), op_f(operands, 1));
+                path.push(PathPiece::Line(cur, p));
+                cur = p;
+            }
+            "c" | "v" | "y" => {
+                let pts: Vec<(f64, f64)> = (0..operands.len() / 2)
+                    .map(|k| ctm.apply(op_f(operands, 2 * k), op_f(operands, 2 * k + 1)))
+                    .collect();
+                if let Some(&end) = pts.last() {
+                    path.push(PathPiece::Curve(
+                        std::iter::once(cur).chain(pts.iter().copied()).collect(),
+                    ));
+                    cur = end;
+                }
+            }
+            "h" => {
+                if cur != start {
+                    path.push(PathPiece::Line(cur, start));
+                }
+                cur = start;
+            }
+            "re" => {
+                let (x, y, w, h) = (
+                    op_f(operands, 0),
+                    op_f(operands, 1),
+                    op_f(operands, 2),
+                    op_f(operands, 3),
+                );
+                path.push(PathPiece::Rect([
+                    ctm.apply(x, y),
+                    ctm.apply(x + w, y),
+                    ctm.apply(x + w, y + h),
+                    ctm.apply(x, y + h),
+                ]));
+                cur = ctm.apply(x, y);
+                start = cur;
+            }
+            "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                let op = op.operator.as_str();
+                if matches!(op, "s" | "b" | "b*") && cur != start {
+                    path.push(PathPiece::Line(cur, start));
+                }
+                let stroke = matches!(op, "S" | "s" | "B" | "B*" | "b" | "b*");
+                let fill = !matches!(op, "S" | "s");
+                paint_path(&path, stroke, fill, inks);
+                path.clear();
+            }
+            "n" => path.clear(),
             "Do" => {
                 // Invoke a Form XObject: bulk body text in many PDFs lives inside
                 // a form, reached only here. Image XObjects are skipped (no text).
@@ -1769,9 +1845,92 @@ fn run_content(
                     depth + 1,
                     caches,
                     out,
+                    inks,
                 );
             }
             _ => {}
+        }
+    }
+}
+
+/// One piece of a path under construction, page space (see `run_content`).
+enum PathPiece {
+    Line((f64, f64), (f64, f64)),
+    /// An `re`: its four corners, counter-clockwise from `(x, y)`.
+    Rect([(f64, f64); 4]),
+    /// A Bézier segment: its start and control/end points (their hull).
+    Curve(Vec<(f64, f64)>),
+}
+
+/// Record a painted path's pieces for the checkbox finder (#609): a stroked
+/// line is a [`Seg`](crate::checkbox::Ink::Seg), a stroked rectangle that
+/// stays axis-aligned a [`Rect`](crate::checkbox::Ink::Rect) (a stroked and
+/// filled one too — a white-filled box is still an outline), and a fill or a
+/// curve only its bounding box, a possible tick mark. Only pieces small
+/// enough to be a checkbox edge or a mark inside one are kept.
+fn paint_path(path: &[PathPiece], stroke: bool, fill: bool, inks: &mut Vec<crate::checkbox::Ink>) {
+    use crate::checkbox::Ink;
+    let bbox = |pts: &mut dyn Iterator<Item = (f64, f64)>| {
+        pts.fold(
+            (
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            ),
+            |(l, b, r, t), (x, y)| (l.min(x), b.min(y), r.max(x), t.max(y)),
+        )
+    };
+    let mut keep = |ink: Ink| {
+        if ink.worth_keeping() {
+            inks.push(ink);
+        }
+    };
+    if fill && !(stroke && matches!(path, [PathPiece::Rect(_)])) {
+        // A filled shape is a blot (a filled `re` + stroke is handled below).
+        let (l, b, r, t) = bbox(&mut path.iter().flat_map(|p| match p {
+            PathPiece::Line(a, z) => vec![*a, *z],
+            PathPiece::Rect(c) => c.to_vec(),
+            PathPiece::Curve(c) => c.clone(),
+        }));
+        if l.is_finite() {
+            keep(Ink::Blot { l, b, r, t });
+        }
+        return;
+    }
+    if !stroke {
+        return;
+    }
+    for piece in path {
+        match piece {
+            PathPiece::Line(a, z) => keep(Ink::Seg {
+                x0: a.0,
+                y0: a.1,
+                x1: z.0,
+                y1: z.1,
+            }),
+            PathPiece::Rect(c) => {
+                let axis = ((c[0].1 - c[1].1).abs() < 1e-6 && (c[1].0 - c[2].0).abs() < 1e-6)
+                    || ((c[0].0 - c[1].0).abs() < 1e-6 && (c[1].1 - c[2].1).abs() < 1e-6);
+                if axis {
+                    let (l, b, r, t) = bbox(&mut c.iter().copied());
+                    keep(Ink::Rect { l, b, r, t });
+                } else {
+                    for k in 0..4 {
+                        let (a, z) = (c[k], c[(k + 1) % 4]);
+                        keep(Ink::Seg {
+                            x0: a.0,
+                            y0: a.1,
+                            x1: z.0,
+                            y1: z.1,
+                        });
+                    }
+                }
+            }
+            PathPiece::Curve(c) => {
+                let (l, b, r, t) = bbox(&mut c.iter().copied());
+                keep(Ink::Blot { l, b, r, t });
+            }
         }
     }
 }
@@ -2663,6 +2822,38 @@ mod base14_fonts {
                 c.t
             );
         }
+    }
+
+    /// #609: the path walk finds drawn checkbox squares — ReportLab's four
+    /// `m … l S` edges under a `cm`, and a stroked `re` with a tick inside
+    /// (checked) — in the text cells' top-left frame; a filled bar and a
+    /// big frame are not checkboxes.
+    #[test]
+    fn drawn_checkbox_squares_are_found() {
+        let content = b"q 1 0 0 1 119.52 449.04 cm \
+            n 0 12.96 m 12.96 12.96 l S n 0 0 m 12.96 0 l S \
+            n 0 0 m 0 12.96 l S n 12.96 0 m 12.96 12.96 l S Q\n\
+            200 400 10 10 re S 202 405 m 204.5 402 l 208.5 408.5 l S\n\
+            300 400 12 12 re f 50 50 100 100 re S\n";
+        let pdf = pdf_with_content(b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>", content);
+        let mut parser = super::PageTextParser::open(&pdf).expect("parses");
+        let mut boxes = parser.cells(0).checkboxes;
+        boxes.sort_by(|a, b| a.l.total_cmp(&b.l));
+        let got: Vec<([i32; 4], bool)> = boxes
+            .iter()
+            .map(|c| {
+                let r = |v: f32| (v * 100.0).round() as i32;
+                ([r(c.l), r(c.t), r(c.r), r(c.b)], c.checked)
+            })
+            .collect();
+        // Page height 842: y-up 449.04..462.0 → top-left 380.0..392.96.
+        assert_eq!(
+            got,
+            [
+                ([11952, 38000, 13248, 39296], false),
+                ([20000, 43200, 21000, 44200], true),
+            ]
+        );
     }
 
     /// Every standard-14 alias/style decodes with real (positive-width) boxes.

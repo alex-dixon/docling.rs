@@ -407,7 +407,18 @@ pointed at the wrong item).
   checkbox item its region, so chunks made of captions or checkboxes have a
   page. Glyphs stacked at one x (a chart's y-axis ticks, each set by its own
   `cm`) are separate text cells with their own boxes, as in docling-parse —
-  the text layer used to glue them into one cell boxed like the first.
+  the text layer used to glue them into one cell boxed like the first. A
+  checkbox item is docling's `checkbox_selected` / `checkbox_unselected`
+  text with the bare option label (it was a `text` item spelling `- [ ] …`;
+  the task-list marker is Markdown's rendering). And, a deliberate
+  divergence (#609): a line with a **drawn** checkbox square in front of it —
+  a stroked `re`, or four stroked edges as ReportLab draws them, 5–24 pt —
+  is its own checkbox item even when the layout model read the checklist as
+  one text block (`checkbox.rs` finds the squares in the text parser's path
+  walk; ink inside a square checks it). docling has only the model's
+  labels: on the reporter's checklist it prints two garbled paragraphs
+  (`First option Third option` / `Second option Fourth option`); here it is
+  four `- [ ]` items.
 - **Image extraction** is wired for PDF/image (figure-region crops) and DOCX/PPTX
   (embedded blobs) by default, and — opt-in via
   `DocumentConverter::fetch_images` (`--fetch-images`) — for HTML/EPUB `<img src>`:

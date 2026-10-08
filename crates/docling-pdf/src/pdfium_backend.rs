@@ -43,6 +43,10 @@ pub struct PdfPage {
     /// Per-word cells (one per word, not joined into lines) for TableFormer cell
     /// matching.
     pub word_cells: Vec<TextCell>,
+    /// Checkbox squares drawn on the page (#609): assembly gives each line
+    /// with one in front of it its own checkbox item. Empty without a text
+    /// layer (OCR pages) or vector paths.
+    pub checkboxes: Vec<crate::checkbox::CheckBox>,
     /// The rendered page bitmap. Present whenever pixels are available at all
     /// (`ocr-prep` ⊂ `ml`): the native pipeline renders it with pdfium, the
     /// browser pipeline receives it from the host canvas. Picture regions are
@@ -91,6 +95,7 @@ impl PdfPage {
             cells,
             code_cells: Vec::new(),
             word_cells: Vec::new(),
+            checkboxes: Vec::new(),
             #[cfg(feature = "ocr-prep")]
             image: RgbImage::new(0, 0),
             #[cfg(feature = "ocr-prep")]
@@ -152,6 +157,15 @@ impl PdfPage {
                 _ => (height - l.b, l.l, height - l.t, l.r),
             };
             (l.l, l.t, l.r, l.b) = (nl, nt, nr, nb);
+        }
+        // Checkbox squares likewise (a scan has none; kept consistent).
+        for c in &mut self.checkboxes {
+            let (nl, nt, nr, nb) = match deg {
+                90 => (c.t, width - c.r, c.b, width - c.l),
+                180 => (width - c.r, height - c.b, width - c.l, height - c.t),
+                _ => (height - c.b, c.l, height - c.t, c.r),
+            };
+            (c.l, c.t, c.r, c.b) = (nl, nt, nr, nb);
         }
         if deg != 180 {
             (self.width, self.height) = (height, width);
@@ -677,12 +691,17 @@ fn extract_page(
     // path — pdfium's text page is gone (phase 4 of "Retiring pdfium").
     let rc = rust_cells.unwrap_or_default();
     let (mut cells, mut code_cells, mut word_cells) = (rc.prose, rc.code, rc.words);
+    let mut checkboxes = rc.checkboxes;
     if rotation != 0 {
         for c in cells
             .iter_mut()
             .chain(word_cells.iter_mut())
             .chain(code_cells.iter_mut())
         {
+            let (l, t, r, b) = to_display_frame((c.l, c.t, c.r, c.b), rotation, unrot_w, unrot_h);
+            (c.l, c.t, c.r, c.b) = (l, t, r, b);
+        }
+        for c in &mut checkboxes {
             let (l, t, r, b) = to_display_frame((c.l, c.t, c.r, c.b), rotation, unrot_w, unrot_h);
             (c.l, c.t, c.r, c.b) = (l, t, r, b);
         }
@@ -854,6 +873,7 @@ fn extract_page(
         cells,
         code_cells,
         word_cells,
+        checkboxes,
         image,
         links,
         rotation: 0,

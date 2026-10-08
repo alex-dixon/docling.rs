@@ -1902,6 +1902,130 @@ fn assign_cells(regions: &[Region], cells: &[TextCell]) -> Vec<Vec<usize>> {
     owned
 }
 
+/// Give every line that has a drawn checkbox square in front of it its own
+/// checkbox region (#609). The layout model often reads a checklist as one
+/// `text` (or `list_item`) block — on the reporter's ReportLab page all four
+/// options are one region, which then printed as `First option Second option
+/// …`, and docling itself splits it into two garbled paragraphs. The squares
+/// ([`crate::checkbox`]) say where each item starts: a region whose lines
+/// carry one splits into a `checkbox_selected` / `checkbox_unselected` region
+/// per boxed line (its box spans the square and the line, and a following
+/// line without a square — a wrapped label — stays with it), so assembly
+/// emits [`Node::CheckboxItem`]s exactly as for the model's own checkbox
+/// labels. Lines above the first square stay one region of the original
+/// label. The first piece replaces the region in place and the rest are
+/// appended, so per-region slices indexed by the original order (table
+/// grids, enrichments — neither applies to text) stay aligned.
+///
+/// A square counts for a line when its vertical centre lies on the line and
+/// it sits just left of the line's first cell: no more than 1.5 sides (at
+/// least 6 pt) of gap, at most 1 pt of overlap. Text set *inside* squares (a
+/// comb field) never matches. Without squares on the page this is a no-op.
+pub fn split_checkbox_lines(
+    regions: &mut Vec<Region>,
+    cells: &[TextCell],
+    boxes: &[crate::checkbox::CheckBox],
+) {
+    if boxes.is_empty() {
+        return;
+    }
+    let owned = assign_cells(regions, cells);
+    let mut used = vec![false; boxes.len()];
+    let mut appended: Vec<Region> = Vec::new();
+    for (i, mine) in owned.iter().enumerate() {
+        let region = regions[i].clone();
+        if !matches!(region.label, "text" | "list_item") || mine.is_empty() {
+            continue;
+        }
+        // The region's lines: cells sharing a vertical centre band, top down.
+        let mut sorted: Vec<&TextCell> = mine.iter().map(|&c| &cells[c]).collect();
+        sorted.sort_by(|a, b| a.t.total_cmp(&b.t).then(a.l.total_cmp(&b.l)));
+        let mut rows: Vec<(f32, f32, f32, f32)> = Vec::new(); // (l, t, r, b)
+        for c in sorted {
+            let mid = (c.t + c.b) / 2.0;
+            match rows.last_mut() {
+                Some(row) if mid >= row.1 && mid <= row.3 => {
+                    *row = (
+                        row.0.min(c.l),
+                        row.1.min(c.t),
+                        row.2.max(c.r),
+                        row.3.max(c.b),
+                    );
+                }
+                _ => rows.push((c.l, c.t, c.r, c.b)),
+            }
+        }
+        let boxed: Vec<Option<usize>> = rows
+            .iter()
+            .map(|&(l, t, _, b)| {
+                boxes
+                    .iter()
+                    .enumerate()
+                    .filter(|&(k, sq)| {
+                        let side = sq.r - sq.l;
+                        let mid = (sq.t + sq.b) / 2.0;
+                        let gap = l - sq.r;
+                        !used[k]
+                            && mid >= t - 2.0
+                            && mid <= b + 2.0
+                            && gap >= -1.0
+                            && gap <= (1.5 * side).max(6.0)
+                    })
+                    .min_by(|a, b| (l - a.1.r).total_cmp(&(l - b.1.r)))
+                    .map(|(k, _)| k)
+            })
+            .collect();
+        if boxed.iter().all(Option::is_none) {
+            continue;
+        }
+        // Group rows: a boxed row opens an item; an unboxed one continues the
+        // open group (the leading group keeps the region's own label).
+        let mut pieces: Vec<Region> = Vec::new();
+        for (row, sq) in rows.iter().zip(&boxed) {
+            let row_box = (row.0, row.1, row.2, row.3);
+            match sq {
+                Some(k) => {
+                    used[*k] = true;
+                    let s = &boxes[*k];
+                    pieces.push(Region {
+                        label: if s.checked {
+                            "checkbox_selected"
+                        } else {
+                            "checkbox_unselected"
+                        },
+                        score: region.score,
+                        l: row_box.0.min(s.l),
+                        t: row_box.1.min(s.t),
+                        r: row_box.2.max(s.r),
+                        b: row_box.3.max(s.b),
+                    });
+                }
+                None => match pieces.last_mut() {
+                    Some(p) => {
+                        p.l = p.l.min(row_box.0);
+                        p.t = p.t.min(row_box.1);
+                        p.r = p.r.max(row_box.2);
+                        p.b = p.b.max(row_box.3);
+                    }
+                    None => pieces.push(Region {
+                        l: row_box.0,
+                        t: row_box.1,
+                        r: row_box.2,
+                        b: row_box.3,
+                        ..region.clone()
+                    }),
+                },
+            }
+        }
+        let mut pieces = pieces.into_iter();
+        if let Some(first) = pieces.next() {
+            regions[i] = first;
+        }
+        appended.extend(pieces);
+    }
+    regions.extend(appended);
+}
+
 /// docling's regular-cluster refinement after cell assignment
 /// (`LayoutPostprocessor._process_regular_clusters`, #419), run once the page's
 /// cells are final and before reading order:
@@ -2784,7 +2908,7 @@ fn structure_from_cells(
 
 pub fn assemble_page(
     page: &PdfPage,
-    regions: Vec<Region>,
+    mut regions: Vec<Region>,
     table_rows: &[Option<TableGrid>],
     enrichments: &[Option<Enrichment>],
     // Picture-crop scale in px/pt (docling's `images_scale`, #520); `None`
@@ -2810,6 +2934,8 @@ pub fn assemble_page(
     // Markdown; whole-item docling-parity links are baked below and their
     // pairs dropped from this list so strict output doesn't double-wrap).
     let mut links = resolve_link_anchors(page);
+    // Lines with a drawn checkbox square in front become checkbox items (#609).
+    split_checkbox_lines(&mut regions, &page.cells, &page.checkboxes);
     // Pair each region with its precomputed TableFormer grid and enrichment
     // (indexed by original order) and order by reading order together, so they
     // stay aligned.
@@ -4122,6 +4248,7 @@ mod tests {
             scale: 2.0,
             cells: Vec::new(),
             code_cells: Vec::new(),
+            checkboxes: Vec::new(),
             // "LinkedIn | GitHub | Credly" = 26 chars over x 100..360.
             word_cells: vec![cell(
                 "LinkedIn | GitHub | Credly",
@@ -4933,5 +5060,77 @@ mod tests {
         let mut untouched = vec![region("text", 0.9, 0.0, 0.0, 10.0, 10.0)];
         super::fit_regions_to_cells(&mut untouched, &[]);
         assert_eq!(untouched.len(), 1, "no cells yet: nothing dropped");
+    }
+
+    /// #609: one `text` region over a checklist whose lines each have a drawn
+    /// square in front splits into a checkbox region per boxed line — the
+    /// wrapped second line of an option stays with it, the intro line above
+    /// the first square keeps the region's label, and a ticked square gives
+    /// `checkbox_selected`. Without squares nothing changes.
+    #[test]
+    fn checklist_lines_with_squares_split_into_checkbox_regions() {
+        use crate::checkbox::CheckBox;
+        let cells = vec![
+            cell("Pick any:", 100.0, 90.0, 160.0, 100.0),
+            cell("First option", 120.0, 110.0, 180.0, 120.0),
+            cell("Second option that", 120.0, 129.0, 200.0, 139.0),
+            cell("wraps onto a line", 120.0, 141.0, 196.0, 151.0),
+            cell("Third option", 120.0, 160.0, 182.0, 170.0),
+        ];
+        let sq = |t: f32, checked| CheckBox {
+            l: 100.0,
+            t,
+            r: 112.0,
+            b: t + 12.0,
+            checked,
+        };
+        let boxes = [sq(109.0, false), sq(128.0, true), sq(159.0, false)];
+        let block = || vec![region("text", 0.6, 100.0, 90.0, 200.0, 170.0)];
+
+        let mut regions = block();
+        super::split_checkbox_lines(&mut regions, &cells, &boxes);
+        let texts = super::region_texts_exclusive(&regions, &cells);
+        let got: Vec<(&str, &str)> = regions
+            .iter()
+            .zip(&texts)
+            .map(|(r, t)| (r.label, t.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("text", "Pick any:"),
+                ("checkbox_unselected", "First option"),
+                ("checkbox_selected", "Second option that wraps onto a line"),
+                ("checkbox_unselected", "Third option"),
+            ]
+        );
+        // A checkbox region spans its square and its line(s).
+        assert_eq!((regions[2].l, regions[2].t), (100.0, 128.0));
+        assert_eq!((regions[2].r, regions[2].b), (200.0, 151.0));
+
+        let shape = |rs: &[Region]| -> Vec<(&'static str, [f32; 4])> {
+            rs.iter().map(|r| (r.label, [r.l, r.t, r.r, r.b])).collect()
+        };
+        let mut untouched = block();
+        super::split_checkbox_lines(&mut untouched, &cells, &[]);
+        assert_eq!(shape(&untouched), shape(&block()));
+        // A square far left of the text (a margin mark), or one the text
+        // sits inside (a comb field), does not make a checkbox.
+        for far in [
+            CheckBox {
+                l: 40.0,
+                r: 52.0,
+                ..sq(109.0, false)
+            },
+            CheckBox {
+                l: 115.0,
+                r: 127.0,
+                ..sq(109.0, false)
+            },
+        ] {
+            let mut regions = block();
+            super::split_checkbox_lines(&mut regions, &cells, &[far]);
+            assert_eq!(shape(&regions), shape(&block()));
+        }
     }
 }
