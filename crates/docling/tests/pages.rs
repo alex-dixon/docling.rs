@@ -186,9 +186,12 @@ fn text_detector_reads_labels_outside_layout_regions() {
 /// discard the text layer: converting a digital PDF page with it produces
 /// OCR-recognized text, not the embedded cells. The fixture's text layer
 /// spells "JavaScript Code Example" — OCR of the rendered page reads the same
-/// heading, so the words prove the page converted *some* way; the differing
-/// glyph geometry (OCR boxes never byte-match the text layer's) proves it was
-/// not the text-layer path: the two outputs must differ.
+/// heading, so the words prove the page converted *some* way; the
+/// confidence report proves which way: an OCR score exists only when OCR
+/// produced the page's text. (Comparing the two Markdown outputs proved
+/// nothing: with the text detector — `DOCLING_OCR_DET_ONNX`, which another
+/// test in this process sets — OCR reads the page exactly as the text layer
+/// spells it, and the test failed whenever that test ran first.)
 #[test]
 fn force_full_page_ocr_discards_the_text_layer() {
     if !ocr_models_ready() {
@@ -203,21 +206,27 @@ fn force_full_page_ocr_discards_the_text_layer() {
         .page_range(1, 1)
         .convert(src())
         .expect("normal convert")
-        .document
-        .export_to_markdown();
+        .document;
     let forced = DocumentConverter::new()
         .page_range(1, 1)
         .force_full_page_ocr(true)
         .convert(src())
         .expect("forced convert")
-        .document
-        .export_to_markdown();
+        .document;
+    let md = forced.export_to_markdown();
     assert!(
-        forced.contains("JavaScript"),
-        "OCR should still read the page's heading: {forced:?}"
+        md.contains("JavaScript"),
+        "OCR should still read the page's heading: {md:?}"
     );
-    assert_ne!(
-        normal, forced,
+    let ocr_score = |doc: &docling_core::DoclingDocument| {
+        doc.confidence
+            .as_ref()
+            .expect("pipeline sets confidence")
+            .ocr_score()
+    };
+    assert_eq!(ocr_score(&normal), None, "digital page: nothing OCR'd");
+    assert!(
+        ocr_score(&forced).is_some(),
         "forced output must come from OCR, not the embedded text layer"
     );
 }

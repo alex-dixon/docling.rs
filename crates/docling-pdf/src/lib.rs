@@ -263,6 +263,12 @@ pub fn convert_text_layer(bytes: &[u8], name: &str) -> Result<DoclingDocument, P
     convert_text_layer_pages(bytes, name, None)
 }
 
+/// The error for bytes no reader here can parse as a PDF — not a PDF at
+/// all, or one damaged past the parser's repairs. Said about the file, not
+/// about a missing renderer or text layer: no library would read it either.
+pub(crate) const UNREADABLE: &str =
+    "not a readable PDF: the file is damaged or not a PDF (its structure could not be parsed)";
+
 /// [`convert_text_layer`] restricted to a **1-based inclusive** page window
 /// (issue #80's `--pages`); `None` converts everything. The window is
 /// validated the same way as [`Pipeline::pages`]: `first <= last`, 1-based,
@@ -282,6 +288,11 @@ pub fn convert_text_layer_pages(
     let mut doc = DoclingDocument::new(name);
     let mut total = 0usize;
     let parsed = textparse::pdf_text_pages(bytes);
+    // No pages at all: tell a file nothing can open apart from a PDF that
+    // merely has no text layer (the caller's "scanned? needs OCR" hint).
+    if parsed.is_empty() && textparse::load_document(bytes).is_none() {
+        return Err(PdfError::Document(UNREADABLE.into()));
+    }
     // A vestigial layer (a few typed-in form fields over scanned pages) is not
     // the document's text: return the empty document, which callers already
     // report as "no text layer" — so an OCR-capable caller falls back to OCR
@@ -3496,6 +3507,29 @@ mod median_tests {
         assert_eq!(super::tf_match::median_for_test(&mut []), 0.0);
         assert_eq!(super::tf_match::median_for_test(&mut [4.0, 2.0]), 3.0);
         assert_eq!(super::tf_match::median_for_test(&mut [5.0, 1.0, 3.0]), 3.0);
+    }
+}
+
+#[cfg(test)]
+mod unreadable_tests {
+    /// The text-layer path (the wasm build's only one) tells a file nothing
+    /// can open apart from a PDF that merely has no text layer: garbage is
+    /// an error about the file, a real PDF converts.
+    #[test]
+    fn text_layer_path_reports_an_unreadable_file() {
+        for bytes in [b"garbage".as_slice(), b"", b"%PDF-1.7\n%%EOF\n"] {
+            let err = super::convert_text_layer(bytes, "x.pdf").unwrap_err();
+            assert!(err.to_string().contains("not a readable PDF"), "{err}");
+        }
+        let real = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/data/pdf/sources/multi_page.pdf"),
+        )
+        .unwrap();
+        assert!(!super::convert_text_layer(&real, "multi_page.pdf")
+            .unwrap()
+            .nodes
+            .is_empty());
     }
 }
 

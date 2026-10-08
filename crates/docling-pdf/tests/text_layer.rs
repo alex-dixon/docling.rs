@@ -89,10 +89,19 @@ fn scanned_page_extracts_table_and_keeps_chart() {
 
 #[test]
 fn scanned_pdf_yields_empty_document() {
-    // No content stream at all — the no-text-layer contract is an empty doc,
-    // not an error (callers decide whether to fall back to OCR).
-    let doc = docling_pdf::convert_text_layer(b"%PDF-1.4\n%%EOF", "scan.pdf").expect("no error");
+    // An image-only page — the no-text-layer contract is an empty doc, not
+    // an error (callers decide whether to fall back to OCR).
+    let scan = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/data/scanned/sources/ocr_test_raster.pdf"),
+    )
+    .unwrap();
+    let doc = docling_pdf::convert_text_layer(&scan, "scan.pdf").expect("no error");
     assert!(doc.nodes.is_empty());
+    // Bytes that are no readable PDF at all are an error about the file,
+    // not an empty "scanned" document.
+    let err = docling_pdf::convert_text_layer(b"%PDF-1.4\n%%EOF", "x.pdf").unwrap_err();
+    assert!(err.to_string().contains("not a readable PDF"), "{err}");
 }
 
 /// #211: HEIC is detected by content, and without the `heif` feature the

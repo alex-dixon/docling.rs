@@ -331,17 +331,25 @@ mod tests {
 
     #[test]
     fn scanned_pdf_reports_missing_text_layer() {
-        // A PDF with no embedded text (here: a stub with no content stream)
-        // should explain that OCR needs a native build, not return "".
+        // A PDF with no embedded text (an image-only scan) should explain
+        // that OCR needs a native build, not return "".
         // Text-layer-arm-only, same as `pdf_text_layer_converts`.
         if docling::PDF_ML_COMPILED {
             return;
         }
-        let err = convert_impl(b"%PDF-1.4\n%%EOF", "scan.pdf", None, None, None, None).unwrap_err();
+        let scan = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/data/scanned/sources/ocr_test_raster.pdf"
+        ))
+        .unwrap();
+        let err = convert_impl(&scan, "scan.pdf", None, None, None, None).unwrap_err();
         assert!(
             err.contains("text layer") || err.contains("OCR"),
             "should point at the missing text layer: {err}"
         );
+        // Bytes no reader opens are an error about the file instead.
+        let err = convert_impl(b"%PDF-1.4\n%%EOF", "x.pdf", None, None, None, None).unwrap_err();
+        assert!(err.contains("not a readable PDF"), "{err}");
     }
 
     #[test]

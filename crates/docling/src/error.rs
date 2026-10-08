@@ -81,7 +81,14 @@ impl fmt::Display for ConversionError {
             ConversionError::Panic(msg) => write!(f, "conversion panicked: {msg}"),
             ConversionError::Timeout(msg) => write!(f, "document timeout: {msg}"),
             ConversionError::WithSource { context, source } => {
-                write!(f, "parse error: {context}: {source}")
+                // A source that already names its format (`PdfError`'s
+                // `pdf: …`) is not prefixed twice (`pdf: pdf: …`).
+                let msg = source.to_string();
+                if msg.starts_with(&format!("{context}: ")) {
+                    write!(f, "parse error: {msg}")
+                } else {
+                    write!(f, "parse error: {context}: {msg}")
+                }
             }
         }
     }
@@ -118,6 +125,22 @@ mod tests {
         assert!(
             source.downcast_ref::<serde_json::Error>().is_some(),
             "chained source downcasts to the original type"
+        );
+    }
+
+    /// A source whose message already names the context is not prefixed
+    /// with it again (`parse error: pdf: pdf: …`).
+    #[test]
+    fn with_source_does_not_repeat_the_context() {
+        let cause = std::io::Error::other("pdf: not a readable PDF");
+        assert_eq!(
+            ConversionError::with_source("pdf", cause).to_string(),
+            "parse error: pdf: not a readable PDF"
+        );
+        let cause = std::io::Error::other("bad header");
+        assert_eq!(
+            ConversionError::with_source("pdf", cause).to_string(),
+            "parse error: pdf: bad header"
         );
     }
 
