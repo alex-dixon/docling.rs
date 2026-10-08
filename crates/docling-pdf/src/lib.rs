@@ -354,6 +354,9 @@ pub fn convert_text_layer_pages(
         }
     }
     assemble::merge_continuations(&mut doc.nodes);
+    // Grown a page at a time, the node vector can be up to half spare
+    // capacity — hundreds of MB on a long document, held for its lifetime.
+    doc.nodes.shrink_to_fit();
     Ok(doc)
 }
 
