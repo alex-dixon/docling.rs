@@ -1312,15 +1312,34 @@ impl DoclingDocument {
     /// `DoclingDocument.export_to_dict()` / `save_as_json()`. The output loads
     /// back into Python docling-core and round-trips to the same Markdown.
     pub fn export_to_json(&self) -> String {
-        serde_json::to_string_pretty(&self.export_to_json_value())
-            .expect("DoclingDocument JSON is always serializable")
+        let mut out = Vec::new();
+        self.write_json_pretty(&mut out)
+            .expect("DoclingDocument JSON is always serializable");
+        String::from_utf8(out).expect("serde_json writes UTF-8")
     }
 
     /// The same JSON wire format as [`Self::export_to_json`], as a
     /// `serde_json::Value` — for callers that append response-level extras
     /// (docling-serve adds the confidence report, #183) before serializing.
+    ///
+    /// The `Value` is large — ~2.7 KB per text item — so on a long document
+    /// prefer [`Self::write_json`], which writes the same JSON without it.
     pub fn export_to_json_value(&self) -> serde_json::Value {
         crate::json::to_json(self)
+    }
+
+    /// Write the JSON of [`Self::export_to_json_value`] to `writer`, compact
+    /// — byte for byte `serde_json::to_writer(writer, &doc.export_to_json_value())`
+    /// — without building the `Value`: the export holds its text items in a
+    /// compact form and serializes them straight to the writer. Wrap a file
+    /// or socket in a `BufWriter`.
+    pub fn write_json<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        crate::json::write_json(self, writer, false).map_err(std::io::Error::from)
+    }
+
+    /// [`Self::write_json`], indented as [`Self::export_to_json`] is.
+    pub fn write_json_pretty<W: std::io::Write>(&self, writer: W) -> std::io::Result<()> {
+        crate::json::write_json(self, writer, true).map_err(std::io::Error::from)
     }
 
     /// Serialize to a complete LaTeX document — the Rust counterpart of
