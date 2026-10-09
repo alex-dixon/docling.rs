@@ -5,13 +5,11 @@
 //! and pictures. Bullet detection follows docling's `_get_effective_list_marker`:
 //! the paragraph's own `a:pPr` marker wins (`buNone`/`buChar`/`buAutoNum`/
 //! `buBlip`), then the owning shape's `a:lstStyle` level properties for the
-//! paragraph's level supply an inherited one (#406); with no marker anywhere,
-//! body placeholders inherit a bullet from the master (so they default to a
-//! list), an indented paragraph is a list item (docling's `level > 0`
-//! fallback), and a plain text box paragraph stays a paragraph. The layout
-//! placeholder's list style and the master's `p:txStyles` — the tail of
-//! docling's chain — are not walked yet; the body-placeholder default stands in
-//! for them.
+//! paragraph's level supply an inherited one (#406); a placeholder then reads
+//! its layout placeholder's `a:lstStyle` and, through it, the master's
+//! `p:txStyles` (#627, docling#4581); with no marker anywhere an indented
+//! paragraph is a list item (docling's `level > 0` fallback) and any other
+//! stays a paragraph.
 //!
 //! The walk builds two things at once. The flat [`Node`] stream is what
 //! Markdown / DocLang / LaTeX render. The JSON export reads docling's item
@@ -812,10 +810,64 @@ fn inherited_geom(shape: XmlNode, phmap: &PhMap) -> Option<[i64; 4]> {
 
 /// Placeholder geometries a slide can inherit, keyed by `<p:ph>` `idx` and
 /// `type`. The layout is consulted before the master (layout wins).
+///
+/// Also the tail of docling's list-marker cascade (#627): the markers each
+/// layout placeholder's list style declares, and the master's text styles.
 #[derive(Default)]
 struct PhMap {
     by_idx: HashMap<String, [i64; 4]>,
     by_type: HashMap<String, [i64; 4]>,
+    /// The layout's placeholders in shape-tree order, by `idx` (python-pptx's
+    /// default 0 when absent), each with the markers of its
+    /// `a:lstStyle/a:lvl{N}pPr` — empty levels when it has no text body.
+    layout_lists: Vec<(u32, LevelMarkers)>,
+    /// The master's `p:txStyles`: `titleStyle`, `bodyStyle`, `otherStyle`.
+    master_styles: [LevelMarkers; 3],
+}
+
+/// The marker [`declared_marker`] reads from each of the nine `a:lvl{N}pPr`
+/// of a list style, indexed by paragraph level.
+type LevelMarkers = [Option<Option<bool>>; 9];
+
+/// Which `p:txStyles` bucket a placeholder takes its master marker from —
+/// docling's `_get_master_text_style_node`: BODY/OBJECT (`body`, `obj`, or no
+/// `type`, which python-pptx reads as OBJECT) → `bodyStyle`, TITLE →
+/// `titleStyle`, everything else — `ctrTitle` and `subTitle` included —
+/// `otherStyle`. Deliberately not [`placeholder_kind`], which lumps a centred
+/// title in with the titles and every other type in with the body.
+fn master_style_slot(ph: XmlNode) -> usize {
+    match ph.attribute("type") {
+        Some("title") => 0,
+        None | Some("body") | Some("obj") => 1,
+        Some(_) => 2,
+    }
+}
+
+/// A `<p:ph>`'s `idx` the way python-pptx reads it: 0 when absent.
+fn ph_idx(ph: XmlNode) -> u32 {
+    ph.attribute("idx")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The markers of a list-style-like element's `a:lvl{N}pPr` children
+/// (`descend`: anywhere below it, as docling's `.//a:lvl{N}pPr` searches a
+/// master text style; otherwise direct children, as in an `a:lstStyle`).
+fn level_markers(style: Option<XmlNode>, descend: bool) -> LevelMarkers {
+    let mut out = LevelMarkers::default();
+    let Some(style) = style else {
+        return out;
+    };
+    for (lvl, slot) in out.iter_mut().enumerate() {
+        let tag = format!("lvl{}pPr", lvl + 1);
+        let found = if descend {
+            style.descendants().find(|n| n.has_tag_name(tag.as_str()))
+        } else {
+            style.children().find(|n| n.has_tag_name(tag.as_str()))
+        };
+        *slot = found.and_then(declared_marker);
+    }
+    out
 }
 
 /// Build the [`PhMap`] for a slide: its layout part (via the slide's `.rels`)
@@ -829,14 +881,54 @@ fn slide_placeholders(pkg: &mut Package, slide_part: &str) -> PhMap {
     };
     if let Some(xml) = pkg.read(&layout_part) {
         collect_placeholders(&xml, &mut map);
+        map.layout_lists = layout_list_styles(&xml);
     }
     let layout_dir = layout_part.rsplit_once('/').map_or("", |(d, _)| d);
     if let Some(master_part) = rel_target(pkg, &layout_part, layout_dir, "/slideMaster") {
         if let Some(xml) = pkg.read(&master_part) {
             collect_placeholders(&xml, &mut map);
+            map.master_styles = master_text_styles(&xml);
         }
     }
     map
+}
+
+/// Every placeholder of a layout with its list-style markers, in the order
+/// python-pptx's `layout.placeholders` yields them: the shape tree's direct
+/// children carrying a `<p:ph>` (a placeholder inside a group is not one).
+/// docling reads the first `p:txBody` below the shape, then its `a:lstStyle`.
+fn layout_list_styles(xml: &str) -> Vec<(u32, LevelMarkers)> {
+    let Ok(doc) = Document::parse(xml) else {
+        return Vec::new();
+    };
+    let Some(tree) = descendant(doc.root_element(), "spTree") else {
+        return Vec::new();
+    };
+    tree.children()
+        .filter(|n| n.is_element())
+        .filter_map(|shape| {
+            let ph = shape
+                .children()
+                .find(|n| n.is_element())
+                .and_then(|nv| nv.children().find(|n| n.has_tag_name("nvPr")))
+                .and_then(|pr| pr.children().find(|n| n.has_tag_name("ph")))?;
+            let list_style = descendant(shape, "txBody")
+                .and_then(|b| b.children().find(|n| n.has_tag_name("lstStyle")));
+            Some((ph_idx(ph), level_markers(list_style, false)))
+        })
+        .collect()
+}
+
+/// A master's `p:txStyles` markers, `[titleStyle, bodyStyle, otherStyle]`.
+fn master_text_styles(xml: &str) -> [LevelMarkers; 3] {
+    let Ok(doc) = Document::parse(xml) else {
+        return Default::default();
+    };
+    let styles = descendant(doc.root_element(), "txStyles");
+    ["titleStyle", "bodyStyle", "otherStyle"].map(|name| {
+        let style = styles.and_then(|s| s.children().find(|n| n.has_tag_name(name)));
+        level_markers(style, true)
+    })
 }
 
 /// Resolve the first relationship of `part` whose type ends with `suffix` to a
@@ -882,23 +974,15 @@ fn push_located(doc: &mut DoclingDocument, location: [u16; 4], node: Node) {
     });
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Placeholder {
-    Title,
-    Subtitle,
-    Body,
-    TextBox,
-}
-
-fn placeholder_kind(sp: XmlNode) -> Placeholder {
-    match descendant(sp, "ph") {
-        None => Placeholder::TextBox,
-        Some(ph) => match ph.attribute("type") {
-            Some("title") | Some("ctrTitle") => Placeholder::Title,
-            Some("subTitle") => Placeholder::Subtitle,
-            _ => Placeholder::Body,
-        },
-    }
+/// Whether a shape is a title placeholder (`title` or `ctrTitle`), whose
+/// non-list text docling labels `title`. A subtitle stays a paragraph on
+/// purpose: docling settled it in docling#3785 and, after briefly moving it to
+/// SECTION_HEADER behind an option, reverted to that in docling#4190.
+fn is_title_placeholder(ph: Option<XmlNode>) -> bool {
+    matches!(
+        ph.and_then(|ph| ph.attribute("type")),
+        Some("title") | Some("ctrTitle")
+    )
 }
 
 fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut SlideOut) {
@@ -906,7 +990,8 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
         return;
     };
     // docling skips a shape whose whole text is blank.
-    let kind = placeholder_kind(sp);
+    let ph = descendant(sp, "ph");
+    let is_title = is_title_placeholder(ph);
     let paragraphs: Vec<XmlNode> = tx_body.children().filter(|n| n.has_tag_name("p")).collect();
     if paragraphs
         .iter()
@@ -927,7 +1012,7 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
         // docling's `charspan` is over the paragraph's own text, `len()` in
         // code points.
         let prov = shape_prov(sp, ctx, text.chars().count());
-        match list_kind(para, Some(tx_body), kind) {
+        match list_kind(para, Some(tx_body), ph, ctx.phmap) {
             Some(numbered) => {
                 let level = paragraph_level(para);
                 while open_lists.len() > 1 && open_lists.last().is_some_and(|l| l.level > level) {
@@ -949,11 +1034,19 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
                 let depth = open_lists.len() - 1;
                 let current = open_lists.last_mut().expect("a list is open");
                 let n = if numbered {
+                    // A numbered group starts from its first enumerated
+                    // paragraph's own `a:buAutoNum/@startAt` (PowerPoint's
+                    // "Start at"), as docling's `_get_auto_number_start`.
+                    if current.counter == 0 {
+                        current.counter = auto_number_start(para) - 1;
+                    }
                     current.counter += 1;
                     current.counter
                 } else {
                     0
                 };
+                current.items += 1;
+                let first_enumerated = *current.first_enumerated.get_or_insert(numbered);
                 // docling passes numbered items an `"N."` enumeration marker
                 // and bulleted ones an empty one.
                 let marker = numbered.then(|| format!("{n}."));
@@ -978,9 +1071,17 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
                 // Each item carries its shape's `<location>` (all items of a
                 // body placeholder share the one box); the location rides on the
                 // item itself so consecutive items still group into one `<list>`.
+                // docling-core's Markdown numbers an unmarked item by its
+                // position when its group's first item is enumerated
+                // (`first_item_is_enumerated`) — a bullet that joins a
+                // numbered group renders `N.`, not `-`.
+                let (ordered, number) = match (numbered, first_enumerated) {
+                    (false, true) => (true, current.items),
+                    _ => (numbered, n),
+                };
                 out.doc.push(Node::ListItem {
-                    ordered: numbered,
-                    number: n,
+                    ordered,
+                    number,
                     first_in_list,
                     text,
                     level: depth as u8,
@@ -991,7 +1092,7 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
                     layer: None,
                 });
             }
-            None if kind != Placeholder::Title && paragraph_math(para).is_some() => {
+            None if !is_title && paragraph_math(para).is_some() => {
                 open_lists.clear();
                 for latex in paragraph_math(para).unwrap_or_default() {
                     let prov = shape_prov(sp, ctx, latex.chars().count());
@@ -1012,23 +1113,15 @@ fn handle_text_shape(sp: XmlNode, location: [u16; 4], ctx: &SlideCtx, out: &mut 
                 open_lists.clear();
                 // docling labels a title placeholder's text `title` and any
                 // other non-list text `paragraph` (a `text` in Markdown terms).
-                let label = match kind {
-                    Placeholder::Title => "title",
-                    _ => "paragraph",
-                };
+                let label = if is_title { "title" } else { "paragraph" };
                 out.tree
                     .add_with_prov(Some(out.slide), None, text_kind(label, &text), prov);
-                match kind {
-                    Placeholder::Title => {
-                        push_located(&mut out.doc, location, Node::Heading { level: 1, text })
-                    }
-                    // A subtitle placeholder is a paragraph on purpose: docling
-                    // settled it in docling#3785 and, after briefly moving it
-                    // to SECTION_HEADER behind an option, reverted to that in
-                    // docling#4190 (which also deleted the dead `_handle_title`
-                    // that would have labelled it). Not a bug to fix.
-                    _ => push_located(&mut out.doc, location, Node::Paragraph { text }),
-                }
+                let node = if is_title {
+                    Node::Heading { level: 1, text }
+                } else {
+                    Node::Paragraph { text }
+                };
+                push_located(&mut out.doc, location, node);
             }
         }
     }
@@ -1045,6 +1138,10 @@ struct OpenList {
     counter: u64,
     /// The most recent item, which parents any list nested below it.
     last_item: Option<usize>,
+    /// Items added so far (a nested group hangs off an item, not the group).
+    items: u64,
+    /// Whether the group's first item is enumerated, once it has one.
+    first_enumerated: Option<bool>,
 }
 
 impl OpenList {
@@ -1054,6 +1151,8 @@ impl OpenList {
             level,
             counter: 0,
             last_item: None,
+            items: 0,
+            first_enumerated: None,
         }
     }
 }
@@ -1068,20 +1167,36 @@ fn list_group_kind() -> TreeKind {
 /// The marker a properties element (`a:pPr` or `a:lvl{N}pPr`) declares, if it
 /// declares one at all — docling's `_parse_bullet_from_paragraph_properties`.
 /// `Some(None)` is an explicit `buNone`: "this is deliberately not a list".
+/// Checked in docling's order — `buNone`, `buChar`, `buAutoNum`, `buBlip` —
+/// so a malformed properties element carrying both a character and a
+/// numbering bullet reads as the bullet, as upstream's does.
 fn declared_marker(p_pr: XmlNode) -> Option<Option<bool>> {
-    if p_pr.children().any(|n| n.has_tag_name("buNone")) {
-        return Some(None);
+    let has = |tag: &str| p_pr.children().any(|n| n.has_tag_name(tag));
+    if has("buNone") {
+        Some(None)
+    } else if has("buChar") {
+        Some(Some(false))
+    } else if has("buAutoNum") {
+        Some(Some(true))
+    } else if has("buBlip") {
+        Some(Some(false))
+    } else {
+        None
     }
-    if p_pr.children().any(|n| n.has_tag_name("buAutoNum")) {
-        return Some(Some(true));
-    }
-    if p_pr
-        .children()
-        .any(|n| n.has_tag_name("buChar") || n.has_tag_name("buBlip"))
-    {
-        return Some(Some(false));
-    }
-    None
+}
+
+/// The number a numbered paragraph's list starts from: its own
+/// `a:pPr/a:buAutoNum/@startAt`, 1 when absent or invalid. The schema bounds
+/// it to 1..=32767; docling would print an out-of-schema `0` or negative start
+/// as is, which a `u64` counter cannot hold, so those read as 1 here.
+fn auto_number_start(para: XmlNode) -> u64 {
+    para.children()
+        .find(|n| n.has_tag_name("pPr"))
+        .and_then(|pr| pr.children().find(|n| n.has_tag_name("buAutoNum")))
+        .and_then(|bu| bu.attribute("startAt"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(1)
 }
 
 /// A paragraph's outline level (`a:pPr/@lvl`, 0 when absent), which selects the
@@ -1100,9 +1215,19 @@ fn paragraph_level(para: XmlNode) -> usize {
 /// docling's `_get_effective_list_marker` order: the paragraph's own `a:pPr`
 /// first, then — and this is what a styled deck relies on — the *owning shape's*
 /// list style, `a:txBody/a:lstStyle/a:lvl{lvl+1}pPr` selected by the paragraph's
-/// level (#406). The level only picks which level properties supply the marker;
-/// the items are not nested.
-fn list_kind(para: XmlNode, tx_body: Option<XmlNode>, placeholder: Placeholder) -> Option<bool> {
+/// level (#406). A placeholder (`ph`, its `<p:ph>`) goes on to the layout
+/// placeholder with the same `idx` — idx only, as `layout.placeholders.get`
+/// matches — and, only when there is one, to the master's text style for its
+/// type (#627). A layout `buNone` therefore beats the master's bullet
+/// (docling#4581): the "Section Header" or "Title Slide" text of the default
+/// template is plain text, not a list. The level only picks which level
+/// properties supply the marker; nesting is the caller's.
+fn list_kind(
+    para: XmlNode,
+    tx_body: Option<XmlNode>,
+    ph: Option<XmlNode>,
+    phmap: &PhMap,
+) -> Option<bool> {
     let lvl = paragraph_level(para);
     if let Some(p_pr) = para.children().find(|n| n.has_tag_name("pPr")) {
         if let Some(kind) = declared_marker(p_pr) {
@@ -1120,14 +1245,23 @@ fn list_kind(para: XmlNode, tx_body: Option<XmlNode>, placeholder: Placeholder) 
             return kind;
         }
     }
-    // No marker anywhere in the shape: body placeholders inherit a bullet from
-    // the master (the layout/master `lstStyle` chain in docling), and any
-    // indented paragraph is a list item even without one — docling's
-    // `paragraph.level > 0` fallback.
-    match placeholder {
-        Placeholder::Body => Some(false),
-        _ => (lvl > 0).then_some(false),
+    if let Some(ph) = ph {
+        let idx = ph_idx(ph);
+        if let Some((_, layout)) = phmap.layout_lists.iter().find(|(i, _)| *i == idx) {
+            let inherited = layout.get(lvl).copied().flatten().or_else(|| {
+                phmap.master_styles[master_style_slot(ph)]
+                    .get(lvl)
+                    .copied()
+                    .flatten()
+            });
+            if let Some(kind) = inherited {
+                return kind;
+            }
+        }
     }
+    // No marker anywhere: an indented paragraph is a list item even without
+    // one — docling's `paragraph.level > 0` fallback.
+    (lvl > 0).then_some(false)
 }
 
 /// Concatenate a paragraph's run text; line breaks (`<a:br>`) become spaces
@@ -1301,7 +1435,7 @@ fn descendant<'a, 'input>(node: XmlNode<'a, 'input>, name: &str) -> Option<XmlNo
 }
 #[cfg(test)]
 mod list_marker_tests {
-    use super::{list_kind, Placeholder};
+    use super::{layout_list_styles, list_kind, master_text_styles, PhMap};
 
     /// #406: a paragraph with no bullet properties of its own takes its marker
     /// from the owning shape's `a:lstStyle`, selected by the paragraph's level —
@@ -1331,7 +1465,7 @@ mod list_marker_tests {
         let kinds: Vec<Option<bool>> = body
             .children()
             .filter(|n| n.has_tag_name("p"))
-            .map(|p| list_kind(p, Some(body), Placeholder::TextBox))
+            .map(|p| list_kind(p, Some(body), None, &PhMap::default()))
             .collect();
         assert_eq!(
             kinds,
@@ -1346,21 +1480,73 @@ mod list_marker_tests {
         );
     }
 
-    /// Without a shape list style the old rule stands: a body placeholder
-    /// inherits a bullet from the master, a plain text box is a paragraph.
+    /// With no marker anywhere — no layout or master to inherit from either —
+    /// a paragraph is plain text: there is no body-placeholder default.
     #[test]
-    fn without_a_list_style_the_placeholder_default_stands() {
+    fn without_any_marker_a_placeholder_paragraph_is_text() {
         let dom = roxmltree::Document::parse(
-            r#"<p:sp xmlns:p="p" xmlns:a="a"><p:txBody><a:lstStyle/><a:p><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#,
+            r#"<p:sp xmlns:p="p" xmlns:a="a"><p:nvSpPr><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr><p:txBody><a:lstStyle/><a:p><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#,
         )
         .unwrap();
+        let ph = dom.descendants().find(|n| n.has_tag_name("ph"));
         let body = dom
             .descendants()
             .find(|n| n.has_tag_name("txBody"))
             .unwrap();
         let para = body.children().find(|n| n.has_tag_name("p")).unwrap();
-        assert_eq!(list_kind(para, Some(body), Placeholder::Body), Some(false));
-        assert_eq!(list_kind(para, Some(body), Placeholder::TextBox), None);
+        assert_eq!(list_kind(para, Some(body), ph, &PhMap::default()), None);
+        assert_eq!(list_kind(para, Some(body), None, &PhMap::default()), None);
+    }
+
+    /// #627: a placeholder's paragraph goes on to the layout placeholder with
+    /// its `idx`, then the master text style for its type — docling's
+    /// `_get_effective_list_marker` steps 3 and 4. The master is only reached
+    /// through a matching layout placeholder.
+    #[test]
+    fn layout_then_master_supply_a_placeholder_marker() {
+        let layout = r#"<p:sldLayout xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+            <p:sp><p:nvSpPr><p:cNvPr id="2" name="t"/><p:cNvSpPr/><p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr><p:txBody/></p:sp>
+            <p:sp><p:nvSpPr><p:cNvPr id="3" name="b"/><p:cNvSpPr/><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+              <p:txBody><a:lstStyle><a:lvl2pPr><a:buNone/></a:lvl2pPr></a:lstStyle></p:txBody></p:sp>
+            <p:sp><p:nvSpPr><p:cNvPr id="4" name="s"/><p:cNvSpPr/><p:nvPr><p:ph type="subTitle" idx="2"/></p:nvPr></p:nvSpPr><p:txBody/></p:sp>
+        </p:spTree></p:cSld></p:sldLayout>"#;
+        let master = r#"<p:sldMaster xmlns:p="p" xmlns:a="a"><p:txStyles>
+            <p:titleStyle><a:lvl1pPr><a:buNone/></a:lvl1pPr></p:titleStyle>
+            <p:bodyStyle><a:lvl1pPr><a:buChar char="•"/></a:lvl1pPr><a:lvl2pPr><a:buChar char="•"/></a:lvl2pPr><a:lvl3pPr><a:buAutoNum type="arabicPeriod"/></a:lvl3pPr></p:bodyStyle>
+            <p:otherStyle><a:lvl1pPr><a:buAutoNum type="arabicPeriod"/></a:lvl1pPr></p:otherStyle>
+        </p:txStyles></p:sldMaster>"#;
+        let map = PhMap {
+            layout_lists: layout_list_styles(layout),
+            master_styles: master_text_styles(master),
+            ..PhMap::default()
+        };
+        let kind = |ph: &str, lvl: u8| {
+            let xml = format!(
+                r#"<p:sp xmlns:p="p" xmlns:a="a"><p:nvSpPr><p:nvPr>{ph}</p:nvPr></p:nvSpPr><p:txBody><a:p><a:pPr lvl="{lvl}"/><a:r><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>"#
+            );
+            let dom = roxmltree::Document::parse(&xml).unwrap();
+            let ph = dom.descendants().find(|n| n.has_tag_name("ph"));
+            let body = dom.descendants().find(|n| n.has_tag_name("txBody"));
+            let para = dom.descendants().find(|n| n.has_tag_name("p")).unwrap();
+            list_kind(para, body, ph, &map)
+        };
+        // Body: lvl1 from the master's bodyStyle bullet, lvl2 the layout's
+        // buNone, lvl3 the master's numbering.
+        assert_eq!(kind(r#"<p:ph idx="1"/>"#, 0), Some(false));
+        assert_eq!(kind(r#"<p:ph idx="1"/>"#, 1), None);
+        assert_eq!(kind(r#"<p:ph idx="1"/>"#, 2), Some(true));
+        // A centred title (idx 0, matching the layout's) and a subtitle both
+        // read otherStyle, not titleStyle.
+        assert_eq!(kind(r#"<p:ph type="ctrTitle"/>"#, 0), Some(true));
+        assert_eq!(kind(r#"<p:ph type="subTitle" idx="2"/>"#, 0), Some(true));
+        // `title` reads titleStyle's buNone.
+        assert_eq!(kind(r#"<p:ph type="title"/>"#, 0), None);
+        // No layout placeholder with idx 7: the master is not consulted and
+        // only the level > 0 fallback is left.
+        assert_eq!(kind(r#"<p:ph idx="7"/>"#, 0), None);
+        assert_eq!(kind(r#"<p:ph idx="7"/>"#, 1), Some(false));
+        // A text box never inherits.
+        assert_eq!(kind("", 0), None);
     }
 }
 
