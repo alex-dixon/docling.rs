@@ -1815,7 +1815,14 @@ fn batch_convert_one(
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         }
         match to {
-            "json" => std::fs::write(&out, document.export_to_json())
+            // Streamed into the file: a long PDF's JSON runs to the better part
+            // of a gigabyte, which `export_to_json` would hold as one `String`.
+            "json" => std::fs::File::create(&out)
+                .map(std::io::BufWriter::new)
+                .and_then(|mut w| {
+                    document.write_json_pretty(&mut w)?;
+                    std::io::Write::flush(&mut w)
+                })
                 .map_err(|e| format!("writing {}: {e}", out.display()))?,
             "chunks" => std::fs::write(&out, chunks_json(&document, &cfg.chunk)?)
                 .map_err(|e| format!("writing {}: {e}", out.display()))?,
@@ -2222,7 +2229,15 @@ fn output_document(
     chunk: &ChunkOptions,
 ) -> ExitCode {
     if to == "json" {
-        println!("{}", document.export_to_json());
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        let written = document
+            .write_json_pretty(&mut out)
+            .and_then(|()| std::io::Write::write_all(&mut out, b"\n"))
+            .and_then(|()| std::io::Write::flush(&mut out));
+        if let Err(e) = written {
+            eprintln!("error: writing JSON: {e}");
+            return ExitCode::FAILURE;
+        }
         return ExitCode::SUCCESS;
     }
 
