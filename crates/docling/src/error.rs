@@ -1,6 +1,9 @@
 //! Error type for conversion.
 
+use std::error::Error as _;
 use std::fmt;
+
+pub use docling_core::EncryptionError;
 
 use crate::format::InputFormat;
 
@@ -58,6 +61,70 @@ impl ConversionError {
             context: context.into(),
             source: source.into(),
         }
+    }
+
+    /// The error for an encrypted `context` document (#636): displays as
+    /// `parse error: <context>: <error>` — the Office wording of #624 — with
+    /// the typed [`EncryptionError`] on the source chain for
+    /// [`encryption`](Self::encryption).
+    pub fn encrypted(context: impl Into<String>, error: EncryptionError) -> Self {
+        Self::with_source(context, error)
+    }
+
+    /// [`encrypted`](Self::encrypted) with a backend's own wording: `message`
+    /// is what the error displays (after `parse error: <context>: `), the
+    /// typed value stays the cause. For the readers whose text predates the
+    /// type (iWork, WordPerfect) — nothing a user or a test reads changed
+    /// when the value arrived.
+    pub fn encrypted_with_message(
+        context: impl Into<String>,
+        error: EncryptionError,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::with_source(
+            context,
+            EncryptedDocument {
+                message: message.into(),
+                error,
+            },
+        )
+    }
+
+    /// The typed reason when this error says the document is encrypted
+    /// (#636): anywhere on the [`source`](std::error::Error::source) chain —
+    /// the PDF reader's [`docling_pdf::PdfError::Encrypted`], the Office
+    /// decryptor's value, an iWork or WordPerfect backend's — so a caller
+    /// prompts for a password on [`EncryptionError::needs_password`] instead
+    /// of matching message text. `None` for every other failure.
+    pub fn encryption(&self) -> Option<&EncryptionError> {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = self.source();
+        while let Some(c) = cause {
+            if let Some(e) = c.downcast_ref::<EncryptionError>() {
+                return Some(e);
+            }
+            cause = c.source();
+        }
+        None
+    }
+}
+
+/// An encryption error in a backend's own words; the typed value is its
+/// cause. See [`ConversionError::encrypted_with_message`].
+#[derive(Debug)]
+struct EncryptedDocument {
+    message: String,
+    error: EncryptionError,
+}
+
+impl fmt::Display for EncryptedDocument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for EncryptedDocument {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 
@@ -147,5 +214,42 @@ mod tests {
     #[test]
     fn stringly_variants_have_no_source() {
         assert!(ConversionError::Parse("x".into()).source().is_none());
+    }
+
+    /// #636: the typed value is found however deep it sits — directly as
+    /// the source, behind a backend's own wording, or behind another
+    /// wrapper (`with_source` stacks) — and its text is the #624 one.
+    #[test]
+    fn encryption_is_found_anywhere_on_the_chain() {
+        let direct = ConversionError::encrypted("docx", EncryptionError::NeedPassword);
+        assert_eq!(
+            direct.to_string(),
+            "parse error: docx: document is encrypted (a password is required to open it)"
+        );
+        assert_eq!(direct.encryption(), Some(&EncryptionError::NeedPassword));
+
+        let worded = ConversionError::encrypted_with_message(
+            "iwork",
+            EncryptionError::NotDecryptable("iWork package encryption".into()),
+            "the document is password-protected",
+        );
+        assert_eq!(
+            worded.to_string(),
+            "parse error: iwork: the document is password-protected"
+        );
+        assert!(matches!(
+            worded.encryption(),
+            Some(EncryptionError::NotDecryptable(_))
+        ));
+        assert!(!worded.encryption().unwrap().needs_password());
+
+        let stacked = ConversionError::with_source("archive entry", worded);
+        assert!(stacked.encryption().is_some(), "{stacked}");
+
+        assert_eq!(ConversionError::Parse("bad zip".into()).encryption(), None);
+        assert_eq!(
+            ConversionError::with_source("xlsx", std::io::Error::other("short read")).encryption(),
+            None
+        );
     }
 }

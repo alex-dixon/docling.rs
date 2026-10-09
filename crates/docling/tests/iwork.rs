@@ -194,10 +194,19 @@ fn iwork_fixtures_match_groundtruth() {
         // ZIP does not define instead of setting the encryption flag — the
         // error must still say "password-protected".
         if name.contains("password_protected") {
-            let err = result.err().map(|e| e.to_string()).unwrap_or_default();
+            let err = result.expect_err("password-protected fixture fails");
+            let text = err.to_string();
             assert!(
-                err.contains("password-protected"),
-                "{name}: expected a password-protected error, got: {err:?}"
+                text.contains("password-protected"),
+                "{name}: expected a password-protected error, got: {text:?}"
+            );
+            // Typed (#636): not decryptable — no password opens an iWork
+            // package here, so a caller must not prompt for one.
+            let kind = err.encryption().expect("typed encryption error");
+            assert!(
+                matches!(kind, docling::EncryptionError::NotDecryptable(_))
+                    && !kind.needs_password(),
+                "{name}: {kind:?}"
             );
             checked += 1;
             continue;

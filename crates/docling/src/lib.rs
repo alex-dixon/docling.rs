@@ -45,7 +45,7 @@ pub mod video;
 pub use archive::{ArchiveLimits, ArchiveOutcome};
 pub use converter::{parse_page_range, DocumentConverter, DEFAULT_VIDEO_FRAMES};
 pub use email_attachments::{EmailAttachmentInfo, EmailAttachments};
-pub use error::ConversionError;
+pub use error::{ConversionError, EncryptionError};
 pub use format::{InputFormat, OUTPUT_FORMATS};
 pub use options::{
     cli_flag, merge_options, ConvertOptions, OptionInfo, OptionsError, PipelineKind, OPTIONS,
@@ -72,7 +72,7 @@ pub use docling_core::{
 pub use docling_pdf::{
     model_inventory, page_count as pdf_page_count, render_pages as render_pdf_pages,
     tesseract_lang_arg, EnrichmentOptions, HeadingHierarchyOptions, ImageOutput, ModelEntry,
-    OcrEngine, OcrLang, OcrMode, Pipeline, RenderedPage,
+    OcrEngine, OcrLang, OcrMode, PdfError, Pipeline, RenderedPage,
 };
 // The pure-Rust text-layer extraction (no pdfium, no models) — compiled with
 // either PDF feature. The CLI uses it as the `--text-layer-only` fallback when the

@@ -163,6 +163,26 @@ against structural edits; Word and Excel leave a modify-password-only file
 unencrypted. A mislabelled encrypted file (a `.ppt` named `.pptx`) reports the
 encryption, not the declared format's parse error.
 
+**The encryption error is typed (#636; docling has no equivalent — its
+backends raise `DocumentLoadError` with a backend-worded message).**
+`ConversionError::encryption()` returns the
+[`EncryptionError`](../crates/docling-core/src/encryption.rs) behind any of
+the above — `NeedPassword`, `WrongPassword` (the two `needs_password()` is
+true for), `NotDecryptable(scheme)` (ODF, iWork, WordPerfect, XOR
+obfuscation), `Malformed(field)` — found on the error's `source()` chain,
+whichever backend raised it (the PDF reader's `PdfError::Encrypted`, the
+Office decryptor, iWork, WordPerfect). No message changed: callers that
+matched text keep working, callers that match the type stop needing to.
+`docling-serve` keeps the 422 and adds `"code"` to the error body
+(`password_required` / `wrong_password` / `not_decryptable` /
+`malformed_encryption`; on an async job's status and result too — never
+on any other error; an encrypted PDF on the warm-pipeline route, which
+answered 500, is this 422 now — and not in the upstream-shaped `/v1/convert/file`
+envelope, which has no field for it); Python raises the `ConversionError`
+subclasses `PasswordRequiredError`, `WrongPasswordError` and, for the
+rest, `EncryptionError` (`docling_rs.exceptions`); the CLI message and exit
+code are unchanged, as is the Node binding's error (a reason string).
+
 ## 2. Format coverage
 
 Conformance is measured against the latest **published** docling (installed from

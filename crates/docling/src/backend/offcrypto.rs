@@ -43,11 +43,14 @@ use base64::Engine as _;
 use sha2::Digest;
 
 use crate::backend::cfb::CompoundFile;
-use crate::error::ConversionError;
+use crate::error::{ConversionError, EncryptionError};
 use crate::format::InputFormat;
 use crate::source::SourceDocument;
 
-/// Why an encrypted document could not be opened.
+/// Why an encrypted document could not be opened — the decryptor's own
+/// account, with the spec field names its checks fail on. It reaches the
+/// caller as the public [`EncryptionError`] (#636) on the error's source
+/// chain, which `is_encryption_error` and `ConversionError::encryption` read.
 #[derive(Debug, PartialEq)]
 pub(crate) enum CryptoError {
     /// No password was given and no default password opens it.
@@ -61,23 +64,19 @@ pub(crate) enum CryptoError {
 }
 
 impl CryptoError {
+    /// The public value (#636); `EncryptionError`'s text is this module's
+    /// wording, so the message is the one #624 fixed.
+    fn typed(self) -> EncryptionError {
+        match self {
+            CryptoError::NeedPassword => EncryptionError::NeedPassword,
+            CryptoError::WrongPassword => EncryptionError::WrongPassword,
+            CryptoError::Unsupported(what) => EncryptionError::NotDecryptable(what),
+            CryptoError::Malformed(what) => EncryptionError::Malformed(what.into()),
+        }
+    }
+
     fn into_error(self, fmt: &str) -> ConversionError {
-        ConversionError::Parse(match self {
-            CryptoError::NeedPassword => {
-                format!("{fmt}: document is encrypted (a password is required to open it)")
-            }
-            CryptoError::WrongPassword => {
-                format!("{fmt}: document is encrypted and the password is wrong")
-            }
-            CryptoError::Unsupported(what) => {
-                format!("{fmt}: document is encrypted with an unsupported scheme ({what})")
-            }
-            CryptoError::Malformed(what) => {
-                format!(
-                    "{fmt}: document is encrypted, but its encryption header is damaged ({what})"
-                )
-            }
-        })
+        ConversionError::encrypted(fmt, self.typed())
     }
 }
 
@@ -94,11 +93,12 @@ pub(crate) fn unsupported(fmt: &str, scheme: &str) -> ConversionError {
     CryptoError::Unsupported(scheme.into()).into_error(fmt)
 }
 
-/// Whether `err` is one of this module's errors — the converter prefers it
-/// over the "not a valid <format>" error of a mislabelled file (an
-/// encrypted `.ppt` named `.pptx` fails as a ZIP first).
+/// Whether `err` says the document is encrypted (any backend's, #636) — the
+/// converter prefers it over the "not a valid <format>" error of a
+/// mislabelled file (an encrypted `.ppt` named `.pptx` fails as a ZIP
+/// first).
 pub(crate) fn is_encryption_error(err: &ConversionError) -> bool {
-    matches!(err, ConversionError::Parse(m) if m.contains(": document is encrypted"))
+    err.encryption().is_some()
 }
 
 /// Whether `bytes` is an encrypted OOXML package ([MS-OFFCRYPTO] 2.3.4.4 /

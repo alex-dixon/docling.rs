@@ -71,6 +71,7 @@ impl PdfMeta {
         password: Option<&str>,
     ) -> Result<Option<Self>, crate::PdfError> {
         use crate::textparse::OpenError;
+        use crate::EncryptionError;
         match crate::textparse::open_document(bytes, password) {
             Ok(doc) => {
                 let mut pages: Vec<_> = doc.get_pages().into_iter().collect();
@@ -81,14 +82,13 @@ impl PdfMeta {
                 }))
             }
             Err(OpenError::Unreadable) => Ok(None),
-            Err(OpenError::Password) => Err(crate::PdfError::Document(
-                if password.is_some() {
-                    "the PDF is encrypted and the password is wrong"
-                } else {
-                    "the PDF is encrypted: a password is required"
-                }
-                .into(),
-            )),
+            // Typed (#636): a caller tells "ask for a password" from "the
+            // file is damaged" without reading the message.
+            Err(OpenError::Password) => Err(crate::PdfError::Encrypted(if password.is_some() {
+                EncryptionError::WrongPassword
+            } else {
+                EncryptionError::NeedPassword
+            })),
         }
     }
 
@@ -276,11 +276,37 @@ mod tests {
         let err = PdfMeta::open_with_password(&bytes, None)
             .err()
             .expect("no password");
-        assert!(err.to_string().contains("password is required"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "pdf: the PDF is encrypted: a password is required"
+        );
+        assert!(
+            matches!(
+                err,
+                crate::PdfError::Encrypted(crate::EncryptionError::NeedPassword)
+            ),
+            "{err:?}"
+        );
         let err = PdfMeta::open_with_password(&bytes, Some("nope"))
             .err()
             .expect("wrong password");
-        assert!(err.to_string().contains("password is wrong"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "pdf: the PDF is encrypted and the password is wrong"
+        );
+        assert!(
+            matches!(
+                err,
+                crate::PdfError::Encrypted(crate::EncryptionError::WrongPassword)
+            ),
+            "{err:?}"
+        );
+        // The typed value is on the source chain for callers that only see
+        // `dyn Error` (#636).
+        let chained = std::error::Error::source(&err)
+            .and_then(|s| s.downcast_ref::<crate::EncryptionError>())
+            .expect("source");
+        assert_eq!(*chained, crate::EncryptionError::WrongPassword);
         let meta = PdfMeta::open_with_password(&bytes, Some("1234"))
             .unwrap()
             .expect("readable");
