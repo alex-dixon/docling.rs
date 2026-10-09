@@ -180,7 +180,8 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   `download_dependencies.sh --with-fonts` or the `fonts-liberation` +
   `fonts-dejavu-core` packages, which the Dockerfiles install);
   `DOCLING_RS_SYSTEM_FONTS=0` (#633) drops the `$HOME`/system dirs from that
-  search so the render depends only on `.models/fonts` + `DOCLING_RS_FONT_DIRS`.
+  search so the render depends only on `.models/fonts` + `DOCLING_RS_FONT_DIRS`;
+  the Dockerfiles set it, pinning the two font packages they install.
   `DOCLING_PARSE_RENDER_LIB` /
   `DOCLING_PARSE_RESOURCES` override the library and `pdf_resources`
   locations. The PDF baselines — `tests/snapshots`, the groundtruth table —

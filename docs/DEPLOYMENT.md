@@ -167,6 +167,8 @@ docker compose -f docker-compose.cuda.yml up -d
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `DOCLING_RS_SYSTEM_FONTS` | `0` in the images | PDF fallback fonts come only from `.models/fonts` + `DOCLING_RS_FONT_DIRS`, not the host's directories — the same layout input on every host (#633) |
+| `DOCLING_RS_FONT_DIRS` | the image's Liberation + DejaVu dirs | Font directories for fonts a PDF does not embed; extend it when you install a font for another script |
 | `DOCLING_RS_NO_ARENA` | `1` | Disables ONNX Runtime CPU arena to prevent RSS heap ratcheting (#263) |
 | `DOCLING_RS_MAX_MEMORY_MB` | `0` (or cgroup) | Memory ceiling for admission control in MiB |
 | `DOCLING_RS_MEMORY_WATERMARK_PCT` | `85` | Watermark % above which new requests get HTTP 503 Retry-After |

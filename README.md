@@ -1826,7 +1826,10 @@ installed can convert the same file to different regions (#633):
 `DOCLING_RS_SYSTEM_FONTS=0` limits the search to `.models/fonts` and
 `DOCLING_RS_FONT_DIRS` — ship the fonts with the deployment and every host
 renders the same page; `DOCLING_RS_DEBUG=1` prints the face each style
-resolved to.
+resolved to. The published Docker images set exactly that: `=0` with
+`DOCLING_RS_FONT_DIRS` pinned to the two packages they install, so a derived
+image's extra fonts cannot move the layout (add their directory to
+`DOCLING_RS_FONT_DIRS` to use them).
 
 #### Whisper and Parakeet models for audio/ASR
 
@@ -2526,6 +2529,8 @@ docker compose up -d                        # standalone service (127.0.0.1:5001
 | Variable / Option | Default | Description |
 |---|---|---|
 | `DOCLING_RS_NO_ARENA` | `1` | Disables ONNX Runtime CPU arena to prevent RSS heap ratcheting (#263) |
+| `DOCLING_RS_SYSTEM_FONTS` | `0` | The PDF renderer's fallback fonts come only from `.models/fonts` + `DOCLING_RS_FONT_DIRS`, never the host's font directories, so the layout input is the same on every host (#633). Unset to search the host again |
+| `DOCLING_RS_FONT_DIRS` | Liberation + DejaVu dirs | The font directories the image installs (`/usr/share/fonts/truetype/{liberation,dejavu}`); extend it to render other scripts with a font you add |
 | `DOCLING_RS_MAX_MEMORY_MB` | `0` (or cgroup) | Memory ceiling (MiB); returns 503 + Retry-After when near watermark |
 | `DOCLING_RS_MEMORY_WATERMARK_PCT` | `85` | Watermark % above which new requests get HTTP 503 |
 | `DOCLING_RS_TF_INTRA` | auto (#262) | Narrows ONNX intra-op thread count for TableFormer decoder sessions |

@@ -156,6 +156,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libstdc++6 libgomp1 \
        fonts-liberation fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+# #633: the page render — the layout model's input — depends on the fallback
+# faces, so it is pinned to the two packages above: a derived image's extra
+# fonts or a bind-mounted $HOME cannot change it. Rendering other scripts
+# (a CJK deck) means installing the font and adding its directory to
+# DOCLING_RS_FONT_DIRS, or unsetting DOCLING_RS_SYSTEM_FONTS to search the
+# host again.
+ENV DOCLING_RS_SYSTEM_FONTS=0 \
+    DOCLING_RS_FONT_DIRS=/usr/share/fonts/truetype/liberation:/usr/share/fonts/truetype/dejavu
 
 COPY --from=builder /artifacts/ /tmp/artifacts/
 RUN cp /tmp/artifacts/docling-rs /usr/local/bin/ \
