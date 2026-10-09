@@ -236,6 +236,13 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   `page_range` for the full pattern.
 - Degradation over failure: a missing optional tool/model (ffmpeg, enrichment
   model) warns and degrades; only "nothing convertible at all" errors.
+- DOCX is walked twice — `docx.rs` (flat `Node` stream: Markdown, DocLang,
+  LaTeX) and `docx_tree.rs` (item tree: JSON, HTML, Pandoc). A change to one
+  walk's traversal goes with the same change in the other, and
+  `backend/docx_chain_parity.rs` (#628) checks that both carry the same words
+  on every DOCX fixture and on a generated wrapper × context matrix; add a
+  payload or context there when a new wrapper is special-cased. The flat
+  chain is to be retired for the tree eventually.
 - An encrypted input raises the typed `docling_core::EncryptionError` on the
   error's `source()` chain (#636: `ConversionError::encrypted[_with_message]`,
   `PdfError::Encrypted`; read with `ConversionError::encryption()`) — never

@@ -35,6 +35,8 @@ pub(crate) mod doclang;
 mod doclang_tree;
 mod docling_json;
 mod docx;
+#[cfg(test)]
+mod docx_chain_parity;
 mod docx_tree;
 mod ebcdic;
 mod email;

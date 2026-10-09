@@ -327,7 +327,13 @@ fn py_paragraph_text(p: XmlNode) -> String {
 
 /// The runs and hyperlinks of a paragraph; with `accepted`, also those inside
 /// tracked insertions and move destinations (`w:ins`, `w:moveTo`) — the
-/// paragraph as Word shows it with the changes accepted.
+/// paragraph as Word shows it with the changes accepted — and inside the
+/// inline wrappers Word puts around a span (`w:sdt`, `w:customXml`,
+/// `w:smartTag`, `w:fldSimple`; #628): python-docx's `CT_P.text` reads
+/// `w:r | w:hyperlink` only, so a plain cell whose text sat in a content
+/// control or a field result came out empty in docling's JSON while the
+/// Markdown walk (`push_inline_text`) printed it — the same loss #545 fixed
+/// for tracked changes, found by the chain-parity matrix.
 fn paragraph_text(p: XmlNode, accepted: bool) -> String {
     let mut out = String::new();
     for c in child_elements(p) {
@@ -341,7 +347,18 @@ fn paragraph_text(p: XmlNode, accepted: bool) -> String {
                     out.push_str(&run_text(r));
                 }
             }
-            "ins" | "moveTo" if accepted => out.push_str(&paragraph_text(c, true)),
+            "ins" | "moveTo" | "customXml" | "smartTag" | "fldSimple" if accepted => {
+                out.push_str(&paragraph_text(c, true))
+            }
+            // A checkbox control's glyph (`w14:checkbox`, its `w:t` is ☐/☒)
+            // stays out as in python-docx: the state is already the cell's
+            // `checkbox_selected` child items, and upstream's cell `text`
+            // for the mirrored `docx_checkboxes` is matched exactly.
+            "sdt" if accepted && !c.descendants().any(|n| n.has_tag_name("checkbox")) => {
+                for content in c.children().filter(|n| n.has_tag_name("sdtContent")) {
+                    out.push_str(&paragraph_text(content, true));
+                }
+            }
             _ => {}
         }
     }
@@ -350,10 +367,11 @@ fn paragraph_text(p: XmlNode, accepted: bool) -> String {
 
 /// A cell's text: python-docx's `_Cell.text` (its direct paragraphs joined
 /// with `\n`), except that tracked insertions and move destinations count
-/// (#545). python-docx skips them, so docling writes an empty cell for one
-/// whose text was inserted or moved there with track changes on, and — a
-/// plain cell having no child items — the JSON lost that text outright;
-/// Markdown always printed it.
+/// (#545), and so does text behind an inline content control, custom XML
+/// tag, smart tag or simple field (#628). python-docx skips them, so docling
+/// writes an empty cell for one whose text was inserted or moved there with
+/// track changes on, and — a plain cell having no child items — the JSON
+/// lost that text outright; Markdown always printed it.
 fn py_cell_text(tc: XmlNode) -> String {
     tc.children()
         .filter(|n| n.has_tag_name("p"))
