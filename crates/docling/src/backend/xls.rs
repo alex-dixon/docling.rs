@@ -16,6 +16,7 @@ use std::io::Cursor;
 use calamine::{Reader, Xls};
 use docling_core::{DoclingDocument, Node};
 
+use crate::backend::numfmt::{self, SheetFormats};
 use crate::backend::xlsx::{find_tables, location_value, sheet_frame, Merges};
 use crate::backend::DeclarativeBackend;
 use crate::error::ConversionError;
@@ -43,9 +44,23 @@ impl DeclarativeBackend for XlsBackend {
             .map(|s| (s.name.clone(), s.typ, s.visible))
             .collect();
 
+        // Number formats (#634): the Workbook stream's FORMAT/XF records and
+        // each sheet's cell `ixfe`s, in BOUNDSHEET order — calamine's.
+        let is_1904 = workbook.has_1904_epoch();
+        let (xfs, sheet_cells) = crate::backend::cfb::CompoundFile::open(&source.bytes)
+            .and_then(|cfb| cfb.stream("Workbook").or_else(|| cfb.stream("Book")))
+            .map(|stream| numfmt::biff_formats(&stream))
+            .unwrap_or_default();
+        let xfs = std::sync::Arc::new(xfs);
+        let mut sheet_cells = sheet_cells.into_iter();
+
         let mut doc = DoclingDocument::new(&source.name);
         let mut prev_item_page = false;
         for (name, typ, visible) in &metas {
+            let formats = SheetFormats {
+                xfs: xfs.clone(),
+                cells: sheet_cells.next().unwrap_or_default(),
+            };
             if !matches!(typ, calamine::SheetType::WorkSheet) {
                 continue;
             }
@@ -65,7 +80,7 @@ impl DeclarativeBackend for XlsBackend {
             let (or, oc) = frame.origin;
 
             let mut items: Vec<((usize, usize, usize, usize), Node)> = Vec::new();
-            for t in find_tables(&range, &frame, self.skip_empty) {
+            for t in find_tables(&range, &frame, self.skip_empty, &formats, is_1904) {
                 if let Some(label) = t.label {
                     items.push((
                         (

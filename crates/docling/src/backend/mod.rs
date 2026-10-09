@@ -60,6 +60,7 @@ mod md_tree;
 mod metafile;
 mod mhtml;
 pub(crate) mod msg;
+mod numfmt;
 mod odf;
 mod odf_tree;
 pub(crate) mod offcrypto;
