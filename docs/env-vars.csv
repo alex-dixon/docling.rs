@@ -38,6 +38,7 @@ DOCLING_PARSE_RENDER_LIB,model path,crates/docling-pdf/src/render/mod.rs
 DOCLING_PARSE_RESOURCES,model path,crates/docling-pdf/src/dparse_render.rs
 DOCLING_PICTURE_CLASSIFIER_ONNX,model path,crates/docling-pdf/src/enrich.rs
 DOCLING_RS_FONT_DIRS,model path,crates/docling-pdf/src/render/font/fallback.rs
+DOCLING_RS_SYSTEM_FONTS,model path,crates/docling-pdf/src/render/font/fallback.rs
 DOCLING_RS_GRAPH_CACHE_DIR,model path,crates/docling-onnx/src/lib.rs
 DOCLING_RS_MODELS_DIR,model path,crates/docling-asr/src/parakeet.rs
 DOCLING_RS_TESSDATA_DIR,model path,crates/docling-pdf/src/tesseract.rs

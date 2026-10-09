@@ -178,7 +178,10 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   Liberation/DejaVu/URW/Noto system dirs are scanned by default; a font-less
   host — slim container, bare runner — gets them from
   `download_dependencies.sh --with-fonts` or the `fonts-liberation` +
-  `fonts-dejavu-core` packages, which the Dockerfiles install).
+  `fonts-dejavu-core` packages, which the Dockerfiles install);
+  `DOCLING_RS_SYSTEM_FONTS=0` (#633) drops the `$HOME`/system dirs from that
+  search so the render depends only on `.models/fonts` + `DOCLING_RS_FONT_DIRS`;
+  the Dockerfiles set it, pinning the two font packages they install.
   `DOCLING_PARSE_RENDER_LIB` /
   `DOCLING_PARSE_RESOURCES` override the library and `pdf_resources`
   locations. The PDF baselines — `tests/snapshots`, the groundtruth table —

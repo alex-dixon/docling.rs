@@ -1820,7 +1820,16 @@ images do), or `download_dependencies.sh --with-fonts`
 (`DOCLING_RS_WITH_FONTS=1`) to drop both families into `.models/fonts/`
 (Liberation from Debian's package — needs `ar` — and DejaVu from its GitHub
 release, licence texts alongside). `DOCLING_RS_FONT_DIRS` names further
-directories at runtime.
+directories at runtime. The face a non-embedded font resolves to is part of
+the page image the layout model reads, so two hosts with different fonts
+installed can convert the same file to different regions (#633):
+`DOCLING_RS_SYSTEM_FONTS=0` limits the search to `.models/fonts` and
+`DOCLING_RS_FONT_DIRS` — ship the fonts with the deployment and every host
+renders the same page; `DOCLING_RS_DEBUG=1` prints the face each style
+resolved to. The published Docker images set exactly that: `=0` with
+`DOCLING_RS_FONT_DIRS` pinned to the two packages they install, so a derived
+image's extra fonts cannot move the layout (add their directory to
+`DOCLING_RS_FONT_DIRS` to use them).
 
 #### Whisper and Parakeet models for audio/ASR
 
@@ -2281,7 +2290,9 @@ the Rust renderer otherwise; `DOCLING_PARSE_RENDER_LIB` /
 `DOCLING_PARSE_RESOURCES` point at the plugin explicitly), `DOCLING_RS_FONT_DIRS` (extra font
 directories for the Rust renderer's fallback faces — fonts a PDF does not
 embed; `.models/fonts` and the usual Liberation/DejaVu/URW/Noto system
-directories are scanned by default), `DOCLING_RS_SCAN_RASTER` (`rust`, the default: an image-only
+directories are scanned by default), `DOCLING_RS_SYSTEM_FONTS` (`0` keeps the
+host's `$HOME` and system font directories out of that search, so the render
+depends only on `.models/fonts` + `DOCLING_RS_FONT_DIRS`, #633), `DOCLING_RS_SCAN_RASTER` (`rust`, the default: an image-only
 page's bitmap comes from the pure-Rust raster, pdfium's bytes exactly;
 `pdfium` renders it with the library under the `pdfium` feature), `DOCLING_RS_PDF_THREADS` (total thread budget;
 `_WORKERS`/`_INTRA` below split it), `DOCLING_RS_TIMING=1` (per-stage
@@ -2518,6 +2529,8 @@ docker compose up -d                        # standalone service (127.0.0.1:5001
 | Variable / Option | Default | Description |
 |---|---|---|
 | `DOCLING_RS_NO_ARENA` | `1` | Disables ONNX Runtime CPU arena to prevent RSS heap ratcheting (#263) |
+| `DOCLING_RS_SYSTEM_FONTS` | `0` | The PDF renderer's fallback fonts come only from `.models/fonts` + `DOCLING_RS_FONT_DIRS`, never the host's font directories, so the layout input is the same on every host (#633). Unset to search the host again |
+| `DOCLING_RS_FONT_DIRS` | Liberation + DejaVu dirs | The font directories the image installs (`/usr/share/fonts/truetype/{liberation,dejavu}`); extend it to render other scripts with a font you add |
 | `DOCLING_RS_MAX_MEMORY_MB` | `0` (or cgroup) | Memory ceiling (MiB); returns 503 + Retry-After when near watermark |
 | `DOCLING_RS_MEMORY_WATERMARK_PCT` | `85` | Watermark % above which new requests get HTTP 503 |
 | `DOCLING_RS_TF_INTRA` | auto (#262) | Narrows ONNX intra-op thread count for TableFormer decoder sessions |

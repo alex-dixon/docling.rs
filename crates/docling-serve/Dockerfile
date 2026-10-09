@@ -154,6 +154,14 @@ FROM debian:trixie-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg tesseract-ocr curl \
        fonts-liberation fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+# #633: the page render — the layout model's input — depends on the fallback
+# faces, so it is pinned to the two packages above: a derived image's extra
+# fonts or a bind-mounted $HOME cannot change it. Rendering other scripts
+# (a CJK deck) means installing the font and adding its directory to
+# DOCLING_RS_FONT_DIRS, or unsetting DOCLING_RS_SYSTEM_FONTS to search the
+# host again.
+ENV DOCLING_RS_SYSTEM_FONTS=0 \
+    DOCLING_RS_FONT_DIRS=/usr/share/fonts/truetype/liberation:/usr/share/fonts/truetype/dejavu
 WORKDIR /app
 COPY --from=assets /src/.models ./.models
 
@@ -167,8 +175,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /app
 COPY --from=assets /src/.models ./.models
 COPY --from=build-cuda /src/cuda-dylibs/ /usr/local/lib/
+# Fonts pinned as in the CPU runtime stage (#633).
 ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-} \
-    DOCLING_RS_EP=auto
+    DOCLING_RS_EP=auto \
+    DOCLING_RS_SYSTEM_FONTS=0 \
+    DOCLING_RS_FONT_DIRS=/usr/share/fonts/truetype/liberation:/usr/share/fonts/truetype/dejavu
 
 # ==============================================================================
 # Final targets: CPU
