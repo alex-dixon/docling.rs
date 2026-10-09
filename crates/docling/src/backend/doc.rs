@@ -840,10 +840,7 @@ const WORD2_STC_HEADING9: u8 = 246;
 /// heading too. Everything else, and a missing or unreadable stylesheet, is
 /// no style.
 fn word2_styles(data: &[u8]) -> Vec<StyleDef> {
-    let none = StyleDef {
-        sti: 0x0FFF,
-        outline: None,
-    };
+    let none = StyleDef::NONE;
     let heading_sti = |stc: u8| {
         (WORD2_STC_HEADING9..=WORD2_STC_HEADING1)
             .contains(&stc)
@@ -1034,11 +1031,14 @@ struct ParaProps {
     istd: u16,
     in_table: bool,
     ttp: bool,
-    /// List-format reference (`sprmPIlfo`): non-zero → the paragraph is a
-    /// numbered/bulleted list item.
-    ilfo: u16,
-    /// List nesting level (`sprmPIlvl`), 0-based.
-    ilvl: u8,
+    /// List-format reference (`sprmPIlfo`) set in this PAPX: non-zero → a
+    /// numbered/bulleted list item, 0 → explicitly none. `None` = not set
+    /// here; a paragraph then inherits its style's (#641), since a PAPX is
+    /// the delta over the style's properties ([MS-DOC] 2.4.6.1).
+    ilfo: Option<u16>,
+    /// List nesting level (`sprmPIlvl`) set in this PAPX, 0-based; `None`
+    /// inherits like `ilfo` and defaults to 0.
+    ilvl: Option<u8>,
     /// Outline level (`sprmPOutLvl`, 0–8 = heading levels 1–9; 9 = body
     /// text). Read off *style* PAPX UPXes only — mirroring docling, which
     /// consults the style definition, never the paragraph's direct formatting.
@@ -1137,8 +1137,8 @@ fn apply_pap_sprms(mut sprms: &[u8], props: &mut ParaProps) {
         match sprm {
             0x2416 => props.in_table = sprms[0] != 0, // sprmPFInTable
             0x2417 => props.ttp = sprms[0] != 0,      // sprmPFTtp
-            0x460B => props.ilfo = u16::from_le_bytes([sprms[0], sprms[1]]), // sprmPIlfo
-            0x260A => props.ilvl = sprms[0],          // sprmPIlvl
+            0x460B => props.ilfo = Some(u16::from_le_bytes([sprms[0], sprms[1]])), // sprmPIlfo
+            0x260A => props.ilvl = Some(sprms[0]),    // sprmPIlvl
             0x2640 => props.outline = Some(sprms[0]), // sprmPOutLvl
             _ => {}
         }
@@ -1153,18 +1153,95 @@ fn apply_pap_sprms(mut sprms: &[u8], props: &mut ParaProps) {
 /// A LibreOffice-converted legacy document names its heading styles in the
 /// document language with `sti` "user", so the outline level is the only
 /// signal left (docling#3961 / #270).
+///
+/// The same UPX carries the style's *list* (#641): Word attaches a numbered
+/// heading's list to the Heading style (`sprmPIlfo` + `sprmPIlvl` there,
+/// the paragraphs holding only `istd`), as `w:numPr` in a `.docx` style
+/// does; `base` is the STD's `istdBase`, through which both inherit.
 #[derive(Clone, Copy)]
 struct StyleDef {
     sti: u16,
     outline: Option<u8>,
+    ilfo: Option<u16>,
+    ilvl: Option<u8>,
+    /// `istdBase`: the style this one is based on; 0x0FFF = none.
+    base: u16,
+}
+
+impl StyleDef {
+    const NONE: StyleDef = StyleDef {
+        sti: 0x0FFF,
+        outline: None,
+        ilfo: None,
+        ilvl: None,
+        base: 0x0FFF,
+    };
+}
+
+/// Ancestors a based-on walk follows before giving up on a malformed or
+/// cyclic chain — the DOCX backend's `MAX_STYLE_INHERITANCE_DEPTH`.
+const MAX_STYLE_CHAIN: usize = 10;
+
+/// The effective list reference of a paragraph, `(ilfo, ilvl)` — `None` when
+/// it is in no list. The paragraph's own sprms win (an explicit `sprmPIlfo`
+/// of 0 is "no list", like a `.docx` paragraph's `numId` 0); what the PAPX
+/// leaves unset comes from the style, then its based-on chain, with `ilfo`
+/// and `ilvl` inherited *independently* — the DOCX backend's
+/// `style_numbering` (docling#3917), and what Word's own stock styles
+/// need: "heading 2" may carry only its level and take the list from
+/// "heading 1" (#641).
+fn resolve_numbering(props: &ParaProps, stis: &[StyleDef]) -> Option<(u16, u8)> {
+    let (mut ilfo, mut ilvl) = (props.ilfo, props.ilvl);
+    let mut cur = Some(props.istd);
+    let mut depth = 0;
+    while let Some(istd) = cur {
+        if (ilfo.is_some() && ilvl.is_some()) || depth >= MAX_STYLE_CHAIN {
+            break;
+        }
+        let Some(style) = stis.get(istd as usize) else {
+            break;
+        };
+        if ilfo.is_none() {
+            ilfo = style.ilfo;
+        }
+        if ilvl.is_none() {
+            ilvl = style.ilvl;
+        }
+        cur = (style.base != 0x0FFF && style.base != istd).then_some(style.base);
+        depth += 1;
+    }
+    match ilfo? {
+        0 => None,
+        ilfo => Some((ilfo, ilvl.unwrap_or(0))),
+    }
+}
+
+/// Whether a list level's number format (`nfc`, [MS-OSHARED] 2.2.1.3
+/// `MSONFC`) prints a number a heading should carry — docling's
+/// `_VISIBLE_NUMBERING_FORMATS` by its OOXML names (`_is_numbered_heading`,
+/// docling#3760): decimal and roman/letter forms, `decimalZero`, and the
+/// East Asian counting formats; a bullet (0x17), "none" (0xFF — Word's
+/// invisible numbering that keeps a heading in the outline) and the spelled
+/// out ordinal/cardinal words leave the heading text as is.
+fn nfc_numbers_heading(nfc: u8) -> bool {
+    matches!(
+        nfc,
+        0x00..=0x04 // arabic, upper/lower roman, upper/lower letter
+            | 0x16 // decimalZero
+            | 0x0A // ideographDigital
+            | 0x0B // japaneseCounting
+            | 0x0E // decimalFullWidth
+            | 0x12 // decimalEnclosedCircle
+            | 0x1E // ideographZodiac
+            | 0x25 // chineseCounting
+            | 0x26 // chineseLegalSimplified
+            | 0x27 // chineseCountingThousand
+    )
 }
 
 /// Parse the STSH into `istd → StyleDef`.
 fn parse_stsh(stsh: &[u8]) -> Vec<StyleDef> {
-    let none = StyleDef {
-        sti: 0x0FFF,
-        outline: None,
-    };
+    let none = StyleDef::NONE;
     let Some(cb_stshi) = u16_at(stsh, 0) else {
         return Vec::new();
     };
@@ -1186,7 +1263,9 @@ fn parse_stsh(stsh: &[u8]) -> Vec<StyleDef> {
         if cb_std >= 2 {
             let std = stsh.get(pos..pos + cb_std as usize).unwrap_or(&[]);
             def.sti = u16_at(std, 0).map(|w| w & 0x0FFF).unwrap_or(0x0FFF);
+            // STDF word 2: `sgc` in the low nibble, `istdBase` above it.
             let sgc = u16_at(std, 2).map(|w| w & 0x0F).unwrap_or(0);
+            def.base = u16_at(std, 2).map(|w| w >> 4).unwrap_or(0x0FFF);
             // Paragraph styles (sgc 1) carry a PAPX UPX first: after the
             // fixed STDF part comes the 2-byte-counted UTF-16 name (plus its
             // null), then the 2-byte-aligned UPX array — UPX[0] is `istd +
@@ -1201,6 +1280,8 @@ fn parse_stsh(stsh: &[u8]) -> Vec<StyleDef> {
                             let mut props = ParaProps::default();
                             apply_pap_sprms(&g[2..], &mut props);
                             def.outline = props.outline;
+                            def.ilfo = props.ilfo;
+                            def.ilvl = props.ilvl;
                         }
                     }
                 }
@@ -1839,6 +1920,9 @@ struct NodeBuilder {
     /// the value is the *current* number (post-increment), deeper levels
     /// zero on a shallower item.
     counters: std::collections::HashMap<(u16, u8), u64>,
+    /// Heading level → running number of the numbered headings (#641), the
+    /// DOCX backend's `numbered_headers`.
+    numbered_headers: std::collections::HashMap<u8, u64>,
 }
 
 impl NodeBuilder {
@@ -1941,10 +2025,12 @@ impl NodeBuilder {
             .filter(|(before, _)| !before)
             .map(|(_, image)| image)
             .collect();
-        let style = stis.get(props.istd as usize).copied().unwrap_or(StyleDef {
-            sti: 0x0FFF,
-            outline: None,
-        });
+        let style = stis
+            .get(props.istd as usize)
+            .copied()
+            .unwrap_or(StyleDef::NONE);
+        // The paragraph's list, its own or its style's (#641).
+        let numbering = resolve_numbering(&props, stis);
         let sti = style.sti;
         // A style that is not one of the built-in Heading/Title styles can
         // still be a heading through its outline level (docling#3961 / #270):
@@ -1965,6 +2051,27 @@ impl NodeBuilder {
             } else {
                 sti as u8 + 1
             };
+            // A heading style wins over a list: a numbered heading gets a
+            // computed `1.2` prefix rather than becoming a list item — the
+            // DOCX backend's rule, and docling's `_is_numbered_heading`
+            // (docling#3760): only a level whose number format is *visible*
+            // numbers it, so Word's "none"-format outline numbering leaves
+            // the text alone. The number is docling's own per-level heading
+            // counter, not the list template, as the `.docx` twin prints it
+            // (`## 1 Introduction`, `### 1.1 Context`), #641.
+            let visibly_numbered = numbering
+                .and_then(|(ilfo, ilvl)| self.lists.level(ilfo, ilvl))
+                .is_some_and(|l| nfc_numbers_heading(l.nfc));
+            let plain = if visibly_numbered && !plain.is_empty() {
+                let docling_level = level.saturating_sub(1).max(1);
+                super::docx::numbered_heading_text(
+                    &mut self.numbered_headers,
+                    docling_level,
+                    &plain,
+                )
+            } else {
+                plain
+            };
             // Headings render without run markers (the style carries the look).
             doc.push(Node::Heading {
                 level,
@@ -1972,33 +2079,33 @@ impl NodeBuilder {
             });
             self.last_ilfo = None;
             self.run_base = None;
-        } else if props.ilfo != 0 {
-            let lvl = self.lists.level(props.ilfo, props.ilvl);
+        } else if let Some((ilfo, ilvl)) = numbering {
+            let lvl = self.lists.level(ilfo, ilvl);
             // Bullet (0x17) / no-number (0xFF) levels — and unresolvable
             // references — are unordered; everything else numbers.
             let numbered = lvl.as_ref().is_some_and(|l| l.nfc != 0x17 && l.nfc != 0xFF);
-            let first_in_list = self.last_ilfo != Some(props.ilfo);
+            let first_in_list = self.last_ilfo != Some(ilfo);
             // The run's base indent (its first item's ilvl) — nested levels
             // indent relative to it, matching the DOCX backend's
             // `list_run_base` (the same list restarted after body text can
             // legitimately sit at a different Markdown depth).
-            let base = *self.run_base.get_or_insert(props.ilvl);
-            let level = props.ilvl.saturating_sub(base);
+            let base = *self.run_base.get_or_insert(ilvl);
+            let level = ilvl.saturating_sub(base);
             if numbered {
                 // docling's counter semantics: bump this level (from the
                 // level's own start), zero deeper levels of the same list.
-                let start = self.lists.level_start(props.ilfo, props.ilvl);
+                let start = self.lists.level_start(ilfo, ilvl);
                 let c = self
                     .counters
-                    .entry((props.ilfo, props.ilvl))
+                    .entry((ilfo, ilvl))
                     .or_insert(start.saturating_sub(1));
                 *c += 1;
                 for ((f, l), v) in self.counters.iter_mut() {
-                    if *f == props.ilfo && *l > props.ilvl {
+                    if *f == ilfo && *l > ilvl {
                         *v = 0;
                     }
                 }
-                let marker = self.build_marker(props.ilfo, props.ilvl, lvl.as_ref());
+                let marker = self.build_marker(ilfo, ilvl, lvl.as_ref());
                 let number = marker
                     .trim_end_matches(['.', ')'])
                     .rsplit(['.', ')'])
@@ -2056,7 +2163,7 @@ impl NodeBuilder {
                     layer: None,
                 });
             }
-            self.last_ilfo = Some(props.ilfo);
+            self.last_ilfo = Some(ilfo);
         } else {
             doc.push(Node::Paragraph { text });
             self.last_ilfo = None;
@@ -2552,5 +2659,135 @@ mod tests {
         let plain = [0, 0, 0, 0, 0, 0, 0];
         assert_eq!(word2_table_flags(&plain), (false, false));
         assert!(!is_word2(b"\xd0\xcf\x11\xe0 not word 2"));
+    }
+
+    /// #641: a paragraph's list comes from its PAPX or, failing that, its
+    /// style's based-on chain — `ilfo` and `ilvl` inherited independently,
+    /// an explicit `sprmPIlfo` 0 ending the search as "no list", a cyclic
+    /// chain ending it too.
+    #[test]
+    fn style_numbering_resolves_through_the_based_on_chain() {
+        let style = |ilfo: Option<u16>, ilvl: Option<u8>, base: u16| StyleDef {
+            ilfo,
+            ilvl,
+            base,
+            ..StyleDef::NONE
+        };
+        // 0 Normal; 1 heading 1 (list 1, level 0); 2 heading 2 based on 1
+        // with only its level; 3 a user style based on 2 with nothing; 4 a
+        // style in a two-member cycle; 5 its partner.
+        let stis = vec![
+            style(None, None, 0x0FFF),
+            style(Some(1), Some(0), 0),
+            style(None, Some(1), 1),
+            style(None, None, 2),
+            style(None, None, 5),
+            style(None, Some(2), 4),
+        ];
+        let para = |istd: u16, ilfo: Option<u16>, ilvl: Option<u8>| ParaProps {
+            istd,
+            ilfo,
+            ilvl,
+            ..ParaProps::default()
+        };
+        assert_eq!(resolve_numbering(&para(0, None, None), &stis), None);
+        assert_eq!(resolve_numbering(&para(1, None, None), &stis), Some((1, 0)));
+        // heading 2 takes the list from heading 1 and keeps its own level.
+        assert_eq!(resolve_numbering(&para(2, None, None), &stis), Some((1, 1)));
+        assert_eq!(resolve_numbering(&para(3, None, None), &stis), Some((1, 1)));
+        // The paragraph's own sprms win: another list, or none at all.
+        assert_eq!(
+            resolve_numbering(&para(2, Some(7), None), &stis),
+            Some((7, 1))
+        );
+        assert_eq!(
+            resolve_numbering(&para(2, Some(7), Some(3)), &stis),
+            Some((7, 3))
+        );
+        assert_eq!(resolve_numbering(&para(1, Some(0), None), &stis), None);
+        // A level without a list is no list; the cycle ends.
+        assert_eq!(resolve_numbering(&para(4, None, None), &stis), None);
+        assert_eq!(resolve_numbering(&para(9, None, None), &stis), None);
+    }
+
+    /// #641: a heading in a style whose list level numbers visibly carries
+    /// docling's heading number; a `none` (0xFF) or bullet level leaves the
+    /// text as is, and the heading never becomes a list item.
+    #[test]
+    fn numbered_heading_styles_prefix_the_heading_text() {
+        let lists = |nfc: u8| {
+            let lvl = |template: Vec<LvlPart>| LvlInfo {
+                nfc,
+                start: 1,
+                template,
+            };
+            ListTables {
+                lfo_lsids: vec![42],
+                lists: std::iter::once((
+                    42,
+                    vec![
+                        lvl(vec![LvlPart::Level(0)]),
+                        lvl(vec![
+                            LvlPart::Level(0),
+                            LvlPart::Text(".".into()),
+                            LvlPart::Level(1),
+                        ]),
+                    ],
+                ))
+                .collect(),
+            }
+        };
+        let stis = vec![
+            StyleDef::NONE,
+            StyleDef {
+                sti: 1,
+                ilfo: Some(1),
+                ilvl: Some(0),
+                ..StyleDef::NONE
+            },
+            StyleDef {
+                sti: 2,
+                ilvl: Some(1),
+                base: 1,
+                ..StyleDef::NONE
+            },
+        ];
+        let render = |nfc: u8| {
+            let mut builder = NodeBuilder::new(lists(nfc));
+            let mut doc = DoclingDocument::new("t");
+            for (istd, text) in [
+                (1, "Introduction"),
+                (2, "Context"),
+                (2, "Goal"),
+                (1, "Design"),
+            ] {
+                let props = ParaProps {
+                    istd,
+                    ..ParaProps::default()
+                };
+                builder.paragraph(
+                    text.into(),
+                    text.into(),
+                    Vec::new(),
+                    Vec::new(),
+                    '\r',
+                    props,
+                    &stis,
+                    &mut doc,
+                );
+            }
+            doc.export_to_markdown().trim_end().to_string()
+        };
+        assert_eq!(
+            render(0x00),
+            "## 1 Introduction\n\n### 1.1 Context\n\n### 1.2 Goal\n\n## 2 Design"
+        );
+        for nfc in [0xFF, 0x17] {
+            assert_eq!(
+                render(nfc),
+                "## Introduction\n\n### Context\n\n### Goal\n\n## Design",
+                "nfc {nfc:#x}"
+            );
+        }
     }
 }
