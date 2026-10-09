@@ -42,14 +42,21 @@
 //! `cbRgFcLcb` reads as "structure absent" (#512).
 //!
 //! **Word 6.0 / Word 95** (`nFib` 101–105, the pre-97 FIB — no table stream,
-//! 8-bit text only) converts too, as text: the FIB's `fcMin`/`ccpText`
-//! locate the main text in `WordDocument`, or its CLX does for a fast-saved
-//! (complex) file; paragraphs split at the paragraph/cell/page marks. That
-//! format's stylesheet, PAPX and picture structures differ from Word 97's
-//! and are not read, so its output is body paragraphs (no headings, lists,
-//! tables or pictures) — where it used to be rejected outright. Text decodes
-//! as Windows-1252, the code page of the Western editions, or as UTF-16LE
-//! when the FIB's `fExtChar` is set (the Far East editions).
+//! 8-bit text) goes through the same story walker (#640, [`DocFormat`]):
+//! the FIB's `fcMin`/`fcMac` bound the text in `WordDocument` (its CLX for
+//! a fast-saved file), the PAPX / CHPX bin tables (2-byte page numbers,
+//! 7-byte `BX`es, single-byte sprms with their own numbering) give the
+//! tables, headings (the stylesheet's built-in `sti`s; its names are 8-bit
+//! Pascal strings) and bold / italic — a run's 0x80 / 0x81 operands are
+//! relative to the style, resolved through the based-on chain — and the
+//! section table's `grpfIhdt` says which header / footer stories `PlcfHdd`
+//! holds; footnotes as in Word 97. Not read there: pictures (a Word 6 PICF
+//! holds a WMF / DIB; the anchor is a placeholder picture), text boxes,
+//! autonumber lists (`sprmPAnld`), endnotes. A bin table the FIB does not
+//! place leaves default properties — the body-paragraph output this reader
+//! gave before. Text decodes as Windows-1252, the code page of the Western
+//! editions, or as UTF-16LE when the FIB's `fExtChar` is set (the Far East
+//! editions).
 //!
 //! **Word for Windows 1.x / 2.0** (`wIdent` 0xA59B / 0xA59C / 0xA5DB,
 //! `nFib` ≤ 63, #566) is not a compound file at all: the FIB sits at byte 0
@@ -140,7 +147,7 @@ impl DeclarativeBackend for DocBackend {
         })?;
 
         // Styles (istd → sti) and paragraph properties (FC → PAPX).
-        let stis = parse_stsh(fib.part(&table, Fib::STSHF));
+        let stis = parse_stsh(fib.part(&table, Fib::STSHF), DocFormat::Word97);
         let bte = fib.part(&table, Fib::PLCF_BTE_PAPX);
         // Character-run properties (bold/italic): PlcfBteChpx → CHPX FKPs.
         let btec = fib.part(&table, Fib::PLCF_BTE_CHPX);
@@ -170,6 +177,7 @@ impl DeclarativeBackend for DocBackend {
         let edn_base = hdd_base + fib.ccp_hdd as u64 + fib.ccp_atn as u64;
         let txbx_base = edn_base + fib.ccp_edn as u64;
         let story = Story {
+            format: DocFormat::Word97,
             word: &word,
             pieces: &pieces,
             bte,
@@ -264,6 +272,8 @@ impl DeclarativeBackend for DocBackend {
 /// One Word 97 document's text, for walking any of its stories: the piece
 /// table over the whole CP space and the lookups a paragraph needs.
 struct Story<'a> {
+    /// Which binary layout the FKPs and sprms use (#640).
+    format: DocFormat,
     word: &'a [u8],
     pieces: &'a [Piece],
     bte: &'a [u8],
@@ -344,12 +354,13 @@ impl Story<'_> {
                 '\r' | '\u{0007}' | '\u{000C}' => {
                     // Paragraph / cell / page mark: property lookup is by
                     // the mark's own FC.
-                    let props = paragraph_props(self.word, self.bte, fc);
+                    let props = paragraph_props(self.word, self.bte, fc, self.format);
                     para.finish(ch, props, self.stis, &mut builder, doc);
                 }
                 // Inline picture anchor: the run's CHPX locates the PICF.
                 '\u{0001}' => {
-                    if let Some(pic_fc) = cache.props(self.word, self.btec, fc).pic_fc {
+                    if let Some(pic_fc) = cache.props(self.word, self.btec, fc, self.format).pic_fc
+                    {
                         para.add_picture(inline_picture(self.data, pic_fc));
                     }
                 }
@@ -370,7 +381,11 @@ impl Story<'_> {
                         }
                     }
                 }
-                _ => self.push_char(&mut para, ch, cache.props(self.word, self.btec, fc)),
+                _ => self.push_char(
+                    &mut para,
+                    ch,
+                    cache.props(self.word, self.btec, fc, self.format),
+                ),
             }
         }
         para.finish('\r', ParaProps::default(), self.stis, &mut builder, doc);
@@ -396,7 +411,11 @@ impl Story<'_> {
                         out.push(text);
                     }
                 }
-                _ => self.push_char(&mut para, ch, cache.props(self.word, self.btec, fc)),
+                _ => self.push_char(
+                    &mut para,
+                    ch,
+                    cache.props(self.word, self.btec, fc, self.format),
+                ),
             }
         }
         let text = para.plain().trim().to_string();
@@ -644,13 +663,28 @@ impl<'a> Fib<'a> {
     }
 }
 
-/// Word 6.0 / Word 95 (`nFib` 101–105): main-document text as body
-/// paragraphs (module docs). The pre-97 FIB is fixed-layout: `fcMin` at
-/// 0x18, `ccpText` at 0x34, `fcClx`/`lcbClx` at 0x160 — the CLX lives in
-/// `WordDocument` itself (no table stream) and only matters for a
-/// fast-saved file (`fComplex`); otherwise the text is the `ccpText` bytes
-/// at `fcMin`. `fExtChar` (flag 0x1000, the Far East editions) makes the
-/// text UTF-16LE instead of 8-bit.
+/// Word 6.0 / Word 95 (`nFib` 101–105, #640): the same story walk as Word
+/// 97, over the pre-97 layout ([`DocFormat::Word6`]). The FIB is fixed:
+/// `fcMin` 0x18 / `fcMac` 0x1C bound the text, the story lengths sit at
+/// 0x34 (`ccpText`, `ccpFtn`, `ccpHdd`, `ccpMcr`, `ccpAtn`, `ccpEdn`,
+/// `ccpTxbx`, `ccpHdrTxbx`), and the structures live in `WordDocument`
+/// itself (no table stream): the stylesheet at 0x60, the footnote PLCs at
+/// 0x68 / 0x70, the section table at 0x88, `PlcfHdd` at 0xB0, the CHPX and
+/// PAPX bin tables at 0xB8 / 0xC0, the CLX at 0x160 — which only matters
+/// for a fast-saved file (`fComplex`); otherwise the text is one piece at
+/// `fcMin`. `fExtChar` (flag 0x1000, the Far East editions) makes the text
+/// UTF-16LE instead of 8-bit. A bin table the FIB does not place (or an
+/// older writer's layout the walk cannot follow) leaves every paragraph
+/// with default properties — the body-paragraph output this reader gave
+/// before, never an error.
+///
+/// Read: tables (cell / row marks + `sprmPFInTable` / `sprmPTtp`),
+/// headings (the built-in Heading `sti`s of the stylesheet), bold / italic,
+/// fields (result text), headers and footers (furniture; which stories a
+/// section has comes from its SEPX's `sprmSGprfIhdt`), footnotes. Not
+/// read: pictures (a Word 6 PICF holds a WMF / DIB the Word 97 decoder does
+/// not take — the anchor is a placeholder picture), text boxes, autonumber
+/// lists (`sprmPAnld`), endnotes.
 fn convert_word6(name: &str, word: &[u8], flags: u16) -> Result<DoclingDocument, ConversionError> {
     let field = |o: usize, what: &str| {
         u32_at(word, o).map(|v| v as usize).ok_or_else(|| {
@@ -661,7 +695,12 @@ fn convert_word6(name: &str, word: &[u8], flags: u16) -> Result<DoclingDocument,
         })
     };
     let fc_min = field(0x18, "fcMin")?;
+    let fc_mac = field(0x1C, "fcMac")?;
     let ccp_text = field(0x34, "ccpText")? as u64;
+    // The other stories, in CP order after the main text (absent → 0).
+    let ccp = |o: usize| u32_at(word, o).unwrap_or(0) as u64;
+    let (ccp_ftn, ccp_hdd) = (ccp(0x38), ccp(0x3C));
+    let total_cp: u64 = (0x34..=0x50).step_by(4).map(ccp).sum();
     // `fExtChar`: the Far East editions store the text as UTF-16LE.
     let unicode = flags & 0x1000 != 0;
     let pieces = if flags & 0x0004 != 0 {
@@ -683,37 +722,165 @@ fn convert_word6(name: &str, word: &[u8], flags: u16) -> Result<DoclingDocument,
             ))
         })?
     } else {
+        // One piece over every story: `fcMin..fcMac` holds them all.
+        let chars = (fc_mac.saturating_sub(fc_min) / if unicode { 2 } else { 1 }) as u64;
         vec![Piece {
             cp_start: 0,
-            cp_end: ccp_text,
+            cp_end: total_cp.max(ccp_text).min(chars.max(ccp_text)),
             fc: fc_min as u64,
             compressed: !unicode,
         }]
     };
-
+    // An `(fc, lcb)` structure of the FIB, empty when absent or out of range.
+    let part = |o: usize| -> &[u8] {
+        let (Some(fc), Some(lcb)) = (u32_at(word, o), u32_at(word, o + 4)) else {
+            return &[];
+        };
+        (fc as usize)
+            .checked_add(lcb as usize)
+            .and_then(|end| word.get(fc as usize..end))
+            .unwrap_or(&[])
+    };
+    let stis = parse_stsh(part(0x60), DocFormat::Word6);
+    let lists = ListTables::default();
+    let drawings = Drawings::default();
+    let story = Story {
+        format: DocFormat::Word6,
+        word,
+        pieces: &pieces,
+        bte: part(0xC0),
+        btec: part(0xB8),
+        stis: &stis,
+        data: &[],
+        spa: &[],
+        drawings: &drawings,
+        textboxes: Default::default(),
+        placed: Default::default(),
+        fonts: &[],
+        lists: &lists,
+    };
+    let mut cache = ChpxCache::default();
     let mut doc = DoclingDocument::new(name);
-    let mut builder = NodeBuilder::new(ListTables::default());
-    let mut para = ParaAccum::default();
-    let mut cp: u64 = 0;
-    'pieces: for piece in &pieces {
-        for i in 0..piece.cp_end.saturating_sub(piece.cp_start) {
-            if cp >= ccp_text {
-                break 'pieces;
-            }
-            cp += 1;
-            match piece_char(word, piece, i) {
-                // Paragraph / cell / page marks all end a body paragraph:
-                // without the PAPX there is no table structure to rebuild.
-                '\r' | '\u{0007}' | '\u{000C}' => {
-                    para.finish('\r', ParaProps::default(), &[], &mut builder, &mut doc);
+    story.walk(&mut cache, 0, ccp_text, false, &mut doc);
+
+    // Headers / footers (furniture, after the body): a section's stories in
+    // `PlcfHdd` are the ones its `grpfIhdt` names, in bit order.
+    let hdd_base = ccp_text + ccp_ftn;
+    for (footer, text) in word6_header_footer_texts(
+        &story,
+        &mut cache,
+        part(0xB0),
+        word6_section_ihdt(word, part(0x88)),
+        hdd_base,
+        ccp_hdd,
+    ) {
+        doc.push(Node::FurnitureText {
+            label: if footer { "page_footer" } else { "page_header" }.into(),
+            text: escape_text(&text),
+        });
+    }
+    for text in note_texts(
+        &story,
+        &mut cache,
+        part(0x68),
+        part(0x70),
+        ccp_text,
+        ccp_ftn,
+    ) {
+        doc.push(Node::FurnitureText {
+            label: "footnote".into(),
+            text: escape_text(&text),
+        });
+    }
+    Ok(doc)
+}
+
+/// Each section's `grpfIhdt` (which header / footer stories it has: bit 0
+/// even header, 1 odd header, 2 even footer, 3 odd footer, 4 first header,
+/// 5 first footer) from the Word 6/95 section table: `PlcfSed` is `n + 1`
+/// CPs then `n` 12-byte SEDs whose `fcSepx` locates the SEPX (a word count,
+/// then the section's sprms) in `WordDocument`; `sprmSGprfIhdt` is opcode
+/// 153. A section whose SEPX cannot be read has no stories.
+fn word6_section_ihdt(word: &[u8], plcfsed: &[u8]) -> Vec<u8> {
+    let Some(n) = plcfsed.len().checked_sub(4).map(|l| l / 16) else {
+        return Vec::new();
+    };
+    (0..n)
+        .map(|i| {
+            let sed = (n + 1) * 4 + i * 12;
+            let Some(fc_sepx) = u32_at(plcfsed, sed + 2) else {
+                return 0;
+            };
+            let at = fc_sepx as usize;
+            let Some(cb) = u16_at(word, at) else {
+                return 0;
+            };
+            let grpprl = word.get(at + 2..at + 2 + cb as usize).unwrap_or(&[]);
+            let mut ihdt = 0;
+            walk_word6_sprms(grpprl, |op, operand| {
+                if op == 153 {
+                    ihdt = operand[0];
                 }
-                ch => para.push(ch, CharFmt::default()),
+            });
+            ihdt
+        })
+        .collect()
+}
+
+/// The Word 6/95 twin of [`header_footer_texts`]: `PlcfHdd` lists, per
+/// section, only the stories its `grpfIhdt` names (no separator stories,
+/// no fixed six), so the bits say which CP range is which. Emitted in the
+/// Word 97 reader's reading order — default, first, even; headers before
+/// footers — each distinct paragraph once.
+fn word6_header_footer_texts(
+    story: &Story,
+    cache: &mut ChpxCache,
+    plc: &[u8],
+    ihdts: Vec<u8>,
+    base: u64,
+    len: u64,
+) -> Vec<(bool, String)> {
+    let cps: Vec<u64> = plc
+        .chunks_exact(4)
+        .filter_map(|c| u32_at(c, 0).map(u64::from))
+        .collect();
+    let mut out: Vec<(bool, String)> = Vec::new();
+    let mut next = 0usize;
+    for ihdt in ihdts {
+        // Story index per kind, in file order (bit order).
+        let mut kinds: [Option<usize>; 6] = [None; 6];
+        for (bit, slot) in kinds.iter_mut().enumerate() {
+            if ihdt & (1 << bit) != 0 {
+                *slot = Some(next);
+                next += 1;
+            }
+        }
+        for (k, footer) in [
+            (1, false),
+            (4, false),
+            (0, false),
+            (3, true),
+            (5, true),
+            (2, true),
+        ] {
+            let Some(i) = kinds[k] else {
+                continue;
+            };
+            let (Some(&a), Some(&b)) = (cps.get(i), cps.get(i + 1)) else {
+                continue;
+            };
+            let b = b.min(len);
+            if a >= b {
+                continue;
+            }
+            for text in story.paragraphs(cache, base + a, base + b) {
+                if !out.iter().any(|(f, t)| *f == footer && *t == text) {
+                    out.push((footer, text));
+                }
             }
         }
     }
-    para.finish('\r', ParaProps::default(), &[], &mut builder, &mut doc);
-    builder.flush(&mut doc);
-    Ok(doc)
+    out
 }
 
 /// Whether `data` is a flat Word for Windows 1.x / 2.0 file (#566): the
@@ -1045,33 +1212,70 @@ struct ParaProps {
     outline: Option<u8>,
 }
 
-/// Look up the PAPX for the paragraph containing byte offset `fc`:
-/// PlcfBtePapx → FKP page (512 bytes in the WordDocument stream) → PapxInFkp.
-fn paragraph_props(word: &[u8], bte: &[u8], fc: u64) -> ParaProps {
-    let mut props = ParaProps::default();
-    let Some(n) = bte.len().checked_sub(4).map(|l| l / 8) else {
-        return props;
-    };
-    if n == 0 {
-        return props;
-    }
-    // aFc[i] <= fc < aFc[i+1] selects PN i.
-    let mut pn = None;
-    for i in 0..n {
-        let lo = u32_at(bte, i * 4).unwrap_or(u32::MAX) as u64;
-        let hi = u32_at(bte, (i + 1) * 4).unwrap_or(0) as u64;
-        if fc >= lo && fc < hi {
-            pn = u32_at(bte, (n + 1) * 4 + i * 4);
-            break;
+/// The two binary layouts the FKP walks read (#640): Word 97+ ([MS-DOC])
+/// and Word 6.0/95 (the pre-97 "Word 6.0 Binary File Format"), which
+/// differ in three places only — a bin table's page numbers are 2 bytes
+/// instead of 4, a PAPX FKP's `BX` is 7 bytes (offset + a 6-byte PHE)
+/// instead of 13, and the sprms are single-byte opcodes with their own
+/// numbering and operand sizes ([`word6_sprm_len`]). Everything else —
+/// the 512-byte pages, `crun` in the last byte, the FC array, the
+/// `istd`-first PAPX, the cell / row / paragraph marks, fields — is the
+/// same, so one walker serves both.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DocFormat {
+    Word97,
+    Word6,
+}
+
+impl DocFormat {
+    /// Bytes per page number in a `PlcfBte`.
+    fn pn_size(self) -> usize {
+        match self {
+            DocFormat::Word97 => 4,
+            DocFormat::Word6 => 2,
         }
     }
-    let Some(pn) = pn else { return props };
+    /// Bytes per `BX` entry of a PAPX FKP.
+    fn bx_size(self) -> usize {
+        match self {
+            DocFormat::Word97 => 13,
+            DocFormat::Word6 => 7,
+        }
+    }
+}
+
+/// The FKP page number for `fc` from a bin table (`PlcfBtePapx` /
+/// `PlcfBteChpx`: `n + 1` FCs, then `n` page numbers of the format's size).
+fn bin_table_page(bte: &[u8], fc: u64, format: DocFormat) -> Option<u32> {
+    let n = bte.len().checked_sub(4)? / (4 + format.pn_size());
+    (0..n).find_map(|i| {
+        let lo = u32_at(bte, i * 4).unwrap_or(u32::MAX) as u64;
+        let hi = u32_at(bte, (i + 1) * 4).unwrap_or(0) as u64;
+        if fc < lo || fc >= hi {
+            return None;
+        }
+        let at = (n + 1) * 4 + i * format.pn_size();
+        match format {
+            DocFormat::Word97 => u32_at(bte, at),
+            DocFormat::Word6 => u16_at(bte, at).map(u32::from),
+        }
+    })
+}
+
+/// Look up the PAPX for the paragraph containing byte offset `fc`:
+/// PlcfBtePapx → FKP page (512 bytes in the WordDocument stream) → PapxInFkp.
+fn paragraph_props(word: &[u8], bte: &[u8], fc: u64, format: DocFormat) -> ParaProps {
+    let mut props = ParaProps::default();
+    let Some(pn) = bin_table_page(bte, fc, format) else {
+        return props;
+    };
     let page_off = (pn & 0x003F_FFFF) as usize * 512;
     let Some(page) = word.get(page_off..page_off + 512) else {
         return props;
     };
     let crun = page[511] as usize;
-    if crun == 0 || (crun + 1) * 4 + crun * 13 > 511 {
+    let bx = format.bx_size();
+    if crun == 0 || (crun + 1) * 4 + crun * bx > 511 {
         return props;
     }
     // rgfc[j] <= fc < rgfc[j+1] selects BxPap j.
@@ -1085,11 +1289,14 @@ fn paragraph_props(word: &[u8], bte: &[u8], fc: u64) -> ParaProps {
         }
     }
     let Some(j) = run else { return props };
-    let b_offset = page[(crun + 1) * 4 + j * 13] as usize;
+    let b_offset = page[(crun + 1) * 4 + j * bx] as usize;
     if b_offset == 0 {
         return props; // default PAP
     }
-    // PapxInFkp at word offset b_offset: cb, or 0 + cb'.
+    // PapxInFkp at word offset b_offset: cb, or 0 + cb'. Word 97's `cb`
+    // counts itself (the grpprl is `2 * cb - 1` bytes); Word 6's counts the
+    // grpprl's words alone (`2 * cb` bytes) — an `istd` + `sprmPFInTable`
+    // PAPX is `cb` 2 there, and the shorter reading cut its last byte off.
     let mut o = b_offset * 2;
     let Some(&cb) = page.get(o) else { return props };
     let grpprl_len = if cb == 0 {
@@ -1097,7 +1304,10 @@ fn paragraph_props(word: &[u8], bte: &[u8], fc: u64) -> ParaProps {
         page.get(b_offset * 2 + 1).map(|&c| c as usize * 2)
     } else {
         o += 1;
-        Some(cb as usize * 2 - 1)
+        Some(match format {
+            DocFormat::Word97 => cb as usize * 2 - 1,
+            DocFormat::Word6 => cb as usize * 2,
+        })
     };
     let Some(len) = grpprl_len else { return props };
     let Some(grpprl) = page.get(o..(o + len).min(512)) else {
@@ -1107,8 +1317,169 @@ fn paragraph_props(word: &[u8], bte: &[u8], fc: u64) -> ParaProps {
         return props;
     }
     props.istd = u16::from_le_bytes([grpprl[0], grpprl[1]]);
-    apply_pap_sprms(&grpprl[2..], &mut props);
+    match format {
+        DocFormat::Word97 => apply_pap_sprms(&grpprl[2..], &mut props),
+        DocFormat::Word6 => apply_word6_pap_sprms(&grpprl[2..], &mut props),
+    }
     props
+}
+
+/// The operand size of a Word 6.0/95 sprm (the pre-97 single-byte opcodes,
+/// "Word 6.0 Binary File Format" sprm table): `Some(n)` fixed, `None` for
+/// an opcode this table does not know — the walk stops there, keeping what
+/// it read, rather than desynchronising on a guessed width. Variable-length
+/// sprms carry their byte count in the operand's first byte (`cb`), except
+/// `sprmTDefTable10` (188) and `sprmTDefTable` (190), whose count is a
+/// word. Verified against the FKPs of the #640 files: every PAPX / CHPX
+/// grpprl walks to its end exactly (the regression fixtures assert it).
+fn word6_sprm_len(op: u8, operand: &[u8]) -> Option<usize> {
+    let var_byte = || operand.first().map(|&cb| 1 + cb as usize);
+    let var_word = || u16_at(operand, 0).map(|cb| 2 + cb as usize);
+    Some(match op {
+        // PAP.
+        2 => 2,
+        3 => return var_byte(),
+        4..=11 => 1,
+        12 => return var_byte(),
+        13 | 14 => 1,
+        15 => return var_byte(),
+        16..=19 => 2,
+        20 => 4,
+        21 | 22 => 2,
+        23 => return var_byte(),
+        24 | 25 => 1,
+        26..=28 => 2,
+        29 => 1,
+        30..=36 => 2,
+        37 => 1,
+        38..=43 => 2,
+        44 => 1,
+        45..=49 => 2,
+        50 | 51 => 1,
+        52 => return var_byte(),
+        53..=55 => 1,
+        // CHP.
+        65..=67 => 1,
+        68 => 4,
+        69 => 2,
+        70 => 4,
+        71 => 1,
+        72 => 2,
+        73 => 3,
+        74 => return var_byte(),
+        75 => 1,
+        80 => 2,
+        81 | 82 => return var_byte(),
+        83 => 0,
+        85..=92 => 1,
+        93 => 2,
+        94 | 95 => 1,
+        96 | 97 => 2,
+        98 => 1,
+        99 => 2,
+        100..=102 => 1,
+        103 => return var_byte(),
+        104 => 1,
+        105 | 106 => return var_byte(),
+        107 => 2,
+        108 => return var_byte(),
+        109 | 110 => 2,
+        111 => 1,
+        117 | 118 => 1,
+        // PIC.
+        119 => 1,
+        120 => return var_byte(),
+        121..=124 => 2,
+        // SEP.
+        131 | 132 => 1,
+        133 => return var_byte(),
+        136 | 137 => 3,
+        138 | 139 => 1,
+        140 | 141 => 2,
+        142 | 143 => 1,
+        144 | 145 => 2,
+        146 | 147 => 1,
+        148 | 149 => 2,
+        150..=153 => 1,
+        154..=157 => 2,
+        158 | 159 => 1,
+        160 | 161 => 2,
+        162 | 163 => 1,
+        164..=171 => 2,
+        // TAP.
+        182..=184 => 2,
+        185 | 186 => 1,
+        187 => 12,
+        188 => return var_word(),
+        189 => 2,
+        190 => return var_word(),
+        191 => return var_byte(),
+        192 => 4,
+        193 => 5,
+        194 => 4,
+        195 => 2,
+        196 => 4,
+        197 | 198 => 2,
+        199 => 5,
+        200 => 4,
+        _ => return None,
+    })
+}
+
+/// Walk a Word 6/95 grpprl, handing each `(opcode, operand)` to `f` (the
+/// operand includes a variable sprm's count bytes). Ends at the first
+/// unknown opcode or truncated operand.
+fn walk_word6_sprms(mut sprms: &[u8], mut f: impl FnMut(u8, &[u8])) {
+    while let Some((&op, rest)) = sprms.split_first() {
+        let Some(len) = word6_sprm_len(op, rest) else {
+            return;
+        };
+        if rest.len() < len {
+            return;
+        }
+        f(op, &rest[..len]);
+        sprms = &rest[len..];
+    }
+}
+
+/// Scan a Word 6/95 PAP grpprl for the sprms this backend reads: the style
+/// (`sprmPIstd` 2, when a UPX repeats it), `sprmPFInTable` (24) and
+/// `sprmPTtp` (25) — the table structure the flat reader lacked (#640).
+fn apply_word6_pap_sprms(sprms: &[u8], props: &mut ParaProps) {
+    walk_word6_sprms(sprms, |op, operand| match op {
+        2 => props.istd = u16::from_le_bytes([operand[0], operand[1]]),
+        24 => props.in_table = operand[0] != 0,
+        25 => props.ttp = operand[0] != 0,
+        _ => {}
+    });
+}
+
+/// Scan a Word 6/95 CHP grpprl: bold (85) / italic (86) — operand 0 / 1
+/// absolute, 0x80 / 0x81 relative to the paragraph style (resolved at the
+/// paragraph's end, see [`CharFmt::bold_from_style`]) — the run's font
+/// (`sprmCFtc` 93) and a picture anchor's PICF offset
+/// (`sprmCPicLocation` 68; the Word 6 PICF itself is not decoded, so the
+/// anchor stays a placeholder picture).
+fn apply_word6_chp_sprms(sprms: &[u8], fmt: &mut CharFmt) {
+    walk_word6_sprms(sprms, |op, operand| match op {
+        85 => match operand[0] {
+            0x80 => fmt.bold_from_style = Some(false),
+            0x81 => fmt.bold_from_style = Some(true),
+            v => fmt.bold = v == 1,
+        },
+        86 => match operand[0] {
+            0x80 => fmt.italic_from_style = Some(false),
+            0x81 => fmt.italic_from_style = Some(true),
+            v => fmt.italic = v == 1,
+        },
+        93 => fmt.ftc_ascii = Some(u16::from_le_bytes([operand[0], operand[1]])),
+        68 => {
+            fmt.pic_fc = Some(u32::from_le_bytes([
+                operand[0], operand[1], operand[2], operand[3],
+            ]))
+        }
+        _ => {}
+    });
 }
 
 /// Scan a PAP grpprl for the sprms this backend cares about.
@@ -1166,6 +1537,11 @@ struct StyleDef {
     ilvl: Option<u8>,
     /// `istdBase`: the style this one is based on; 0x0FFF = none.
     base: u16,
+    /// The style's own `sprmCFBold` / `sprmCFItalic` operand (Word 6/95,
+    /// #640): 0 off, 1 on, 0x80 the base style's, 0x81 its opposite;
+    /// `None` = not set (the base style's). A run's 0x81 toggles *this*.
+    bold: Option<u8>,
+    italic: Option<u8>,
 }
 
 impl StyleDef {
@@ -1175,7 +1551,34 @@ impl StyleDef {
         ilfo: None,
         ilvl: None,
         base: 0x0FFF,
+        bold: None,
+        italic: None,
     };
+}
+
+/// Whether style `istd` is bold (or italic) once its based-on chain is
+/// resolved — the value a run's "opposite of the style" operand (0x81)
+/// flips against. The Word 97 reader never needed this: Word 97 writes
+/// an absolute 1 for direct bold; Word 6/95 writes 0x81 on a run that
+/// differs from its style, so a bold run in a plain style and a plain
+/// run in a bold heading style carry the same byte (#640).
+fn style_flag(stis: &[StyleDef], istd: u16, italic: bool) -> bool {
+    let mut cur = Some(istd);
+    let mut flip = false;
+    for _ in 0..MAX_STYLE_CHAIN {
+        let Some(style) = cur.and_then(|i| stis.get(i as usize)) else {
+            break;
+        };
+        let operand = if italic { style.italic } else { style.bold };
+        match operand {
+            Some(0) => return flip,
+            Some(1) => return !flip,
+            Some(0x81) => flip = !flip,
+            _ => {}
+        }
+        cur = (style.base != 0x0FFF && Some(style.base) != cur).then_some(style.base);
+    }
+    flip
 }
 
 /// Ancestors a based-on walk follows before giving up on a malformed or
@@ -1239,8 +1642,13 @@ fn nfc_numbers_heading(nfc: u8) -> bool {
     )
 }
 
-/// Parse the STSH into `istd → StyleDef`.
-fn parse_stsh(stsh: &[u8]) -> Vec<StyleDef> {
+/// Parse the STSH into `istd → StyleDef`. A Word 6/95 stylesheet (#640)
+/// has the same STSHI / STD framing; its style names are 8-bit Pascal
+/// strings (a count byte, the characters, a null) instead of the
+/// 2-byte-counted UTF-16 ones, and its UPX sprms are the pre-97 opcodes —
+/// which carry no outline level or list reference, so only the built-in
+/// `sti` identifies a heading there.
+fn parse_stsh(stsh: &[u8], format: DocFormat) -> Vec<StyleDef> {
     let none = StyleDef::NONE;
     let Some(cb_stshi) = u16_at(stsh, 0) else {
         return Vec::new();
@@ -1271,17 +1679,43 @@ fn parse_stsh(stsh: &[u8]) -> Vec<StyleDef> {
             // null), then the 2-byte-aligned UPX array — UPX[0] is `istd +
             // grpprl`, the same sprm stream the paragraph walker reads.
             if sgc == 1 {
-                if let Some(cch) = u16_at(std, cb_std_base) {
-                    let mut upx = cb_std_base + 2 + (cch as usize + 1) * 2;
-                    upx += upx & 1;
-                    if let Some(cb_upx) = u16_at(std, upx) {
-                        let g = std.get(upx + 2..upx + 2 + cb_upx as usize).unwrap_or(&[]);
-                        if g.len() >= 2 {
-                            let mut props = ParaProps::default();
-                            apply_pap_sprms(&g[2..], &mut props);
-                            def.outline = props.outline;
-                            def.ilfo = props.ilfo;
-                            def.ilvl = props.ilvl;
+                match format {
+                    DocFormat::Word97 => {
+                        if let Some(cch) = u16_at(std, cb_std_base) {
+                            let mut upx = cb_std_base + 2 + (cch as usize + 1) * 2;
+                            upx += upx & 1;
+                            if let Some(cb_upx) = u16_at(std, upx) {
+                                let g = std.get(upx + 2..upx + 2 + cb_upx as usize).unwrap_or(&[]);
+                                if g.len() >= 2 {
+                                    let mut props = ParaProps::default();
+                                    apply_pap_sprms(&g[2..], &mut props);
+                                    def.outline = props.outline;
+                                    def.ilfo = props.ilfo;
+                                    def.ilvl = props.ilvl;
+                                }
+                            }
+                        }
+                    }
+                    // Word 6: an 8-bit Pascal name, then UPX[0] (PAPX) and
+                    // UPX[1] (CHPX) — the style's bold / italic operands.
+                    DocFormat::Word6 => {
+                        if let Some(&cch) = std.get(cb_std_base) {
+                            let mut upx = cb_std_base + 1 + cch as usize + 1;
+                            upx += upx & 1;
+                            if let Some(cb_upx0) = u16_at(std, upx) {
+                                let mut chpx = upx + 2 + cb_upx0 as usize;
+                                chpx += chpx & 1;
+                                if let Some(cb_upx1) = u16_at(std, chpx) {
+                                    let g = std
+                                        .get(chpx + 2..chpx + 2 + cb_upx1 as usize)
+                                        .unwrap_or(&[]);
+                                    walk_word6_sprms(g, |op, operand| match op {
+                                        85 => def.bold = Some(operand[0]),
+                                        86 => def.italic = Some(operand[0]),
+                                        _ => {}
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -1301,6 +1735,12 @@ fn parse_stsh(stsh: &[u8]) -> Vec<StyleDef> {
 struct CharFmt {
     bold: bool,
     italic: bool,
+    /// Word 6/95 (#640): the run's bold / italic is the *opposite of its
+    /// paragraph style's* (operand 0x81) or the style's own (0x80) —
+    /// resolved against the style when the paragraph ends
+    /// ([`ParaAccum::finish`]); `bold` / `italic` hold nothing until then.
+    bold_from_style: Option<bool>,
+    italic_from_style: Option<bool>,
     /// `sprmCPicLocation`: offset of the run's PICF in the Data stream (the
     /// run's `0x01` character is an inline-picture anchor).
     pic_fc: Option<u32>,
@@ -1327,11 +1767,11 @@ struct ChpxCache {
 }
 
 impl ChpxCache {
-    fn props(&mut self, word: &[u8], btec: &[u8], fc: u64) -> CharFmt {
+    fn props(&mut self, word: &[u8], btec: &[u8], fc: u64, format: DocFormat) -> CharFmt {
         if fc >= self.lo && fc < self.hi {
             return self.fmt;
         }
-        let (fmt, lo, hi) = char_props(word, btec, fc);
+        let (fmt, lo, hi) = char_props(word, btec, fc, format);
         self.lo = lo;
         self.hi = hi;
         self.fmt = fmt;
@@ -1342,24 +1782,9 @@ impl ChpxCache {
 /// Look up the CHPX for the character at `fc`: PlcfBteChpx → CHPX FKP page →
 /// grpprl scan for `sprmCFBold`/`sprmCFItalic`. Returns the format and the FC
 /// range it covers (for the cache).
-fn char_props(word: &[u8], btec: &[u8], fc: u64) -> (CharFmt, u64, u64) {
+fn char_props(word: &[u8], btec: &[u8], fc: u64, format: DocFormat) -> (CharFmt, u64, u64) {
     let fmt = CharFmt::default();
-    let Some(n) = btec.len().checked_sub(4).map(|l| l / 8) else {
-        return (fmt, fc, fc + 1);
-    };
-    if n == 0 {
-        return (fmt, fc, fc + 1);
-    }
-    let mut pn = None;
-    for i in 0..n {
-        let lo = u32_at(btec, i * 4).unwrap_or(u32::MAX) as u64;
-        let hi = u32_at(btec, (i + 1) * 4).unwrap_or(0) as u64;
-        if fc >= lo && fc < hi {
-            pn = u32_at(btec, (n + 1) * 4 + i * 4);
-            break;
-        }
-    }
-    let Some(pn) = pn else {
+    let Some(pn) = bin_table_page(btec, fc, format) else {
         return (fmt, fc, fc + 1);
     };
     let page_off = (pn & 0x003F_FFFF) as usize * 512;
@@ -1382,7 +1807,10 @@ fn char_props(word: &[u8], btec: &[u8], fc: u64) -> (CharFmt, u64, u64) {
         if b != 0 {
             if let Some(&cb) = page.get(b * 2) {
                 if let Some(grpprl) = page.get(b * 2 + 1..(b * 2 + 1 + cb as usize).min(512)) {
-                    apply_chp_sprms(grpprl, &mut out);
+                    match format {
+                        DocFormat::Word97 => apply_chp_sprms(grpprl, &mut out),
+                        DocFormat::Word6 => apply_word6_chp_sprms(grpprl, &mut out),
+                    }
                 }
             }
         }
@@ -1516,6 +1944,7 @@ fn spa_shape_at(spa: &[(u64, u32)], cp: u64) -> Option<u32> {
 /// The document's OfficeArt drawing tables: shape id → BLIP index (`pib`),
 /// and the BLIP store — each entry either embeds its BLIP record or points
 /// at one in the WordDocument (delay) stream via `foDelay`.
+#[derive(Default)]
 struct Drawings {
     /// spid → 1-based pib.
     shape_pib: std::collections::HashMap<u32, u32>,
@@ -1889,6 +2318,16 @@ impl ParaAccum {
         builder: &mut NodeBuilder,
         doc: &mut DoclingDocument,
     ) {
+        // Word 6/95 runs formatted relative to the style (#640): now that
+        // the paragraph's style is known, settle them.
+        for (_, fmt) in self.segments.iter_mut() {
+            if let Some(flip) = fmt.bold_from_style.take() {
+                fmt.bold = style_flag(stis, props.istd, false) != flip;
+            }
+            if let Some(flip) = fmt.italic_from_style.take() {
+                fmt.italic = style_flag(stis, props.istd, true) != flip;
+            }
+        }
         let plain = self.plain();
         let markdown = self.markdown();
         let pictures = std::mem::take(&mut self.pictures);
@@ -1955,14 +2394,16 @@ impl NodeBuilder {
             return;
         }
         if props.in_table {
-            if !self.cell_text.is_empty() {
-                // Multi-paragraph cells join with a blank line, matching the
-                // DOCX backend's rich cells (the Markdown table serializer
-                // then folds each newline into a space).
+            let text = markdown.trim_end_matches('\u{0007}');
+            // Multi-paragraph cells join with a blank line, matching the
+            // DOCX backend's rich cells (the Markdown table serializer
+            // then folds each newline into a space); an empty paragraph
+            // adds nothing, as the DOCX backend's cell text skips it (#640
+            // — a Word 6 cell with blank lines between its paragraphs).
+            if !self.cell_text.is_empty() && !text.trim().is_empty() {
                 self.cell_text.push_str("\n\n");
             }
-            self.cell_text
-                .push_str(markdown.trim_end_matches('\u{0007}'));
+            self.cell_text.push_str(text);
             // A text box anchored in the cell: its paragraphs are more of the
             // cell's (#535), as the DOCX backend reads the same document.
             for text in textboxes.iter().flatten().filter_map(node_text) {
