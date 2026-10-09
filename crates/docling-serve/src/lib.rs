@@ -653,6 +653,15 @@ struct UrlRequest {
 enum ApiError {
     Bad(String),
     Unsupported(String),
+    /// The document is encrypted and the request's password (or none) does
+    /// not open it (#636): a 422 like any document problem, but the body
+    /// carries the typed case as `code` (`password_required`,
+    /// `wrong_password`, `not_decryptable`, `malformed_encryption`) so a
+    /// client prompts for a password instead of matching the message.
+    Encrypted {
+        code: &'static str,
+        message: String,
+    },
     Internal(String),
     /// The async job queue is full (#182) — retry later.
     Busy(String),
@@ -693,7 +702,9 @@ fn body_error(what: &str, e: axum::Error) -> ApiError {
 fn api_error_parts(e: ApiError) -> (StatusCode, String) {
     match e {
         ApiError::Bad(m) => (StatusCode::BAD_REQUEST, m),
-        ApiError::Unsupported(m) => (StatusCode::UNPROCESSABLE_ENTITY, m),
+        ApiError::Unsupported(m) | ApiError::Encrypted { message: m, .. } => {
+            (StatusCode::UNPROCESSABLE_ENTITY, m)
+        }
         ApiError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         ApiError::Busy(m) => (StatusCode::TOO_MANY_REQUESTS, m),
         ApiError::Overloaded(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
@@ -701,11 +712,30 @@ fn api_error_parts(e: ApiError) -> (StatusCode, String) {
     }
 }
 
+/// The machine-readable `code` an error body carries besides `error` —
+/// today only an encrypted document's case (#636).
+fn api_error_code(e: &ApiError) -> Option<&'static str> {
+    match e {
+        ApiError::Encrypted { code, .. } => Some(code),
+        _ => None,
+    }
+}
+
+/// `{"error": msg}` plus `"code"` when the error has one.
+fn error_body(msg: &str, code: Option<&'static str>) -> Json<serde_json::Value> {
+    let mut body = json!({"error": msg});
+    if let Some(code) = code {
+        body["code"] = json!(code);
+    }
+    Json(body)
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let overloaded = matches!(self, ApiError::Overloaded(_));
+        let code = api_error_code(&self);
         let (status, msg) = api_error_parts(self);
-        let mut response = (status, Json(json!({"error": msg}))).into_response();
+        let mut response = (status, error_body(&msg, code)).into_response();
         if overloaded {
             // A hint for well-behaved clients; conversions run seconds, not ms.
             response
@@ -1051,9 +1081,9 @@ enum JobState {
     Pending,
     Started,
     Success(StoredResponse),
-    /// The HTTP status the sync endpoint would have answered with, plus the
-    /// error message.
-    Failure(StatusCode, String),
+    /// The HTTP status the sync endpoint would have answered with, the
+    /// error message, and its `code` when it has one (#636).
+    Failure(StatusCode, String, Option<&'static str>),
 }
 
 impl JobState {
@@ -1194,8 +1224,9 @@ where
             job.state = match outcome {
                 Ok(stored) => JobState::Success(stored),
                 Err(e) => {
+                    let code = api_error_code(&e);
                     let (status, msg) = api_error_parts(e);
-                    JobState::Failure(status, msg)
+                    JobState::Failure(status, msg, code)
                 }
             };
             job.done_at = Some(std::time::Instant::now());
@@ -1219,8 +1250,11 @@ async fn job_status(
             .into_response(),
         Some(job) => {
             let mut body = json!({ "task_id": id, "task_status": job.state.as_str() });
-            if let JobState::Failure(_, msg) = &job.state {
+            if let JobState::Failure(_, msg, code) = &job.state {
                 body["error"] = json!(msg);
+                if let Some(code) = code {
+                    body["code"] = json!(code);
+                }
             }
             Json(body).into_response()
         }
@@ -1249,8 +1283,8 @@ async fn job_result(
                 Json(json!({ "task_id": id, "task_status": job.state.as_str() })),
             )
                 .into_response(),
-            JobState::Failure(status, msg) => {
-                (*status, Json(json!({"error": msg}))).into_response()
+            JobState::Failure(status, msg, code) => {
+                (*status, error_body(msg, *code)).into_response()
             }
             // Clone rather than remove: the result stays re-fetchable until
             // the TTL evicts it (a client retrying a dropped response must not
@@ -1733,7 +1767,7 @@ fn rasterize_pages(
     // applied — pages=A-B is exactly the documented way to rasterize a slice
     // of a document that exceeds the cap.
     let total = docling::pdf_page_count(&source.bytes, None)
-        .map_err(|e| ApiError::Unsupported(e.to_string()))?;
+        .map_err(|e| pdf_api_error(&e, ApiError::Unsupported))?;
     let selected = match range {
         Some((first, last)) if first <= total => last.min(total) - first + 1,
         Some(_) => 0, // out-of-document start — render_pages reports the error
@@ -2457,7 +2491,7 @@ fn convert_document_inner(
                     errors: Vec::new(),
                 }
             })
-            .map_err(|e| ApiError::Unsupported(e.to_string()));
+            .map_err(|e| conversion_api_error(&e));
     }
     match source.format {
         InputFormat::Pdf | InputFormat::Image => {
@@ -2519,7 +2553,9 @@ fn convert_document_inner(
                         errors: Vec::new(),
                     }),
             }
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+            // An encrypted PDF is the client's to fix (422 + `code`, #636);
+            // anything else the warm pipeline fails on keeps its status.
+            .map_err(|e| pdf_api_error(&e, ApiError::Internal))?;
             finish.finish_document(&mut converted.document);
             Ok(converted)
         }
@@ -2531,7 +2567,7 @@ fn convert_document_inner(
                     document: r.document,
                     errors: r.errors,
                 })
-                .map_err(|e| ApiError::Unsupported(e.to_string()))
+                .map_err(|e| conversion_api_error(&e))
         }
     }
 }
@@ -2793,7 +2829,27 @@ async fn stream_markdown(
 fn conversion_api_error(e: &ConversionError) -> ApiError {
     match e {
         ConversionError::Panic(msg) => ApiError::Internal(msg.clone()),
-        other => ApiError::Unsupported(other.to_string()),
+        // Still a 422 — the body names the case (#636).
+        other => match other.encryption() {
+            Some(kind) => ApiError::Encrypted {
+                code: kind.code(),
+                message: other.to_string(),
+            },
+            None => ApiError::Unsupported(other.to_string()),
+        },
+    }
+}
+
+/// The HTTP shape of the PDF pipeline's own error, reached where the warm
+/// pipeline bypasses `DocumentConverter`: an encrypted document is the typed
+/// 422 (#636), everything else goes through `fallback` with its message.
+fn pdf_api_error(e: &docling::PdfError, fallback: fn(String) -> ApiError) -> ApiError {
+    match e {
+        docling::PdfError::Encrypted(kind) => ApiError::Encrypted {
+            code: kind.code(),
+            message: e.to_string(),
+        },
+        other => fallback(other.to_string()),
     }
 }
 

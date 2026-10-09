@@ -82,11 +82,14 @@ impl DeclarativeBackend for IworkBackend {
         // encryption flag on a password-protected document — it writes a
         // compression method outside the ZIP-defined set — so both signals are
         // checked before any member is decompressed.
+        // Typed as not decryptable (#636): no password opens it here, so a
+        // caller must not prompt for one — the wording stays the same.
         if pkg.any_encrypted() {
-            return Err(ConversionError::Parse(
-                "iwork: the document is password-protected; docling.rs cannot read \
-                 encrypted iWork documents. Remove the password in Pages and save again"
-                    .into(),
+            return Err(ConversionError::encrypted_with_message(
+                "iwork",
+                crate::EncryptionError::NotDecryptable("iWork package encryption".into()),
+                "the document is password-protected; docling.rs cannot read encrypted iWork \
+                 documents. Remove the password in Pages and save again",
             ));
         }
 

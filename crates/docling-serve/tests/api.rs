@@ -368,8 +368,125 @@ async fn encrypted_office_files_are_422() {
                 text.contains("document is encrypted"),
                 "{name}{query}: {text}"
             );
+            // #636: the body names the case, so a client prompts for a
+            // password instead of matching the message.
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["code"], "password_required", "{name}{query}: {text}");
         }
     }
+}
+
+/// #636: an encrypted PDF carries the `code` too, on the pipeline route the
+/// Office formats never take (it used to answer 500 there), with docling's
+/// message; the password opens it. Text-layer only: no models needed.
+#[tokio::test]
+async fn an_encrypted_pdf_is_a_422_with_a_code() {
+    let bytes =
+        std::fs::read(repo_root().join("tests/data/pdf_password/sources/2206.01062_pg3.pdf"))
+            .unwrap();
+    for (fields, code, text) in [
+        (
+            vec![("text_layer_only", "true")],
+            "password_required",
+            "the PDF is encrypted: a password is required",
+        ),
+        (
+            vec![("text_layer_only", "true"), ("password", "nope")],
+            "wrong_password",
+            "the PDF is encrypted and the password is wrong",
+        ),
+    ] {
+        let (ct, body) = multipart("locked.pdf", &bytes, &fields);
+        let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{code}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+        assert_eq!(v["code"], code, "{v}");
+        assert!(v["error"].as_str().unwrap().contains(text), "{v}");
+    }
+    let (ct, body) = multipart(
+        "locked.pdf",
+        &bytes,
+        &[("text_layer_only", "true"), ("password", "1234")],
+    );
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_string(response).await.contains("DocLayNet"));
+}
+
+/// #636: a damaged upload is a 422 *without* a `code` — only an encrypted
+/// document carries one — and an async job's status and result carry the
+/// same `code` as the sync endpoint.
+#[tokio::test]
+async fn the_encryption_code_is_only_on_encrypted_documents() {
+    let (ct, body) = multipart("junk.docx", b"PK\x03\x04 not a zip", &[]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert!(v["error"].is_string());
+    assert!(v.get("code").is_none(), "{v}");
+
+    let app = app();
+    let bytes =
+        std::fs::read(repo_root().join("crates/docling/tests/data/encrypted/min_encrypted.docx"))
+            .unwrap();
+    let (ct, body) = multipart("min_encrypted.docx", &bytes, &[("password", "4321")]);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/convert/async")
+                .header(header::CONTENT_TYPE, ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    let id = v["task_id"].as_str().expect("task id").to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/status/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+        match v["task_status"].as_str().unwrap() {
+            "failure" => break v,
+            "success" => panic!("an encrypted file converted without its password: {v}"),
+            _ if std::time::Instant::now() > deadline => panic!("job never finished"),
+            _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+        }
+    };
+    assert_eq!(status["code"], "wrong_password", "{status}");
+    assert!(
+        status["error"]
+            .as_str()
+            .unwrap()
+            .contains("the password is wrong"),
+        "{status}"
+    );
+    let response = app
+        .oneshot(
+            Request::get(format!("/v1/result/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert_eq!(v["code"], "wrong_password", "{v}");
 }
 
 /// #625: the request's `password` opens an encrypted Office file too (and
@@ -395,9 +512,10 @@ async fn password_opens_an_encrypted_office_file() {
     let (ct, body) = multipart("deck.pptx", &bytes, &[("password", "4321")]);
     let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body_string(response)
-        .await
-        .contains("the password is wrong"));
+    let text = body_string(response).await;
+    assert!(text.contains("the password is wrong"), "{text}");
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["code"], "wrong_password", "{text}");
 }
 
 #[tokio::test]

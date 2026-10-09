@@ -22,6 +22,37 @@ use docling::{ConversionStatus, SourceDocument};
 // docling's `ConversionError`: raised when a conversion fails (docling code does
 // `except ConversionError`). Re-exported from the Python package.
 pyo3::create_exception!(_native, ConversionError, PyException);
+// The typed encryption cases (#636), subclasses of `ConversionError` so
+// existing `except ConversionError` still catches them: `EncryptionError` for
+// any encrypted document, `PasswordRequiredError` / `WrongPasswordError` for
+// the two a caller prompts for a password on. The message is unchanged.
+pyo3::create_exception!(_native, EncryptionError, ConversionError);
+pyo3::create_exception!(_native, PasswordRequiredError, EncryptionError);
+pyo3::create_exception!(_native, WrongPasswordError, EncryptionError);
+
+/// The Python exception for a conversion failure: the typed subclass when the
+/// error says the document is encrypted (#636), `ConversionError` otherwise.
+fn conversion_error(e: docling::ConversionError) -> PyErr {
+    typed_error(e.encryption().cloned(), e.to_string())
+}
+
+/// [`conversion_error`] for the PDF pipeline's own error (the warm path).
+fn pdf_error(e: docling::PdfError) -> PyErr {
+    let kind = match &e {
+        docling::PdfError::Encrypted(kind) => Some(kind.clone()),
+        _ => None,
+    };
+    typed_error(kind, e.to_string())
+}
+
+fn typed_error(kind: Option<docling::EncryptionError>, message: String) -> PyErr {
+    match kind {
+        Some(docling::EncryptionError::NeedPassword) => PasswordRequiredError::new_err(message),
+        Some(docling::EncryptionError::WrongPassword) => WrongPasswordError::new_err(message),
+        Some(_) => EncryptionError::new_err(message),
+        None => ConversionError::new_err(message),
+    }
+}
 
 /// Run `work` on a background thread while this (Python) thread waits with the
 /// GIL released, polling `Python::check_signals` so Ctrl-C raises
@@ -623,8 +654,7 @@ impl PyDocumentConverter {
                 vlm.page_range = page_range;
             }
             return run_interruptible(py, move || {
-                let doc = docling::vlm::convert_vlm(&src, &vlm)
-                    .map_err(|e| ConversionError::new_err(e.to_string()))?;
+                let doc = docling::vlm::convert_vlm(&src, &vlm).map_err(conversion_error)?;
                 Ok(PyNativeResult {
                     status: "success".to_string(),
                     input_name: src.name,
@@ -650,7 +680,7 @@ impl PyDocumentConverter {
                 pipeline.set_pages(default_window);
                 // docling's PARTIAL_SUCCESS (#497): a spent budget leaves the
                 // pages done so far and says so in `errors`.
-                let c = outcome.map_err(|e| ConversionError::new_err(e.to_string()))?;
+                let c = outcome.map_err(pdf_error)?;
                 let errors: Vec<docling::ErrorItem> = c
                     .completion
                     .message()
@@ -675,9 +705,7 @@ impl PyDocumentConverter {
             None => self.inner.clone(),
         };
         run_interruptible(py, move || {
-            let result = converter
-                .convert(src)
-                .map_err(|e| ConversionError::new_err(e.to_string()))?;
+            let result = converter.convert(src).map_err(conversion_error)?;
             Ok(native_result(result))
         })
     }
@@ -1075,6 +1103,12 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(email_attachments, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(compiled_providers, m)?)?;
     m.add("ConversionError", m.py().get_type::<ConversionError>())?;
+    m.add("EncryptionError", m.py().get_type::<EncryptionError>())?;
+    m.add(
+        "PasswordRequiredError",
+        m.py().get_type::<PasswordRequiredError>(),
+    )?;
+    m.add("WrongPasswordError", m.py().get_type::<WrongPasswordError>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

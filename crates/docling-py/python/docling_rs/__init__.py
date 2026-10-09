@@ -64,7 +64,13 @@ from . import chunking
 # (Deliberately NO ctypes preload here: loading the provider libraries with
 # RTLD_GLOBAL before the static ORT inside `_native` initializes duplicates
 # ORT symbols process-wide and segfaulted at session creation in testing.)
-from ._native import ConversionError, __version__
+from ._native import (
+    ConversionError,
+    EncryptionError,
+    PasswordRequiredError,
+    WrongPasswordError,
+    __version__,
+)
 from ._native import DocumentConverter as _NativeDocumentConverter
 from ._native import compiled_providers as _compiled_providers
 from ._native import email_attachments as _email_attachments
@@ -76,6 +82,9 @@ __all__ = [
     "ConversionStatus",
     "ErrorItem",
     "ConversionError",
+    "EncryptionError",
+    "PasswordRequiredError",
+    "WrongPasswordError",
     "InputDocument",
     "DoclingDocument",
     "ImageRefMode",

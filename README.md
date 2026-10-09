@@ -551,6 +551,24 @@ println!("{}", result.document.export_to_markdown()); // Markdown
 println!("{}", result.document.export_to_json());     // docling DoclingDocument JSON
 ```
 
+A failed conversion is a `ConversionError`; when the document is encrypted,
+`err.encryption()` returns the typed reason (#636) — `NeedPassword` and
+`WrongPassword` are worth prompting for a password (`needs_password()`),
+`NotDecryptable` / `Malformed` are not:
+
+```rust
+match converter.convert(SourceDocument::from_file("locked.pdf").unwrap()) {
+    Ok(result) => println!("{}", result.document.export_to_markdown()),
+    Err(e) if e.encryption().is_some_and(|k| k.needs_password()) => ask_for_password(),
+    Err(e) => eprintln!("{e}"),
+}
+```
+
+`docling-rs serve` answers the same case with `422 {"error": …, "code":
+"password_required" | "wrong_password" | "not_decryptable" |
+"malformed_encryption"}`; the Python bindings raise `PasswordRequiredError` /
+`WrongPasswordError` / `EncryptionError`, subclasses of `ConversionError`.
+
 ### One option set, every surface — `ConvertOptions`
 
 Every conversion knob — the `DocumentConverter` builder's methods plus the

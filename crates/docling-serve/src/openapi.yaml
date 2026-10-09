@@ -1027,6 +1027,9 @@ components:
         error:
           type: string
           description: Present when `task_status` is `failure`.
+        code:
+          type: string
+          description: With `error`, when the failure has a machine-readable case — see `Error.code`.
       required: [task_id, task_status]
     ConfidenceReport:
       type: object
@@ -1050,6 +1053,16 @@ components:
       type: object
       properties:
         error: { type: string }
+        code:
+          type: string
+          enum: [password_required, wrong_password, not_decryptable, malformed_encryption]
+          description: >
+            Set when the document is encrypted (#636): `password_required` (none
+            was given), `wrong_password` (the request's `password` does not open
+            it) — the two a client prompts for a password on — `not_decryptable`
+            (a scheme the server does not read: ODF, iWork, WordPerfect, XOR
+            obfuscation) or `malformed_encryption` (a damaged encryption header).
+            Absent for every other error.
       required: [error]
 
     ConvertDocumentResponse:

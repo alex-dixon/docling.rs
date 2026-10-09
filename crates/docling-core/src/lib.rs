@@ -17,6 +17,7 @@ pub mod confidence;
 mod doclang;
 pub mod doctags;
 mod document;
+mod encryption;
 pub mod env;
 mod html;
 pub mod jpeg;
@@ -37,6 +38,7 @@ pub use document::{
     GraphCell, GraphLink, HtmlExportOptions, InlineRun, ListItemDclx, MarkdownExportOptions, Node,
     PictureClass, PictureImage, Script, Table, TableCell, TableStructure,
 };
+pub use encryption::EncryptionError;
 pub use json::code_language_label;
 pub use labels::DocItemLabel;
 pub use markdown::{ImageMode, MarkdownStreamer};

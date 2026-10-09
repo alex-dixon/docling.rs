@@ -114,6 +114,7 @@ compile_error!(
 );
 
 use docling_core::DoclingDocument;
+pub use docling_core::EncryptionError;
 // The env-knob helpers only gate ML-pipeline diagnostics and tuning; the
 // pure text-layer (wasm) build has no call sites.
 #[cfg(feature = "ml")]
@@ -153,6 +154,11 @@ pub enum PdfError {
     /// never sees it from [`Pipeline::convert`] — the conversion returns the
     /// pages it finished and reports the cut through [`Completion`].
     Timeout(String),
+    /// The document is encrypted and the password given (or none) does not
+    /// open it (#636) — the typed value a caller prompts for a password on,
+    /// reachable through [`std::error::Error::source`] too. Its text is the
+    /// one docling raises.
+    Encrypted(EncryptionError),
 }
 
 impl fmt::Display for PdfError {
@@ -163,6 +169,13 @@ impl fmt::Display for PdfError {
             PdfError::Layout(m) => write!(f, "pdf: {m}"),
             PdfError::Ocr(m) => write!(f, "pdf: {m}"),
             PdfError::Timeout(m) => write!(f, "pdf: {m}"),
+            PdfError::Encrypted(EncryptionError::WrongPassword) => {
+                f.write_str("pdf: the PDF is encrypted and the password is wrong")
+            }
+            PdfError::Encrypted(EncryptionError::NeedPassword) => {
+                f.write_str("pdf: the PDF is encrypted: a password is required")
+            }
+            PdfError::Encrypted(e) => write!(f, "pdf: the PDF is encrypted: {e}"),
         }
     }
 }
@@ -221,7 +234,14 @@ fn timeout_sentinel() -> PdfError {
     PdfError::Timeout("document timeout exceeded".into())
 }
 
-impl std::error::Error for PdfError {}
+impl std::error::Error for PdfError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PdfError::Encrypted(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 #[cfg(feature = "pdfium")]
 impl From<pdfium_render::prelude::PdfiumError> for PdfError {

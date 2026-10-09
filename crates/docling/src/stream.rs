@@ -242,8 +242,10 @@ fn run_pdf(
         }
         // A consumer-drop abort and a real parse error both end here; the send below
         // is a no-op if the consumer is already gone, so only genuine errors surface.
+        // The `PdfError` stays on the chain (same text: it names `pdf:` itself), so
+        // an encrypted PDF is typed on the streaming path too (#636).
         Err(e) => {
-            let _ = tx.send(Err(ConversionError::Parse(e.to_string())));
+            let _ = tx.send(Err(ConversionError::with_source("pdf", e)));
         }
     }
 }

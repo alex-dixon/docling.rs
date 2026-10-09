@@ -720,7 +720,7 @@ pub(crate) async fn status_poll(
             .into_response(),
         Some(job) => {
             let mut body = task_status(&id, job.state.as_str());
-            if let JobState::Failure(_, msg) = &job.state {
+            if let JobState::Failure(_, msg, _) = &job.state {
                 body["error_message"] = json!(msg);
             }
             Json(body).into_response()

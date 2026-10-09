@@ -236,6 +236,10 @@ cargo test -p docling-pdf --features pdfium --lib raster:: pdfium_backend::  # t
   `page_range` for the full pattern.
 - Degradation over failure: a missing optional tool/model (ffmpeg, enrichment
   model) warns and degrades; only "nothing convertible at all" errors.
+- An encrypted input raises the typed `docling_core::EncryptionError` on the
+  error's `source()` chain (#636: `ConversionError::encrypted[_with_message]`,
+  `PdfError::Encrypted`; read with `ConversionError::encryption()`) — never
+  a bare `Parse(String)`, which callers would have to match by text.
 - Docs live in `README.md` (user-facing) + `docs/MIGRATION.md` (parity table
   with real conformance numbers and the deliberate divergences from docling)
   — update both with behavior changes;
