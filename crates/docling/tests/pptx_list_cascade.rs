@@ -18,6 +18,13 @@
 //! different steps of the chain, and a numbered list's `startAt` with a bullet
 //! joining the numbered group. Re-create a reference with upstream's backend,
 //! never from our own output.
+//!
+//! `tests/data/ppt/list_cascade/` holds the reporter's A–G decks as saved by
+//! PowerPoint (for Mac) in the 97–2003 format. docling reads a `.ppt` by
+//! letting LibreOffice save it as `.pptx` and running the same backend, so
+//! each `.md` is that chain's output (LibreOffice 24.2; byte-identical to
+//! the reporter's docling 2.134 run): the bullets PowerPoint leaves to the
+//! master's `TextMasterStyleAtom`, and the slide's shapes in reading order.
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -76,6 +83,33 @@ fn list_markers_follow_docling_through_layout_and_master() {
         normalize(&mut got);
         if got != want {
             failures.push(format!("{name}.json: item tree differs from docling's"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn ppt_list_markers_follow_docling_through_the_master() {
+    let converter = DocumentConverter::new();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/ppt/list_cascade");
+    let mut decks: Vec<PathBuf> = fs::read_dir(&dir)
+        .expect("ppt list_cascade fixtures")
+        .map(|e| e.expect("entry").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ppt"))
+        .collect();
+    decks.sort();
+    assert_eq!(decks.len(), 7, "the A–G decks");
+    let mut failures = Vec::new();
+    for deck in &decks {
+        let name = deck.file_stem().unwrap().to_str().unwrap();
+        let got = converter
+            .convert(SourceDocument::from_file(deck).expect("deck"))
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .document
+            .export_to_markdown();
+        let want = fs::read_to_string(deck.with_extension("md")).expect("reference .md");
+        if got.trim_end() != want.trim_end() {
+            failures.push(format!("{name}.md:\n--- docling\n{want}\n--- ours\n{got}"));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
