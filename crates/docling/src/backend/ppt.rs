@@ -1010,13 +1010,9 @@ fn assemble_slide(
     master: &MasterStyles,
 ) -> Vec<Node> {
     let mut nodes = Vec::new();
-    let mut list = ListState::default();
     for item in shapes {
         match item {
-            ShapeItem::Table { table } => {
-                nodes.push(Node::Table(table));
-                list = ListState::default();
-            }
+            ShapeItem::Table { table } => nodes.push(Node::Table(table)),
             ShapeItem::Text { text, .. } => {
                 let (is_title, text_type, content, styles, autonums) = match text.outline_ref {
                     Some(ix) => match blocks.get_mut(ix as usize) {
@@ -1061,7 +1057,7 @@ fn assemble_slide(
                     autonums: &autonums,
                     inherited: |indent| master.bullet(text_type, indent),
                 };
-                push_text(&mut nodes, para, &mut list);
+                push_text(&mut nodes, para);
             }
         }
     }
@@ -1074,19 +1070,30 @@ fn assemble_slide(
             autonums: &autos,
             inherited: |indent| master.bullet(block.text_type, indent),
         };
-        push_text(&mut nodes, para, &mut list);
+        push_text(&mut nodes, para);
     }
     nodes
 }
 
-/// Running list context across a slide's emitted nodes, for `first_in_list`
-/// and ordered-item numbering.
-#[derive(Default)]
-struct ListState {
-    /// `Some(ordered)` while the previous node was a list item.
-    prev: Option<bool>,
-    /// Next number for an ordered run.
-    next_number: u64,
+/// A list still accepting items while a text frame is walked — docling's
+/// `_OpenList` (docling#4397), which a `.ppt` reaches through LibreOffice's
+/// PPTX export: the stack is per text frame, a deeper paragraph nests a new
+/// list under the open one, a shallower one pops back, a non-list paragraph
+/// closes them all, and each list numbers its enumerated items on its own
+/// counter.
+struct OpenList {
+    /// The indent level of the paragraphs this list holds.
+    level: u8,
+    /// Items so far, numbered or not.
+    items: u64,
+    /// Numbering so far — starts at the first enumerated item's PP9
+    /// `startAt` (docling's `_get_auto_number_start`).
+    counter: u64,
+    /// Whether the first item was numbered: docling-core's Markdown numbers
+    /// an unmarked item by its position when its group's first item is
+    /// enumerated (`first_item_is_enumerated`), so a bullet that joins a
+    /// numbered group renders `N.`, not `-`.
+    first_enumerated: Option<bool>,
 }
 
 /// One text block to emit: its paragraphs' text and style runs, and the
@@ -1104,8 +1111,12 @@ struct Paragraphs<'a, F: Fn(u8) -> bool> {
 /// `\r`-separated line, list-classifying each line by its paragraph style —
 /// the paragraph's own bullet flag, else its master text style's (#627:
 /// PowerPoint leaves a body placeholder's bullets to the master, and
-/// LibreOffice — docling's `.ppt` reader — resolves them from it).
-fn push_text<F: Fn(u8) -> bool>(nodes: &mut Vec<Node>, para: Paragraphs<F>, list: &mut ListState) {
+/// LibreOffice — docling's `.ppt` reader — resolves them from it). List
+/// items nest and number the way docling's PPTX backend does ([`OpenList`]):
+/// the frame's lists are its own, an indent level only nests relative to the
+/// list already open (a level-2 paragraph after plain text starts a flat
+/// list), and a bullet inside a numbered group takes the group's numbering.
+fn push_text<F: Fn(u8) -> bool>(nodes: &mut Vec<Node>, para: Paragraphs<F>) {
     let Paragraphs {
         is_title,
         text,
@@ -1113,6 +1124,7 @@ fn push_text<F: Fn(u8) -> bool>(nodes: &mut Vec<Node>, para: Paragraphs<F>, list
         autonums,
         inherited,
     } = para;
+    let mut open_lists: Vec<OpenList> = Vec::new();
     // Map each paragraph to its style run by cumulative character position.
     let mut run_ix = 0usize;
     let mut run_left = styles.first().map(|s| s.count).unwrap_or(usize::MAX);
@@ -1138,42 +1150,62 @@ fn push_text<F: Fn(u8) -> bool>(nodes: &mut Vec<Node>, para: Paragraphs<F>, list
                 level: 1,
                 text: line.to_string(),
             });
-            list.prev = None;
+            open_lists.clear();
             continue;
         }
-        let ordered = autonum.is_some();
+        let numbered = autonum.is_some();
         let bullet = style.bullet.unwrap_or_else(|| inherited(style.indent));
-        if bullet || ordered {
-            let first = list.prev != Some(ordered);
-            if first && ordered {
-                list.next_number = autonum.map(|(_, start)| start as u64).unwrap_or(1);
-            }
-            let number = if ordered {
-                let n = list.next_number;
-                list.next_number += 1;
-                n
-            } else {
-                1
-            };
-            nodes.push(Node::ListItem {
-                ordered,
-                number,
-                first_in_list: first,
-                text: line.to_string(),
-                level: style.indent,
-                marker: None,
-                location: None,
-                dclx: None,
-                href: None,
-                layer: None,
-            });
-            list.prev = Some(ordered);
-        } else {
+        if !bullet && !numbered {
             nodes.push(Node::Paragraph {
                 text: line.to_string(),
             });
-            list.prev = None;
+            open_lists.clear();
+            continue;
         }
+        let level = style.indent;
+        while open_lists.len() > 1 && open_lists.last().is_some_and(|l| l.level > level) {
+            open_lists.pop();
+        }
+        let first_in_list = open_lists.is_empty();
+        if open_lists.is_empty() || open_lists.last().is_some_and(|l| level > l.level) {
+            open_lists.push(OpenList {
+                level,
+                items: 0,
+                counter: 0,
+                first_enumerated: None,
+            });
+        }
+        let depth = open_lists.len() - 1;
+        let current = open_lists.last_mut().expect("a list is open");
+        let n = if numbered {
+            if current.counter == 0 {
+                current.counter = autonum
+                    .map_or(0, |(_, start)| start as u64)
+                    .saturating_sub(1);
+            }
+            current.counter += 1;
+            current.counter
+        } else {
+            0
+        };
+        current.items += 1;
+        let first_enumerated = *current.first_enumerated.get_or_insert(numbered);
+        let (ordered, number) = match (numbered, first_enumerated) {
+            (false, true) => (true, current.items),
+            _ => (numbered, n),
+        };
+        nodes.push(Node::ListItem {
+            ordered,
+            number,
+            first_in_list,
+            text: line.to_string(),
+            level: depth as u8,
+            marker: None,
+            location: None,
+            dclx: None,
+            href: None,
+            layer: None,
+        });
     }
 }
 
@@ -1375,6 +1407,101 @@ mod tests {
                 "title below",
                 "anchorless"
             ]
+        );
+    }
+
+    /// A body frame's list items nest and number like docling's PPTX backend
+    /// (`_OpenList`, which a `.ppt` reaches through LibreOffice's export): a
+    /// deeper level nests only relative to the open list, plain text closes
+    /// the stack so a later level-2 run is flat, a numbered run starts at its
+    /// PP9 `startAt`, and a bullet joining a numbered group takes its number.
+    #[test]
+    fn lists_nest_and_number_like_docling() {
+        let para = |count: usize, indent: u8, bullet: Option<bool>, autonum| ParaStyle {
+            count,
+            indent,
+            bullet,
+            autonum,
+        };
+        // "one\rtwo\rthree\rfour\rfive": bullet, plain (level 1), two
+        // numbered at level 2, bullet at level 0 — the J deck.
+        let styles = [
+            para(4, 0, Some(true), None),
+            para(4, 1, Some(false), None),
+            para(6, 2, Some(true), Some((3, 1))),
+            para(5, 2, Some(true), Some((3, 1))),
+            para(5, 0, Some(true), None),
+        ];
+        let mut nodes = Vec::new();
+        push_text(
+            &mut nodes,
+            Paragraphs {
+                is_title: false,
+                text: "one\rtwo\rthree\rfour\rfive",
+                styles: &styles,
+                autonums: &[],
+                inherited: |_| false,
+            },
+        );
+        let shape: Vec<(bool, u64, bool, u8)> = nodes
+            .iter()
+            .map(|n| match n {
+                Node::ListItem {
+                    ordered,
+                    number,
+                    first_in_list,
+                    level,
+                    ..
+                } => (*ordered, *number, *first_in_list, *level),
+                Node::Paragraph { .. } => (false, 0, false, u8::MAX),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (false, 0, true, 0),
+                (false, 0, false, u8::MAX),
+                (true, 1, true, 0), // flat: nothing is open after plain text
+                (true, 2, false, 0),
+                (true, 3, false, 0), // the bullet joins the numbered group
+            ]
+        );
+
+        // "four\rfive\rbullet": numbered from 4, then a bullet — the K deck;
+        // and a nested bullet under a bullet keeps its depth.
+        let styles = [
+            para(5, 0, Some(true), Some((3, 4))),
+            para(5, 0, Some(true), Some((3, 1))),
+            para(7, 0, Some(true), None),
+            para(7, 1, Some(true), None),
+        ];
+        let mut nodes = Vec::new();
+        push_text(
+            &mut nodes,
+            Paragraphs {
+                is_title: false,
+                text: "four\rfive\rbullet\rnested",
+                styles: &styles,
+                autonums: &[],
+                inherited: |_| false,
+            },
+        );
+        let numbers: Vec<(bool, u64, u8)> = nodes
+            .iter()
+            .map(|n| match n {
+                Node::ListItem {
+                    ordered,
+                    number,
+                    level,
+                    ..
+                } => (*ordered, *number, *level),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            numbers,
+            vec![(true, 4, 0), (true, 5, 0), (true, 3, 0), (false, 0, 1)]
         );
     }
 
