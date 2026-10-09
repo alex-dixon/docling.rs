@@ -18,7 +18,7 @@
 //! the same name): one identifier per line, sorted, for scripts that ask the
 //! binary what it converts instead of hard-coding a list.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|text|dclx|chunks|images|latex|pandoc] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--output-file PATH] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--text-layer-only] [--password PASSWORD | --password-file PATH] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|text|dclx|chunks|images|latex|pandoc|vtt] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--output-file PATH] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--text-layer-only] [--password PASSWORD | --password-file PATH] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
 //!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
 //!                      md --to json`): each document converts once and is
 //!                      written in every format named, `<stem>.md` +
@@ -58,7 +58,10 @@
 //!                      native DoclingDocument JSON (export_to_dict); `text`
 //!                      docling's plain text (`export_to_text`, #613: the
 //!                      Markdown without `#`, emphasis, link URLs, code fences
-//!                      or image placeholders; lists and tables stay); `images`
+//!                      or image placeholders; lists and tables stay); `vtt`
+//!                      WebVTT subtitles (#614: a cue per timed text item —
+//!                      an audio/video transcript's segments, a `.vtt` input's
+//!                      cues; `WEBVTT` alone without them); `images`
 //!                      (#243) skips conversion and rasterizes a PDF's pages to
 //!                      `<stem>_page_NNNN.png` files (combines with `--pages`).
 //!   --scale X          `--to images` render scale in pixels per PDF point:
@@ -243,11 +246,12 @@ const USAGE: &str = "usage: docling-rs [OPTIONS] <input-file>\n       docling-rs
 /// `--help`: the synopsis plus every flag, grouped. Kept in sync with the
 /// module doc comment above, which carries the long-form rationale.
 const HELP: &str = "\
-Convert documents to Markdown, JSON, plain text, DocLang, LaTeX, Pandoc AST or chunks.
+Convert documents to Markdown, JSON, plain text, DocLang, LaTeX, Pandoc AST, WebVTT or chunks.
 
 OUTPUT
-  --to md|json|html|text|dclx|chunks|images|latex|pandoc   output format (default: md); repeat it (or
-                          comma-separate) to write several — needs --output
+  --to md|json|html|text|dclx|chunks|images|latex|pandoc|vtt   output format (default: md); repeat
+                          it (or comma-separate) to write several — needs --output;
+                          vtt = WebVTT subtitles from a transcript's (or a .vtt's) cues
   --strict                cleaner, more conformant Markdown (Markdown only)
   --page-break-placeholder TEXT   insert TEXT between pages (Markdown only, e.g. <!-- page break -->)
   --images MODE           picture handling: placeholder (default; embedded for --to pandoc)
@@ -1609,6 +1613,7 @@ fn batch_out_path(file: &Path, base: &Path, output: &Path, to: &str) -> std::pat
         "chunks" => "chunks.json",
         "latex" => "tex",
         "text" => "txt",
+        "vtt" => "vtt",
         // #515: Pandoc's own extension is `.json`; the double extension keeps
         // it apart from docling's JSON when both are requested.
         "pandoc" => "pandoc.json",
@@ -1819,6 +1824,9 @@ fn batch_convert_one(
                 .map_err(|e| format!("writing {}: {e}", out.display()))?,
             // #613: docling's `--to text` writes `export_to_text()` verbatim.
             "text" => std::fs::write(&out, document.export_to_text())
+                .map_err(|e| format!("writing {}: {e}", out.display()))?,
+            // #614: docling's `--to vtt` (`save_as_vtt`), verbatim.
+            "vtt" => std::fs::write(&out, document.export_to_vtt())
                 .map_err(|e| format!("writing {}: {e}", out.display()))?,
             "dclx" => docling::dclx::save_as_dclx(&document, &out).map_err(|e| e.to_string())?,
             // #515: the Pandoc AST; pictures follow `--images` like HTML,
@@ -2281,6 +2289,13 @@ fn output_document(
         return ExitCode::SUCCESS;
     }
 
+    // #614: docling's `--to vtt` — a cue per timed text item, the bare
+    // `WEBVTT` header for a document without any.
+    if to == "vtt" {
+        println!("{}", document.export_to_vtt());
+        return ExitCode::SUCCESS;
+    }
+
     if to == "chunks" {
         // Chunking conformance/debug dump: a JSON object with the hierarchical
         // chunk records and, when a tokenizer is configured, the hybrid ones.
@@ -2589,6 +2604,10 @@ mod tests {
         assert_eq!(out("/data/reports/x.pdf", "json"), Path::new("/out/x.json"));
         assert_eq!(out("/data/reports/x.pdf", "dclx"), Path::new("/out/x.dclx"));
         assert_eq!(out("/data/reports/x.pdf", "latex"), Path::new("/out/x.tex"));
+        assert_eq!(
+            out("/data/reports/talk.mp3", "vtt"),
+            Path::new("/out/talk.vtt")
+        );
         assert_eq!(
             out("/data/reports/a/x.pdf", "chunks"),
             Path::new("/out/a/x.chunks.json")

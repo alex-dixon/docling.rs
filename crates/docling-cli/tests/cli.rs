@@ -82,7 +82,7 @@ fn list_output_formats_prints_the_to_values() {
     assert!(stderr.is_empty(), "stderr: {stderr:?}");
     assert_eq!(
         stdout,
-        "chunks\ndclx\nhtml\nimages\njson\nlatex\nmd\npandoc\ntext\n"
+        "chunks\ndclx\nhtml\nimages\njson\nlatex\nmd\npandoc\ntext\nvtt\n"
     );
 }
 
@@ -514,6 +514,29 @@ fn to_text_prints_plain_text_and_writes_txt() {
     assert_eq!(
         std::fs::read_to_string(&written).unwrap(),
         "Title\n\nSome bold and italic text.\n\n- one\n- two"
+    );
+}
+
+/// #614: `--to vtt` — docling's WebVTT export; a `.vtt` input's cues come
+/// back (voice end tag of a lone voice span omitted, like `save_as_vtt`).
+#[test]
+fn to_vtt_prints_cues_and_writes_vtt() {
+    let dir = Scratch::new("to-vtt");
+    let src = dir.path("talk.vtt");
+    std::fs::write(
+        &src,
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\n<v Ann>Hello</v>\n",
+    )
+    .unwrap();
+    let want = "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\n<v Ann>Hello";
+    let (code, stdout, stderr) = run(&["--to", "vtt", &src]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, format!("{want}\n"));
+    let (code, _, stderr) = run(&["--to", "vtt", "--output", &dir.path("out"), &src]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(dir.0.join("out/talk.vtt")).unwrap(),
+        want
     );
 }
 

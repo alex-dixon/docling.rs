@@ -65,14 +65,7 @@ pub fn convert_video(
         while frames.peek().is_some_and(|f| f.ts <= seg.start) {
             doc.nodes.push(picture_node(frames.next().unwrap()));
         }
-        doc.nodes.push(Node::Paragraph {
-            text: format!(
-                "[time: {}-{}] {}",
-                docling_asr::fmt_seconds(seg.start),
-                docling_asr::fmt_seconds(seg.end),
-                seg.text
-            ),
-        });
+        doc.nodes.push(docling_asr::segment_node(seg));
     }
     for frame in frames {
         doc.nodes.push(picture_node(frame));

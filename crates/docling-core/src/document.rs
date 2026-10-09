@@ -284,6 +284,17 @@ pub enum Node {
         comments: Vec<usize>,
         inner: Box<Node>,
     },
+    /// A text node taken from a time-based track — an ASR segment (#614):
+    /// docling's `TrackSource`. The JSON writes docling's ASR text item — `cue`
+    /// (the segment's words) as its text, `track` as its `source: [{"kind":
+    /// "track", …}]` — which the WebVTT export makes a cue of; every other
+    /// serializer renders `inner` (the `[time: start-end] words` paragraph)
+    /// unchanged.
+    Track {
+        track: crate::tree::TreeTrack,
+        cue: String,
+        inner: Box<Node>,
+    },
     /// A node carrying layout provenance — the four DocLang `<location>` values
     /// (`x0,y0,x1,y1`, normalized to 0–511) docling attaches to elements from
     /// backends with real geometry (e.g. the slide shapes in PPTX). Markdown and
@@ -1226,7 +1237,9 @@ impl DoclingDocument {
         fn unwrap_table(n: &Node) -> Option<&Table> {
             match n {
                 Node::Table(t) => Some(t),
-                Node::Located { inner, .. } | Node::Prov { inner, .. } => unwrap_table(inner),
+                Node::Located { inner, .. }
+                | Node::Prov { inner, .. }
+                | Node::Track { inner, .. } => unwrap_table(inner),
                 _ => None,
             }
         }
@@ -1241,7 +1254,9 @@ impl DoclingDocument {
         fn unwrap_table(n: &mut Node) -> Option<&mut Table> {
             match n {
                 Node::Table(t) => Some(t),
-                Node::Located { inner, .. } | Node::Prov { inner, .. } => unwrap_table(inner),
+                Node::Located { inner, .. }
+                | Node::Prov { inner, .. }
+                | Node::Track { inner, .. } => unwrap_table(inner),
                 _ => None,
             }
         }
@@ -1383,6 +1398,21 @@ impl DoclingDocument {
         options: &MarkdownExportOptions,
     ) -> (String, Vec<(String, Vec<u8>)>) {
         crate::markdown::to_markdown_with_options(self, self.strict_markdown, options)
+    }
+
+    /// WebVTT (#614) — what docling's `--to vtt` writes
+    /// (`DoclingDocument.save_as_vtt`): a cue per timed text item — a WebVTT
+    /// input's cues, an audio/video transcript's segments — hours always
+    /// written, the `</v>` of a lone voice span omitted. A document without
+    /// timed text is the bare `WEBVTT` header. No trailing newline.
+    pub fn export_to_vtt(&self) -> String {
+        crate::vtt::to_vtt(self, &crate::vtt::VttExportOptions::default())
+    }
+
+    /// [`Self::export_to_vtt`] with docling-core's `WebVTTParams`
+    /// (`omit_hours_if_zero`, `omit_voice_end`).
+    pub fn export_to_vtt_with_options(&self, options: &crate::vtt::VttExportOptions) -> String {
+        crate::vtt::to_vtt(self, options)
     }
 
     /// Plain text — docling-core's `DoclingDocument.export_to_text()` with

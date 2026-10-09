@@ -204,7 +204,10 @@ pub struct OutputOptions {
     /// `"latex"` (a complete LaTeX document, #317), `"html"` (a
     /// complete HTML document, docling-core's `HTMLDocSerializer`, #492 —
     /// pictures follow `imageMode` like Markdown) or `"pandoc"` (Pandoc's
-    /// JSON AST for `pandoc -f json`, #515 — pictures follow `imageMode`).
+    /// JSON AST for `pandoc -f json`, #515 — pictures follow `imageMode`) or
+    /// `"vtt"` (WebVTT subtitles, docling's `--to vtt`, #614: a cue per timed
+    /// text item — an audio/video transcript's segments, a `.vtt` input's
+    /// cues).
     pub to: Option<String>,
     /// Picture handling for Markdown: `"placeholder"` (default; `"embedded"`
     /// for `to: "pandoc"`, #537), `"embedded"` (base64 data URIs inline), or
@@ -470,6 +473,8 @@ enum OutputKind {
     Latex,
     /// Plain text (docling's `--to text`, `export_to_text`, #613).
     Text,
+    /// WebVTT subtitles (docling's `--to vtt`, #614).
+    Vtt,
     /// A complete HTML document (docling-core's `HTMLDocSerializer`, #492);
     /// pictures follow `imageMode` like the Markdown export.
     Html,
@@ -606,6 +611,7 @@ fn render_doc(
         OutputKind::Json => (doc.export_to_json(), Vec::new()),
         OutputKind::Latex => (doc.export_to_latex(), Vec::new()),
         OutputKind::Text => (doc.export_to_text(), Vec::new()),
+        OutputKind::Vtt => (doc.export_to_vtt(), Vec::new()),
         OutputKind::Html => match cfg.image_mode {
             ImageMode::Placeholder => (doc.export_to_html(), Vec::new()),
             mode => doc.export_to_html_with_images(mode, &cfg.artifacts_dir),
@@ -2245,9 +2251,12 @@ fn parse_output_kind(to: Option<&str>) -> Result<OutputKind> {
         Some("text") => Ok(OutputKind::Text),
         Some("html") => Ok(OutputKind::Html),
         Some("pandoc") => Ok(OutputKind::Pandoc),
+        Some("vtt") => Ok(OutputKind::Vtt),
         Some(other) => Err(Error::new(
             Status::InvalidArg,
-            format!("unknown `to` '{other}' (expected: markdown, json, html, text, latex, pandoc)"),
+            format!(
+                "unknown `to` '{other}' (expected: markdown, json, html, text, latex, pandoc, vtt)"
+            ),
         )),
     }
 }

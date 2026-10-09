@@ -43,7 +43,7 @@ use serde::Deserialize;
 #[derive(Default, Deserialize)]
 struct Options {
     /// Output format: `md` (default) | `json` | `text` | `dclx` | `latex` | `html` |
-    /// `pandoc` (Pandoc's JSON AST, #515).
+    /// `pandoc` (Pandoc's JSON AST, #515) | `vtt` (WebVTT, #614).
     to: Option<String>,
     /// Picture rendering in Markdown: `placeholder` (default) | `embedded`
     /// (base64 data URIs — the only way to carry pixels through one buffer).
@@ -148,8 +148,10 @@ fn convert_impl(bytes: &[u8], filename: &str, options_json: &str) -> Result<Vec<
             })
             .map(|(json, _)| json.into_bytes())
             .map_err(|e| e.to_string()),
+        // #614: docling's `--to vtt`.
+        "vtt" => Ok(document.export_to_vtt().into_bytes()),
         other => Err(format!(
-            "unknown to={other:?} (expected: md, json, text, dclx, latex, html, pandoc)"
+            "unknown to={other:?} (expected: md, json, text, dclx, latex, html, pandoc, vtt)"
         )),
     }
 }
@@ -221,7 +223,7 @@ pub unsafe extern "C" fn docling_convert(
 
 /// The converted output, or NULL when the conversion failed. NUL-terminated
 /// (readable as a C string for `to` = `md` / `json` / `text` / `latex` / `html` /
-/// `pandoc`); for binary output
+/// `pandoc` / `vtt`); for binary output
 /// (`dclx`) pair it with [`docling_result_output_len`]. Owned by the result —
 /// valid until [`docling_result_free`].
 ///
@@ -349,6 +351,10 @@ mod tests {
         unsafe { docling_result_free(r) };
         let r = convert(md, "note.md", r#"{"to":"text"}"#);
         assert_eq!(output_string(r), "Title\n\nHello world");
+        unsafe { docling_result_free(r) };
+        // #614: no timed text → the bare header, titled.
+        let r = convert(md, "note.md", r#"{"to":"vtt"}"#);
+        assert_eq!(output_string(r), "WEBVTT Title");
         unsafe { docling_result_free(r) };
         let r = convert(md, "note.md", r#"{"to":"pandoc"}"#);
         let ast = output_string(r);

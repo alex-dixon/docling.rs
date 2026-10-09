@@ -130,17 +130,49 @@ pub fn convert_audio_with_options(
 ) -> Result<DoclingDocument, AsrError> {
     let segments = transcribe_with_options(bytes, name, model, lang)?;
     let mut doc = DoclingDocument::new(name);
-    for seg in segments {
-        doc.nodes.push(Node::Paragraph {
-            text: format!(
-                "[time: {}-{}] {}",
-                fmt_seconds(seg.start),
-                fmt_seconds(seg.end),
-                seg.text
-            ),
-        });
+    for seg in &segments {
+        doc.nodes.push(segment_node(seg));
     }
     Ok(doc)
+}
+
+/// docling's `ZERO_DURATION_SEGMENT_EPS`: a segment whose end is not after
+/// its start ends this much later, so its cue has a duration.
+const ZERO_DURATION_SEGMENT_EPS: f64 = 0.001;
+
+/// One transcript segment as a document node: the `[time: start-end] text`
+/// paragraph Markdown and JSON have always shown, wrapped in its
+/// [`Node::Track`] — docling's `TrackSource` (#614), which the JSON writes as
+/// the item's `source` and `--to vtt` turns into a cue. As docling's ASR
+/// pipeline does, a blank segment gets no track (no cue) and a zero-duration
+/// one ends [`ZERO_DURATION_SEGMENT_EPS`] after its start.
+pub fn segment_node(seg: &Segment) -> Node {
+    let paragraph = Node::Paragraph {
+        text: format!(
+            "[time: {}-{}] {}",
+            fmt_seconds(seg.start),
+            fmt_seconds(seg.end),
+            seg.text
+        ),
+    };
+    if seg.text.trim().is_empty() {
+        return paragraph;
+    }
+    let end = if seg.end <= seg.start {
+        seg.start + ZERO_DURATION_SEGMENT_EPS
+    } else {
+        seg.end
+    };
+    Node::Track {
+        track: docling_core::tree::TreeTrack {
+            start_time: seg.start,
+            end_time: end,
+            identifier: None,
+            voice: None,
+        },
+        cue: seg.text.clone(),
+        inner: Box::new(paragraph),
+    }
 }
 
 /// [`convert_audio_with_model`] up to (and excluding) document assembly: the

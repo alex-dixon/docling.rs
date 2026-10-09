@@ -621,6 +621,9 @@ struct Builder {
     /// The enclosing [`Node::Prov`] wrapper's (or the tree item's) exact
     /// provenance, which takes precedence over the grid box.
     pending_exact: Option<ExactProv>,
+    /// The enclosing [`Node::Track`]'s timing, for the text item it wraps
+    /// (#614).
+    pending_track: Option<(crate::tree::TreeTrack, String)>,
     /// `$ref`s an item wants placed in its parent's `children` *before* its
     /// own — a chart's caption item, which docling's office backends add to
     /// the container ahead of the picture that references it.
@@ -1354,6 +1357,12 @@ impl Builder {
                 self.pending_loc = None;
                 r
             }
+            Node::Track { track, cue, inner } => {
+                self.pending_track = Some((track.clone(), cue.clone()));
+                let r = self.add_node(inner, parent);
+                self.pending_track = None;
+                r
+            }
             Node::Prov {
                 page_no,
                 bbox,
@@ -1529,7 +1538,13 @@ impl Builder {
         prov: Value,
     ) -> String {
         let self_ref = format!("#/texts/{}", self.texts.len());
-        let raw = unescape_text(text);
+        // A [`Node::Track`] item is docling's ASR text item (#614): the
+        // segment's words as `text`, its timing as `source` — the `[time: …]`
+        // prefix the wrapped paragraph shows is Markdown's alone.
+        let (raw, track) = match self.pending_track.take() {
+            Some((track, cue)) => (cue, Some(track)),
+            None => (unescape_text(text), None),
+        };
         let mut item = json!({
             "self_ref": self_ref,
             "parent": { "$ref": parent },
@@ -1537,9 +1552,14 @@ impl Builder {
             "content_layer": "body",
             "label": label,
             "prov": prov,
-            "orig": raw,
-            "text": raw,
         });
+        // `DocItem.source` follows `prov` (docling's field order), only when
+        // set: an ASR segment's track (#614).
+        if let Some(track) = track {
+            item["source"] = json!([track_json(&track)]);
+        }
+        item["orig"] = json!(raw);
+        item["text"] = json!(raw);
         merge(&mut item, extra);
         self.texts.push(item);
         self_ref

@@ -119,7 +119,9 @@ demuxes/decodes the container in-process (wav, mp3, flac, ogg, aac, m4a; no
 ffmpeg), a ported log-mel front-end feeds a
 **Whisper tiny** encoder/decoder exported to ONNX (run on `ort`, greedy with
 OpenAI's timestamp rules — docling's ASR defaults), and each segment becomes a
-`[time: start-end] text` paragraph. The transcription language is
+`[time: start-end] text` paragraph in Markdown — in the JSON, docling 2.135's
+text item (the words) with the timing as its `source` track, which `--to vtt`
+turns into subtitles (#614). The transcription language is
 auto-detected from the first 30 seconds (docling 2.116 parity); pin it with
 `--asr-lang <code>` (a Whisper code like `en`, `de`, `zh`; `auto` re-enables
 detection), the `asr_lang` option on the other surfaces, or the
@@ -698,6 +700,31 @@ nothing: their `result.document` *is* docling-core's `DoclingDocument`, so
 WebVTT cue where docling wraps italics around a bare space — `* *` — which the
 port keeps literal; see `docs/MIGRATION.md`). `crates/docling/tests/plain_text.rs`
 pins 15 of them against docling-core's output.
+
+### WebVTT (`.vtt`) output
+
+`export_to_vtt()` — docling's `--to vtt` (#614), a port of docling-core's
+`WebVTTDocSerializer` as `save_as_vtt` runs it — writes subtitles: a cue per
+timed text item. An audio or video transcript gives one cue per segment
+(start and end from the ASR timing, a zero-length segment stretched by 1 ms,
+blank ones dropped, as docling's ASR pipeline does), and a WebVTT input comes
+back with its cues, identifiers, `<v voice>` spans and `<b>`/`<i>`/`<u>`
+formatting. Other content (tables, pictures, untimed text) is not
+represented, so a DOCX gives the bare `WEBVTT` header (titled by its title,
+like upstream).
+
+```bash
+docling-rs talk.mp3 --to vtt > talk.vtt                       # subtitles from a transcript
+docling-rs --input ./media --output ./out --to vtt,md          # <stem>.vtt + <stem>.md
+```
+
+Serve answers `to=vtt` as `text/vtt` (inline under `vtt` in a batch), Node /
+wasm / the C ABI take `to: "vtt"`, and the Python bindings use docling-core's
+own `result.document.export_to_vtt()` / `save_as_vtt()` — the transcript JSON
+carries each segment as docling does (the words as `text`, the timing as a
+`source` track). Byte-identical to docling 2.135 on the four mirrored WebVTT
+inputs (`crates/docling/tests/vtt_export.rs`), and on a transcript loaded into
+docling-core from our JSON.
 
 ### LaTeX (`.tex`) output
 

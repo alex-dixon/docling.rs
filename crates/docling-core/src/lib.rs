@@ -28,6 +28,7 @@ mod mathml;
 pub mod pandoc;
 mod pixel_digest;
 pub mod tree;
+mod vtt;
 
 pub use confidence::{ConfidenceReport, PageConfidence, QualityGrade};
 pub use doclang::inline_runs_from_markdown;
@@ -39,3 +40,4 @@ pub use document::{
 pub use json::code_language_label;
 pub use labels::DocItemLabel;
 pub use markdown::{ImageMode, MarkdownStreamer};
+pub use vtt::VttExportOptions;

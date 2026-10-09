@@ -47,7 +47,8 @@ fn start() {
 /// [`convert_with_options`] takes.
 #[derive(Debug, Default, Deserialize)]
 struct Request {
-    /// `md` (default) | `json` | `text` | `doclang` | `latex` | `html` | `pandoc`.
+    /// `md` (default) | `json` | `text` | `doclang` | `latex` | `html` | `pandoc` |
+    /// `vtt`.
     to: Option<String>,
     /// `placeholder` (default) | `embedded` — see [`image_mode`].
     images: Option<String>,
@@ -146,8 +147,10 @@ fn convert_request(bytes: &[u8], filename: &str, request: Request) -> Result<Str
             .0),
         // #515: Pandoc's JSON AST (`pandoc -f json`); pictures as above.
         "pandoc" => pandoc_json(&result.document, image_mode),
+        // #614: docling's `--to vtt` — a `.vtt` input's cues round-trip.
+        "vtt" => Ok(result.document.export_to_vtt()),
         other => Err(format!(
-            "unknown output format {other:?} (expected \"md\", \"json\", \"text\", \"doclang\", \"latex\", \"html\" or \"pandoc\")"
+            "unknown output format {other:?} (expected \"md\", \"json\", \"text\", \"doclang\", \"latex\", \"html\", \"pandoc\" or \"vtt\")"
         )),
     }
 }
@@ -194,8 +197,8 @@ pub(crate) fn pandoc_json(
 /// `DoclingDocument` wire format, schema 1.10.0), `"text"` (plain text,
 /// docling's `export_to_text`, #613), `"doclang"` (docling's
 /// DocLang XML serialization), `"latex"` (docling 2.124's LaTeX document,
-/// #317), `"html"` or `"pandoc"` (Pandoc's JSON AST for `pandoc -f json`,
-/// #515).
+/// #317), `"html"`, `"pandoc"` (Pandoc's JSON AST for `pandoc -f json`,
+/// #515) or `"vtt"` (WebVTT, docling's `--to vtt`, #614).
 ///
 /// `images` controls how pictures render in Markdown — `"placeholder"`
 /// (default) or `"embedded"` (base64 data URIs), the same option
