@@ -129,12 +129,16 @@ fn clamp_boxes_to_pages(out: &mut Value, pages: &[(usize, f64, f64)]) {
     if pages.is_empty() {
         return;
     }
+    // First entry per page wins, as the linear `find` this replaces did; a
+    // scan per box was quadratic on long documents (items × pages).
+    let mut sizes: std::collections::HashMap<usize, (f64, f64)> =
+        std::collections::HashMap::with_capacity(pages.len());
+    for &(p, w, h) in pages {
+        sizes.entry(p).or_insert((w, h));
+    }
     let size = |page_no: &Value| -> Option<(f64, f64)> {
         let n = page_no.as_u64()? as usize;
-        pages
-            .iter()
-            .find(|(p, _, _)| *p == n)
-            .map(|(_, w, h)| (*w, *h))
+        sizes.get(&n).copied()
     };
     let r2 = |v: f64| (v * 100.0).round() / 100.0;
     let clamp_bbox = |bbox: &mut Value, (w, h): (f64, f64)| {
@@ -292,36 +296,10 @@ fn build_json(doc: &DoclingDocument, note_keys: bool) -> Value {
     };
     b.link_comments();
 
-    let mut out = json!({
-        "schema_name": "DoclingDocument",
-        "version": SCHEMA_VERSION,
-        "name": doc.name,
-        "origin": {
-            "mimetype": "text/plain",
-            "binary_hash": fnv1a(&doc.name),
-            "filename": doc.name,
-        },
-        "furniture": {
-            "self_ref": "#/furniture",
-            "children": [],
-            "content_layer": "furniture",
-            "name": "_root_",
-            "label": "unspecified",
-        },
-        "body": {
-            "self_ref": "#/body",
-            "children": body,
-            "content_layer": "body",
-            "name": "_root_",
-            "label": "unspecified",
-        },
-        "groups": b.groups,
-        "texts": b.texts,
-        "pictures": b.pictures,
-        "tables": b.tables,
-        "key_value_items": b.key_value_items,
-        "form_items": [],
-        "pages": b.pages.iter().map(|(n, w, h)| {
+    let pages = b
+        .pages
+        .iter()
+        .map(|(n, w, h)| {
             let r2 = |v: f64| (v * 100.0).round() / 100.0;
             // docling-core's `PageItem` field order: size, image, page_no
             // (#520 — the image only when page images were generated).
@@ -332,8 +310,54 @@ fn build_json(doc: &DoclingDocument, note_keys: bool) -> Value {
             }
             page.insert("page_no".into(), json!(n));
             (n.to_string(), Value::Object(page))
-        }).collect::<serde_json::Map<String, Value>>(),
-    });
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    // Built with [`object`], not `json!`: the macro deep-copies every
+    // interpolated value (`to_value`), and copying the item arrays briefly
+    // doubled the export's peak.
+    let mut out = object([
+        ("schema_name", "DoclingDocument".into()),
+        ("version", SCHEMA_VERSION.into()),
+        ("name", doc.name.as_str().into()),
+        (
+            "origin",
+            json!({
+                "mimetype": "text/plain",
+                "binary_hash": fnv1a(&doc.name),
+                "filename": doc.name,
+            }),
+        ),
+        (
+            "furniture",
+            json!({
+                "self_ref": "#/furniture",
+                "children": [],
+                "content_layer": "furniture",
+                "name": "_root_",
+                "label": "unspecified",
+            }),
+        ),
+        (
+            "body",
+            object([
+                ("self_ref", "#/body".into()),
+                ("children", Value::Array(body)),
+                ("content_layer", "body".into()),
+                ("name", "_root_".into()),
+                ("label", "unspecified".into()),
+            ]),
+        ),
+        ("groups", Value::Array(std::mem::take(&mut b.groups))),
+        ("texts", Value::Array(std::mem::take(&mut b.texts))),
+        ("pictures", Value::Array(std::mem::take(&mut b.pictures))),
+        ("tables", Value::Array(std::mem::take(&mut b.tables))),
+        (
+            "key_value_items",
+            Value::Array(std::mem::take(&mut b.key_value_items)),
+        ),
+        ("form_items", Value::Array(Vec::new())),
+        ("pages", Value::Object(pages)),
+    ]);
 
     // docling-core's `validate_document` — a pydantic `model_validator` every
     // `DoclingDocument` passes through when a `ConversionResult` (or a
@@ -594,6 +618,24 @@ fn table_data_with(t: &Table, raw: bool) -> Value {
     })
 }
 
+/// A one-entry docling `prov` array: `page_no`, `bbox` (`l t r b` +
+/// `coord_origin`) and `charspan`, in pydantic field order.
+fn prov_value(page_no: usize, [l, t, r, b]: [f64; 4], origin: &str, charspan: [usize; 2]) -> Value {
+    let bbox = object([
+        ("l", l.into()),
+        ("t", t.into()),
+        ("r", r.into()),
+        ("b", b.into()),
+        ("coord_origin", origin.into()),
+    ]);
+    let span = Value::Array(vec![charspan[0].into(), charspan[1].into()]);
+    Value::Array(vec![object([
+        ("page_no", page_no.into()),
+        ("bbox", bbox),
+        ("charspan", span),
+    ])])
+}
+
 #[derive(Default)]
 struct Builder {
     /// Write the internal `_notes` / `_note_body` keys of tree text items
@@ -682,14 +724,12 @@ impl Builder {
             } else {
                 charspan
             };
-            return json!([{
-                "page_no": page_no,
-                "bbox": {
-                    "l": r2(l), "t": r2(t), "r": r2(r), "b": r2(b),
-                    "coord_origin": if bottom_left { "BOTTOMLEFT" } else { "TOPLEFT" },
-                },
-                "charspan": charspan,
-            }]);
+            return prov_value(
+                page_no,
+                [r2(l), r2(t), r2(r), r2(b)],
+                if bottom_left { "BOTTOMLEFT" } else { "TOPLEFT" },
+                charspan,
+            );
         }
         let Some([x0, y0, x1, y1]) = self.pending_loc else {
             return json!([]);
@@ -698,23 +738,19 @@ impl Builder {
         // (a slide's speaker notes, say). docling writes a zero bbox for it,
         // not a box spanning the page, which is what denormalizing would give.
         if [x0, y0, x1, y1] == [0, 0, 0, 0] {
-            return json!([{
-                "page_no": self.cur_page,
-                "bbox": { "l": 0.0, "t": 0.0, "r": 0.0, "b": 0.0, "coord_origin": "BOTTOMLEFT" },
-                "charspan": [0, char_len],
-            }]);
+            return prov_value(self.cur_page, [0.0; 4], "BOTTOMLEFT", [0, char_len]);
         }
-        json!([{
-            "page_no": self.cur_page,
-            "bbox": {
-                "l": r2(x0 as f64 * self.cur_w / 512.0),
-                "t": r2(self.cur_h - y0 as f64 * self.cur_h / 512.0),
-                "r": r2(x1 as f64 * self.cur_w / 512.0),
-                "b": r2(self.cur_h - y1 as f64 * self.cur_h / 512.0),
-                "coord_origin": "BOTTOMLEFT",
-            },
-            "charspan": [0, char_len],
-        }])
+        prov_value(
+            self.cur_page,
+            [
+                r2(x0 as f64 * self.cur_w / 512.0),
+                r2(self.cur_h - y0 as f64 * self.cur_h / 512.0),
+                r2(x1 as f64 * self.cur_w / 512.0),
+                r2(self.cur_h - y1 as f64 * self.cur_h / 512.0),
+            ],
+            "BOTTOMLEFT",
+            [0, char_len],
+        )
     }
 
     /// Adopt a node's own location field (tables, formulas, list items carry
@@ -739,7 +775,7 @@ impl Builder {
                 let refs = comments
                     .iter()
                     .filter_map(|i| self.comment_groups.get(*i))
-                    .map(|r| json!({ "$ref": r }))
+                    .map(ref_value)
                     .collect();
                 (item, refs)
             })
@@ -840,7 +876,7 @@ impl Builder {
             };
             refs.push(r);
         }
-        let ref_of = |id: usize| json!({ "$ref": refs[id] });
+        let ref_of = |id: usize| ref_value(refs[id].as_str());
         for (id, item) in tree.items.iter().enumerate() {
             if item.deleted {
                 continue;
@@ -1186,7 +1222,7 @@ impl Builder {
                     if let Some(children) =
                         self.groups[group_index(&self_ref)]["children"].as_array_mut()
                     {
-                        children.push(json!({ "$ref": child }));
+                        children.push(ref_value(child.as_str()));
                     }
                     self.comment_groups.push(if *refs_note_text {
                         child
@@ -1266,8 +1302,8 @@ impl Builder {
                 if let Some(cap) = caption.as_deref().filter(|c| !c.is_empty()) {
                     let prov = self.prov_json(unescape_text(cap).chars().count(), true);
                     let cap_ref = self.add_text_with("caption", cap, parent, json!({}), prov);
-                    self.pending_siblings.push(json!({ "$ref": cap_ref }));
-                    captions.push(json!({ "$ref": cap_ref }));
+                    self.pending_siblings.push(ref_value(cap_ref.as_str()));
+                    captions.push(ref_value(cap_ref));
                 }
                 let prov = self.take_prov(0);
                 Some(self.push_picture(prov, captions, Vec::new(), None, Some(meta), parent))
@@ -1411,7 +1447,7 @@ impl Builder {
         let region_index = self.field_regions.len() - 1;
         let mut item_refs = Vec::new();
         for item in items {
-            item_refs.push(json!({ "$ref": self.add_field_item(item, &self_ref) }));
+            item_refs.push(ref_value(self.add_field_item(item, &self_ref)));
         }
         self.field_regions[region_index] = json!({
             "self_ref": self_ref,
@@ -1487,7 +1523,7 @@ impl Builder {
                     ("field_value", Some(kind)) => json!({ "kind": kind }),
                     _ => json!({}),
                 };
-                child_refs.push(json!({ "$ref": self.add_text(label, text, &self_ref, extra) }));
+                child_refs.push(ref_value(self.add_text(label, text, &self_ref, extra)));
             }
         }
         self.field_items[item_index] = json!({
@@ -1545,22 +1581,24 @@ impl Builder {
             Some((track, cue)) => (cue, Some(track)),
             None => (unescape_text(text), None),
         };
-        let mut item = json!({
-            "self_ref": self_ref,
-            "parent": { "$ref": parent },
-            "children": [],
-            "content_layer": "body",
-            "label": label,
-            "prov": prov,
-        });
+        let mut m = serde_json::Map::with_capacity(8 + usize::from(track.is_some()));
+        m.insert("self_ref".into(), Value::String(self_ref.clone()));
+        m.insert("parent".into(), ref_value(parent));
+        m.insert("children".into(), Value::Array(Vec::new()));
+        m.insert("content_layer".into(), "body".into());
+        m.insert("label".into(), label.into());
+        m.insert("prov".into(), prov);
         // `DocItem.source` follows `prov` (docling's field order), only when
         // set: an ASR segment's track (#614).
         if let Some(track) = track {
-            item["source"] = json!([track_json(&track)]);
+            m.insert("source".into(), Value::Array(vec![track_json(&track)]));
         }
-        item["orig"] = json!(raw);
-        item["text"] = json!(raw);
-        merge(&mut item, extra);
+        m.insert("orig".into(), Value::String(raw.clone()));
+        m.insert("text".into(), Value::String(raw));
+        let mut item = Value::Object(m);
+        if extra.as_object().is_some_and(|e| !e.is_empty()) {
+            merge(&mut item, extra);
+        }
         self.texts.push(item);
         self_ref
     }
@@ -1670,7 +1708,7 @@ impl Builder {
                         .extend(nested);
                 }
             }
-            children.push(json!({ "$ref": item_ref }));
+            children.push(ref_value(item_ref));
             i = j;
         }
         self.groups[group_index(&self_ref)] = json!({
@@ -1787,7 +1825,7 @@ impl Builder {
         if self.cur_page > 0 && location.is_some() {
             self.pending_loc = location;
         }
-        let cap_ref = json!({ "$ref": self.add_text("caption", text, cap_parent, extra) });
+        let cap_ref = ref_value(self.add_text("caption", text, cap_parent, extra));
         match choice {
             CaptionParent::Item => return (vec![cap_ref.clone()], vec![cap_ref]),
             // Created ahead of the item, so it precedes the item in the
@@ -1973,7 +2011,7 @@ impl Builder {
             for i in order {
                 if let Some(r) = self.add_node(&nodes[i], parent) {
                     slots[i].append(&mut self.pending_siblings);
-                    slots[i].push(json!({ "$ref": r }));
+                    slots[i].push(ref_value(r));
                     slots[i].append(&mut self.pending_after);
                 }
                 if parent == "#/body" {
@@ -2006,7 +2044,7 @@ impl Builder {
             } else {
                 if let Some(r) = self.add_node(&nodes[i], parent) {
                     children.append(&mut self.pending_siblings);
-                    children.push(json!({ "$ref": r }));
+                    children.push(ref_value(r));
                     children.append(&mut self.pending_after);
                 }
                 i += 1;
@@ -2040,11 +2078,11 @@ impl Builder {
                 continue; // nested item — handled inside add_list
             }
             if k > seg && *first_in_list {
-                out.push(json!({ "$ref": self.add_list(&run[seg..k], parent) }));
+                out.push(ref_value(self.add_list(&run[seg..k], parent)));
                 seg = k;
             }
         }
-        out.push(json!({ "$ref": self.add_list(&run[seg..], parent) }));
+        out.push(ref_value(self.add_list(&run[seg..], parent)));
     }
 }
 
@@ -2065,11 +2103,27 @@ fn ref_index(self_ref: &str) -> Option<usize> {
 
 /// Merge the key/values of `extra` (an object) into `target` (an object).
 fn merge(target: &mut Value, extra: Value) {
-    if let (Some(t), Some(e)) = (target.as_object_mut(), extra.as_object()) {
-        for (k, v) in e {
-            t.insert(k.clone(), v.clone());
-        }
+    if let (Some(t), Value::Object(e)) = (target.as_object_mut(), extra) {
+        t.extend(e);
     }
+}
+
+/// A JSON object of exactly these entries, in this order. The hot per-item
+/// constructors use this instead of `json!`: the macro grows its map by
+/// doubling (an 8-key item kept 14 slots) and deep-copies every interpolated
+/// `Value` through `to_value`. On a long text-heavy PDF those item objects
+/// *are* the export's footprint (the same reasoning as [`cell_value`]).
+fn object<const N: usize>(entries: [(&str, Value); N]) -> Value {
+    let mut m = serde_json::Map::with_capacity(N);
+    for (k, v) in entries {
+        m.insert(k.to_owned(), v);
+    }
+    Value::Object(m)
+}
+
+/// A `{"$ref": r}` reference object.
+fn ref_value(r: impl Into<String>) -> Value {
+    object([("$ref", Value::String(r.into()))])
 }
 
 /// Reverse [`crate`]'s Markdown text escaping (HTML entities + `\_`).

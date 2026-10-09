@@ -783,16 +783,42 @@ pub fn content_diagnosis(bytes: &[u8]) -> String {
 /// not misrouted into OCR: only a document averaging at most one line per page
 /// **and** totalling fewer than 32 characters is called vestigial.
 pub fn text_layer_is_vestigial(pages: &[crate::pdfium_backend::PdfPage]) -> bool {
-    let lines: usize = pages.iter().map(|p| p.cells.len()).sum();
-    if lines == 0 {
-        return true;
+    let mut tally = TextLayerTally::default();
+    pages.iter().for_each(|p| tally.add(p));
+    tally.is_vestigial()
+}
+
+/// [`text_layer_is_vestigial`]'s counts, accumulated a page at a time so a
+/// streaming caller need not keep the pages around to decide.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TextLayerTally {
+    pages: usize,
+    lines: usize,
+    chars: usize,
+}
+
+impl TextLayerTally {
+    pub fn add(&mut self, page: &crate::pdfium_backend::PdfPage) {
+        self.pages += 1;
+        self.lines += page.cells.len();
+        self.chars += page
+            .cells
+            .iter()
+            .map(|c| c.text.chars().count())
+            .sum::<usize>();
     }
-    let chars: usize = pages
-        .iter()
-        .flat_map(|p| &p.cells)
-        .map(|c| c.text.chars().count())
-        .sum();
-    lines <= pages.len() && chars < 32
+
+    /// The verdict over the pages added so far.
+    pub fn is_vestigial(&self) -> bool {
+        self.lines == 0 || (self.lines <= self.pages && self.chars < 32)
+    }
+
+    /// Whether the pages added so far already rule vestigial out for a
+    /// document of `total_pages`, whatever the remaining pages hold — both
+    /// counts only grow, so a caller may stop parsing pages it does not need.
+    pub fn proves_text(&self, total_pages: usize) -> bool {
+        self.lines > 0 && (self.lines > total_pages || self.chars >= 32)
+    }
 }
 
 /// Why the cross-reference repair did or did not fire, for the `text_layer`
@@ -1232,6 +1258,45 @@ impl PageTextParser {
             checkboxes: crate::checkbox::find(&inks, h),
         }
     }
+
+    /// Pages in the document's page tree.
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// The 0-based page `index` as the text-layer-only conversion sees it —
+    /// one element of [`pdf_text_pages`], parsed on demand so a caller can
+    /// drop each page once it is assembled instead of holding the whole
+    /// document's cells. A blank page (no cells) for an index the page tree
+    /// doesn't have.
+    pub fn text_page(&mut self, index: usize) -> crate::pdfium_backend::PdfPage {
+        let (w, h, (glyphs, inks)) = match self.pages.get(index) {
+            Some(&pid) => {
+                let (w, h) = page_size(&self.doc, pid);
+                (w, h, page_glyphs_and_inks(&self.doc, pid, &mut self.caches))
+            }
+            None => (0.0, 0.0, Default::default()),
+        };
+        let (mut prose, mut words) = crate::dp_lines::line_and_word_cells(&glyphs, h, true);
+        drop_overpainted_cells(&mut prose);
+        drop_overpainted_cells(&mut words);
+        crate::pdfium_backend::PdfPage {
+            #[cfg(feature = "ocr-prep")]
+            image_layout: None,
+            width: w,
+            height: h,
+            // Cells are native PDF points; there is no rendered bitmap.
+            scale: 1.0,
+            cells: prose,
+            code_cells: crate::pdfium_backend::code_cells_from_glyphs(&glyphs, h),
+            word_cells: words,
+            checkboxes: crate::checkbox::find(&inks, h),
+            #[cfg(feature = "ocr-prep")]
+            image: image::RgbImage::new(1, 1),
+            links: Vec::new(),
+            rotation: 0,
+        }
+    }
 }
 
 /// Full parser text layer: prose + word + code cells per page, glyphs parsed once.
@@ -1252,37 +1317,11 @@ pub fn pdf_all_cells(bytes: &[u8]) -> Vec<PageParserCells> {
 /// wasm32. A page the parser can't read (no text layer) comes back with empty
 /// cells; there is no pdfium fallback on this path.
 pub fn pdf_text_pages(bytes: &[u8]) -> Vec<crate::pdfium_backend::PdfPage> {
-    let Some(doc) = load_document(bytes) else {
+    let Some(mut parser) = PageTextParser::open(bytes) else {
         return Vec::new();
     };
-    let mut caches = DocCaches::default();
-    let mut pages: Vec<_> = doc.get_pages().into_iter().collect();
-    pages.sort_by_key(|(n, _)| *n);
-    pages
-        .into_iter()
-        .map(|(_, pid)| {
-            let (w, h) = page_size(&doc, pid);
-            let (glyphs, inks) = page_glyphs_and_inks(&doc, pid, &mut caches);
-            let (mut prose, mut words) = crate::dp_lines::line_and_word_cells(&glyphs, h, true);
-            drop_overpainted_cells(&mut prose);
-            drop_overpainted_cells(&mut words);
-            crate::pdfium_backend::PdfPage {
-                #[cfg(feature = "ocr-prep")]
-                image_layout: None,
-                width: w,
-                height: h,
-                // Cells are native PDF points; there is no rendered bitmap.
-                scale: 1.0,
-                cells: prose,
-                code_cells: crate::pdfium_backend::code_cells_from_glyphs(&glyphs, h),
-                word_cells: words,
-                checkboxes: crate::checkbox::find(&inks, h),
-                #[cfg(feature = "ocr-prep")]
-                image: image::RgbImage::new(1, 1),
-                links: Vec::new(),
-                rotation: 0,
-            }
-        })
+    (0..parser.page_count())
+        .map(|i| parser.text_page(i))
         .collect()
 }
 

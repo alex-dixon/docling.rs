@@ -306,26 +306,28 @@ pub fn convert_text_layer_pages(
         }
     }
     let mut doc = DoclingDocument::new(name);
-    let mut total = 0usize;
-    let parsed = textparse::pdf_text_pages(bytes);
-    // No pages at all: tell a file nothing can open apart from a PDF that
-    // merely has no text layer (the caller's "scanned? needs OCR" hint).
-    if parsed.is_empty() && textparse::load_document(bytes).is_none() {
+    // A file nothing can open is an error, not a PDF that merely has no
+    // text layer (the caller's "scanned? needs OCR" hint).
+    let Some(mut parser) = textparse::PageTextParser::open(bytes) else {
         return Err(PdfError::Document(UNREADABLE.into()));
-    }
-    // A vestigial layer (a few typed-in form fields over scanned pages) is not
-    // the document's text: return the empty document, which callers already
-    // report as "no text layer" — so an OCR-capable caller falls back to OCR
-    // instead of proudly extracting thirteen characters.
-    if textparse::text_layer_is_vestigial(&parsed) {
-        return Ok(doc);
-    }
-    for (i, page) in parsed.into_iter().enumerate() {
-        total += 1;
-        if let Some((first, last)) = pages {
-            if i + 1 < first || i + 1 > last {
-                continue;
-            }
+    };
+    // Pages are parsed, assembled and dropped one at a time: holding every
+    // page's cells until the end made the peak scale with the whole file —
+    // and a page window still paid for every page outside it.
+    let total = parser.page_count();
+    let mut tally = textparse::TextLayerTally::default();
+    for i in 0..total {
+        let selected = pages.is_none_or(|(first, last)| (first..=last).contains(&(i + 1)));
+        // A page outside the window only feeds the vestigial verdict below,
+        // so it is parsed only until that verdict is settled (on any real
+        // text layer, by the first page or two).
+        if !selected && tally.proves_text(total) {
+            continue;
+        }
+        let page = parser.text_page(i);
+        tally.add(&page);
+        if !selected {
+            continue;
         }
         let mut regions = Vec::new();
         assemble::add_orphan_regions(&mut regions, &page.cells);
@@ -337,6 +339,13 @@ pub fn convert_text_layer_pages(
         doc.nodes.extend(nodes);
         doc.links.extend(links);
     }
+    // A vestigial layer (a few typed-in form fields over scanned pages) is not
+    // the document's text: return the empty document, which callers already
+    // report as "no text layer" — so an OCR-capable caller falls back to OCR
+    // instead of proudly extracting thirteen characters.
+    if tally.is_vestigial() {
+        return Ok(DoclingDocument::new(name));
+    }
     if let Some((first, last)) = pages {
         if first > total {
             return Err(PdfError::Pdfium(format!(
@@ -345,6 +354,9 @@ pub fn convert_text_layer_pages(
         }
     }
     assemble::merge_continuations(&mut doc.nodes);
+    // Grown a page at a time, the node vector can be up to half spare
+    // capacity — hundreds of MB on a long document, held for its lifetime.
+    doc.nodes.shrink_to_fit();
     Ok(doc)
 }
 

@@ -475,14 +475,26 @@ pub(crate) fn line_and_word_cells(
     let mut word_run: Vec<Cell> = built.clone();
     let mut cells = built;
     contract(&mut cells, euclidean, LINE_FACTORS);
-    let lines: Vec<TextCell> = cells.into_iter().map(to_text_cell).collect();
+    let lines = to_text_cells(cells, to_text_cell);
     contract(&mut word_run, euclidean, WORD_FACTORS);
-    let words: Vec<TextCell> = word_run
-        .into_iter()
-        .filter(|c| !c.text.trim().is_empty())
-        .map(to_text_cell)
-        .collect();
+    word_run.retain(|c| !c.text.trim().is_empty());
+    let words = to_text_cells(word_run, to_text_cell);
     (lines, words)
+}
+
+/// Map the contracted cells into a freshly allocated, exactly sized vector.
+///
+/// A plain `into_iter().map(..).collect()` would take std's in-place-collect
+/// path and hand back the *input's* allocation: one ~150-byte [`Cell`] slot per
+/// glyph of the page, reinterpreted as ~4× as many 40-byte [`TextCell`] slots,
+/// while the contraction leaves a few glyphs per cell. Callers keep these
+/// vectors for the whole document (the text-layer path holds every page), so
+/// the dead capacity added up to ~30× the cells' real size — gigabytes on a
+/// long table-heavy PDF.
+fn to_text_cells(cells: Vec<Cell>, f: impl Fn(Cell) -> TextCell) -> Vec<TextCell> {
+    let mut out = Vec::with_capacity(cells.len());
+    out.extend(cells.into_iter().map(f));
+    out
 }
 
 fn is_rtl_char(c: char) -> bool {
@@ -639,5 +651,28 @@ mod tests {
         let lines = line_cells(&lig, 792.0, true);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "fi");
+    }
+
+    /// The returned vectors own no more than their cells. Collecting straight
+    /// from the per-glyph `Cell` buffer reused its allocation (std's in-place
+    /// collect), so a page kept ~4 slots per *glyph* — on a dense table page,
+    /// 30× the cells' size, for every page the text-layer path held.
+    #[test]
+    fn cells_do_not_keep_the_glyph_buffer() {
+        // Ten rows of `777 777 …`: abutting glyphs, words split by space glyphs.
+        let glyphs: Vec<Glyph> = (0..400)
+            .map(|i| {
+                let x = (i % 40) as f32 * 6.0;
+                let ch = if i % 4 == 3 { ' ' } else { '7' };
+                let mut g = glyph(ch, x, x + 6.0);
+                let row = (i / 40) as f32 * 14.0;
+                (g.b, g.t, g.lb, g.lt) = (100.0 + row, 110.0 + row, 98.0 + row, 110.0 + row);
+                g
+            })
+            .collect();
+        let (lines, words) = line_and_word_cells(&glyphs, 792.0, true);
+        assert_eq!((lines.len(), words.len()), (10, 100));
+        assert_eq!(lines.capacity(), lines.len());
+        assert_eq!(words.capacity(), words.len());
     }
 }
