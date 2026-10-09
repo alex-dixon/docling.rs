@@ -25,7 +25,7 @@ docling_result_free(r);
 ```
 
 - The result is never `NULL`; exactly one of output/error is set.
-- Output is NUL-terminated, so `to` = `md` / `json` / `latex` / `html` / `pandoc` reads as a plain
+- Output is NUL-terminated, so `to` = `md` / `json` / `text` / `latex` / `html` / `pandoc` / `vtt` reads as a plain
   C string; `to` = `dclx` is a binary zip — always pair
   `docling_result_output()` with `docling_result_output_len()` there.
 - `filename` selects the input format by extension (same table as the CLI).
@@ -45,7 +45,7 @@ column.
 
 | Key | Values | Meaning |
 |---|---|---|
-| `to` | `md` (default) \| `json` \| `dclx` \| `latex` \| `html` \| `pandoc` | Output format (`latex` = docling 2.124's LaTeX document, #317; `pandoc` = Pandoc's JSON AST for `pandoc -f json`, #515) |
+| `to` | `md` (default) \| `json` \| `text` \| `dclx` \| `latex` \| `html` \| `pandoc` \| `vtt` | Output format (`latex` = docling 2.124's LaTeX document, #317; `pandoc` = Pandoc's JSON AST for `pandoc -f json`, #515; `vtt` = WebVTT subtitles, docling's `--to vtt`, #614) |
 | `images` | `placeholder` (default) \| `embedded` | Pictures in Markdown: comment placeholder or base64 data URIs |
 | `strict`, `compact_tables`, `page_break_placeholder` | bool, bool, string | Markdown shaping: docling-faithful Markdown; unpadded tables (#271); text between pages |
 | `fetch_images`, `list_attachments`, `skip_empty_cells`, `ebcdic_layout`, `encoding`, `xbrl_taxonomy`, `use_web_browser` | — | Declarative formats: external `<img src>` (the embedder owns its network policy); the email Attachments section (#251); sparse spreadsheet grids (#271); the EBCDIC copybook (#252); text encoding; the XBRL taxonomy directory; headless-browser HTML pre-render |

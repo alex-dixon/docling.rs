@@ -1692,6 +1692,35 @@ async fn pandoc_batch_items_and_api_version_check() {
     );
 }
 
+// --- #614: WebVTT output -------------------------------------------------
+
+#[tokio::test]
+async fn vtt_output_round_trips_cues_and_batches_inline() {
+    let vtt = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.500\n<v Ann>Hello & welcome\n";
+    let (ct, body) = multipart("talk.vtt", vtt, &[("to", "vtt")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/vtt; charset=utf-8"
+    );
+    assert_eq!(
+        body_string(response).await,
+        "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\n<v Ann>Hello &amp; welcome"
+    );
+    // A document without timed text is the bare header; batch items carry
+    // the file inline under `vtt`.
+    let (ct, body) = multipart_files(&[("a.vtt", vtt), ("b.md", b"# B\n")], &[("to", "vtt")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body_string(response).await).unwrap();
+    assert!(
+        v["results"][0]["vtt"].as_str().unwrap().contains("<v Ann>"),
+        "{v}"
+    );
+    assert_eq!(v["results"][1]["vtt"], "WEBVTT B", "{v}");
+}
+
 // --- #317: LaTeX output --------------------------------------------------
 
 #[tokio::test]

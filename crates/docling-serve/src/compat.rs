@@ -54,8 +54,9 @@ enum Format {
 }
 
 impl Format {
-    /// Upstream's `OutputFormat` value; formats this server has no exporter
-    /// for at all (`yaml`, `vtt`, …) are `None` and ignored.
+    /// Upstream's `OutputFormat` value; formats this compatibility layer
+    /// does not render (`yaml`, `vtt` — `/v1/convert?to=vtt` does, #614 — …)
+    /// are `None` and ignored.
     fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
             "md" | "markdown" => Self::Md,

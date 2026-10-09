@@ -433,7 +433,8 @@ constructor; output options (`to`, `imageMode`, `artifactsDir`) are per call.
 
 ### Options
 
-- `to`: `"markdown"` (default), `"json"`, `"html"`, `"latex"` or `"pandoc"`
+- `to`: `"markdown"` (default), `"json"`, `"html"`, `"text"`, `"latex"`, `"vtt"`
+  (WebVTT subtitles from an audio/video transcript or a `.vtt`, #614) or `"pandoc"`
   (Pandoc's JSON AST — pipe it to `pandoc -f json -t docx`; pictures follow
   `imageMode`).
 - `imageMode`: `"placeholder"` (default), `"embedded"`, or `"referenced"`.

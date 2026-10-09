@@ -580,7 +580,7 @@ components:
   schemas:
     To:
       type: string
-      enum: [md, json, html, text, dclx, chunks, latex, pandoc, images]
+      enum: [md, json, html, text, dclx, chunks, latex, pandoc, vtt, images]
       default: md
       description: |
         `md` — Markdown, streamed as it converts.
@@ -596,6 +596,10 @@ components:
         `dclx` — DocLang OPC archive, returned as a download.
         `latex` — a complete LaTeX document (docling 2.124's `--to latex`,
         #317), `text/x-tex`; in a batch, inline under `latex`.
+        `vtt` — WebVTT subtitles (docling's `--to vtt`, #614): a cue per
+        timed text item — an audio/video transcript's segments, a WebVTT
+        input's cues — or the bare `WEBVTT` header when there is none;
+        `text/vtt`; in a batch, inline under `vtt`.
         `chunks` — chunker records (hierarchical, plus hybrid when a tokenizer is installed).
         `images` — PDF only: per-page PNG renders as
         `{"pages": [{"page", "width", "height", "png_base64"}]}` (no

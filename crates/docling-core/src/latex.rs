@@ -531,7 +531,7 @@ fn render_one(node: &Node, list_level: usize, inline: bool, parts: &mut Vec<Stri
         // Notes-layer comments are omitted; an annotated item renders itself.
         Node::CommentSection { .. } => {}
         Node::Commented { inner, .. } => render_one(inner, list_level, inline, parts),
-        Node::Located { inner, .. } | Node::Prov { inner, .. } => {
+        Node::Located { inner, .. } | Node::Prov { inner, .. } | Node::Track { inner, .. } => {
             render_one(inner, list_level, inline, parts)
         }
         // A lone list item outside a run (defensive; `render_nodes` folds
