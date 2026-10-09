@@ -108,7 +108,13 @@ pub struct ConverterOptions {
     /// the CLI's `--text-layer-only` (what `noOcr` meant before 2.0, #611).
     /// Default `false`.
     pub text_layer_only: Option<bool>,
-    /// The password of an encrypted PDF (docling's `--pdf-password`, #611).
+    /// The password of an encrypted PDF or Office document — .docx/.xlsx/
+    /// .pptx/.doc/.xls/.ppt (#611, #625).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// `password` under its pre-#625 name (docling's PDF-only
+    /// `--pdf-password`), still read; set one of the two.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pdf_password: Option<String>,
     /// Skip TableFormer — tables come from the layout model's geometry
     /// instead (the CLI's `--no-table-former`, #577). Default `false`.
@@ -281,7 +287,13 @@ pub struct ConvertOptions {
     /// the CLI's `--text-layer-only` (what `noOcr` meant before 2.0, #611).
     /// Default `false`.
     pub text_layer_only: Option<bool>,
-    /// The password of an encrypted PDF (docling's `--pdf-password`, #611).
+    /// The password of an encrypted PDF or Office document — .docx/.xlsx/
+    /// .pptx/.doc/.xls/.ppt (#611, #625).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// `password` under its pre-#625 name (docling's PDF-only
+    /// `--pdf-password`), still read; set one of the two.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pdf_password: Option<String>,
     /// Skip TableFormer — tables come from the layout model's geometry
     /// instead (the CLI's `--no-table-former`, #577). Default `false`.
@@ -1201,8 +1213,8 @@ pub struct Pipeline {
     // queue rather than reload models.
     inner: Arc<Mutex<RsPipeline>>,
     strict: bool,
-    /// The constructor's `pdfPassword` (#611), for every conversion.
-    pdf_password: Option<String>,
+    /// The constructor's `password` (#611, #625), for every conversion.
+    password: Option<String>,
 }
 
 /// The PDF/image options of a [`ConverterOptions`] resolved into the typed
@@ -1217,8 +1229,8 @@ struct WarmPipelineConfig {
     no_ocr: bool,
     /// The text-layer fast path (`textLayerOnly`).
     text_layer_only: bool,
-    /// The password of an encrypted PDF (#611).
-    pdf_password: Option<String>,
+    /// The password of an encrypted PDF or Office document (#611, #625).
+    password: Option<String>,
     no_table_former: bool,
     force_full_page_ocr: bool,
     no_text_panels: bool,
@@ -1254,7 +1266,7 @@ fn warm_pipeline_config(o: &ConverterOptions) -> Result<WarmPipelineConfig> {
     Ok(WarmPipelineConfig {
         no_ocr: s.ocr_disabled(),
         text_layer_only: s.text_layer_only.unwrap_or(false),
-        pdf_password: s.pdf_password.clone(),
+        password: s.password.clone(),
         no_table_former: s.no_table_former.unwrap_or(false),
         force_full_page_ocr: s.force_full_page_ocr.unwrap_or(false),
         no_text_panels: s.no_text_panels.unwrap_or(false),
@@ -1277,7 +1289,7 @@ impl Pipeline {
     /// enrichment switches (`doPictureClassification`, `doCodeEnrichment`,
     /// `doFormulaEnrichment`, #423) and every PDF/image option the one-shot
     /// calls honour — `ocrEngine`, `ocrLang`, `ocrMode`, `ocrScale`,
-    /// `noOcr`, `textLayerOnly`, `pdfPassword`, `forceFullPageOcr`,
+    /// `noOcr`, `textLayerOnly`, `password`, `forceFullPageOcr`,
     /// `noTextPanels`, `headingHierarchy`,
     /// `pages` — are read here and apply to every conversion on this
     /// instance, validated exactly as `DocumentConverter` validates them
@@ -1339,7 +1351,7 @@ impl Pipeline {
         Ok(Self {
             inner: Arc::new(Mutex::new(pipeline)),
             strict,
-            pdf_password: warm.pdf_password,
+            password: warm.password,
         })
     }
 
@@ -1441,7 +1453,7 @@ impl Pipeline {
 impl Pipeline {
     fn output_cfg(&self, options: Option<OutputOptions>) -> Result<ConvertConfig> {
         let mut cfg = output_config(options, self.strict)?;
-        cfg.opts.pdf_password = self.pdf_password.clone();
+        cfg.opts.password = self.password.clone();
         Ok(cfg)
     }
 }
@@ -1465,11 +1477,7 @@ fn run_pipeline(
     let mut doc = match source.format {
         InputFormat::Pdf => {
             let c = pipe
-                .convert_outcome(
-                    &source.bytes,
-                    cfg.opts.pdf_password.as_deref(),
-                    &source.name,
-                )
+                .convert_outcome(&source.bytes, cfg.opts.password.as_deref(), &source.name)
                 .map_err(convert_err)?;
             errors.extend(c.completion.message().map(docling::ErrorItem::timeout));
             c.document
@@ -1544,7 +1552,7 @@ fn stream_pipeline(
     };
     match source.format {
         InputFormat::Pdf => {
-            let password = cfg.opts.pdf_password.as_deref();
+            let password = cfg.opts.password.as_deref();
             let result =
                 pipe.convert_streaming(&source.bytes, password, &source.name, |nodes, links| {
                     emit_chunk(streamer.push(&nodes, &links));
@@ -2540,7 +2548,7 @@ mod tests {
             WarmPipelineConfig {
                 no_ocr: false,
                 text_layer_only: false,
-                pdf_password: None,
+                password: None,
                 no_table_former: false,
                 force_full_page_ocr: false,
                 no_text_panels: false,

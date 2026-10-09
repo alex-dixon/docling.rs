@@ -333,7 +333,7 @@ EasyOCR / RapidOCR / ocrmac use the built-in PP-OCR) and `ocr_lang` (the
 first code this build reads). Anything this server has no equivalent for —
 `pdf_backend`, `table_mode`, `abort_on_error`, picture-description and preset
 knobs — is accepted and ignored, so a client's extra parameters never fail a
-conversion. This server's own option names (`strict`, `pdf_password`, …) work
+conversion. This server's own option names (`strict`, `password`, …) work
 there too. `doctags_content` stays `null`: there is no DocTags writer
 (`doclang_content` carries its successor). `--api-key KEY`, or upstream's
 `DOCLING_SERVE_API_KEY`, requires `X-Api-Key` on every `/v1` route; `/health`,
@@ -369,7 +369,7 @@ honoring `pages=A-B` and a `scale` of 0.1–4.0 pixels per PDF point (default
 
 Options per request: `to=md|json|html|text|dclx|chunks|latex|pandoc|images` (`pandoc_api_version` checks the Pandoc API a `to=pandoc` caller expects), `strict`, `images=placeholder|embedded`,
 `skip_empty_cells`, `compact_tables`, `md_page_break_placeholder` (text between pages in Markdown),
-`no_ocr` (docling's `--no-ocr`; `skip_ocr` its pre-2.0 name), `text_layer_only`, `pdf_password`, `no_table_former`, `no_text_panels`, `heading_hierarchy`, `force_full_page_ocr`, `pages`,
+`no_ocr` (docling's `--no-ocr`; `skip_ocr` its pre-2.0 name), `text_layer_only`, `password` (`pdf_password` too), `no_table_former`, `no_text_panels`, `heading_hierarchy`, `force_full_page_ocr`, `pages`,
 `do_picture_classification`, `do_code_enrichment`, `do_formula_enrichment` (#423: the
 [enrichment models](#enrichment-models-picture-classification-code-formulas), named as
 docling's `PdfPipelineOptions` flags; a request that changes the enrichment mix rebuilds the
@@ -1450,7 +1450,8 @@ A script written for Python docling's CLI runs as is: `--page-range 1-4`
 (`--pages`), `--image-export-mode referenced` (`--images`), `--no-tables`
 (`--no-table-former`), `--no-ocr` (never OCR, keep layout and tables —
 docling's meaning since 2.0; the old text-layer fast path is
-`--text-layer-only`), `--pdf-password SECRET` (also `--password`) and
+`--text-layer-only`), `--pdf-password SECRET` (= `--password`, which opens
+encrypted Office documents too — see below) and
 `--output-file PATH`, which writes the one result to exactly that path —
 docling's rule: exactly one input document and one `--to` format, else an
 error naming the failing condition; `--images referenced` pictures land in
@@ -1460,6 +1461,24 @@ alias: it is `--force-full-page-ocr` (or `--ocr-mode full_page`).
 ```bash
 docling-rs report.pdf --page-range 1-3 --no-ocr --output-file out/report.md
 docling-rs locked.pdf --pdf-password 1234 --to json --output-file locked.json
+```
+
+## Encrypted Office documents
+
+A password-protected `.docx`, `.xlsx`, `.pptx`, `.doc`, `.xls` or `.ppt` converts
+with its password (#625 — beyond docling, whose password option opens PDFs
+only). It is the same option as the PDF password: `--password` (or docling's
+`--pdf-password`), `--password-file PATH` to keep it out of the process list,
+`password` in serve, Python and Node (`pdf_password` / `pdfPassword`, the
+earlier name, still work). Files with only a *modify*
+password convert without one (PowerPoint encrypts them with its built-in
+default password, which is tried automatically, as is Excel's). Without the
+password — or with a wrong one — the conversion fails saying so; the schemes
+are listed in `docs/MIGRATION.md`.
+
+```bash
+docling-rs budget.xlsx --password-file ~/.budget-password
+curl -F file=@deck.pptx -F password=1234 localhost:5001/v1/convert
 ```
 
 ## Batch conversion — several sources, `--input` / `--output`

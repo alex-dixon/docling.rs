@@ -8,7 +8,8 @@
 //! name, is an alias, and the skip-everything fast path `--no-ocr` used to
 //! be is `--text-layer-only`. docling's other spellings are accepted too:
 //! `--page-range` (`--pages`), `--image-export-mode` (`--images`),
-//! `--no-tables` (`--no-table-former`), `--pdf-password`, `--output-file`.
+//! `--no-tables` (`--no-table-former`), `--pdf-password` (`--password`),
+//! `--output-file`.
 //!
 //! `--help` prints the full flag list and `--version` the version plus the
 //! optional features the binary carries (execution providers, `serve`,
@@ -17,7 +18,7 @@
 //! the same name): one identifier per line, sorted, for scripts that ask the
 //! binary what it converts instead of hard-coding a list.
 //!
-//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|text|dclx|chunks|images|latex|pandoc] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--output-file PATH] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--text-layer-only] [--pdf-password PASSWORD] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
+//! Usage: docling-rs [--strict] [--page-break-placeholder TEXT] [--to md|json|html|text|dclx|chunks|images|latex|pandoc] [--pages A-B] [--scale X] [--images MODE] [--input GLOB --output DIR [--jobs N]] [--output-file PATH] [--fetch-images] [--list-attachments] [--skip-empty-cells] [--compact-tables] [--ebcdic-layout JSON|PATH] [--encoding LABEL] [--no-stream] [--no-table-former] [--no-ocr] [--text-layer-only] [--password PASSWORD | --password-file PATH] [--force-full-page-ocr] [--no-text-panels] [--heading-hierarchy] [--ocr-lang LANG] [--ocr-engine ppocr|tesseract] [--ocr-mode MODE] [--ocr-scale X] [--images-scale X] [--page-images] [--chunker hierarchical|hybrid] [--chunk-tokenizer PATH] [--chunk-max-tokens N] [--no-chunk-merge-peers] [--pipeline standard|vlm] [--vlm-endpoint URL] [--vlm-model NAME] [--vlm-api-key TOKEN] [--vlm-prompt TEXT] [--vlm-max-tokens N] [--asr-model PRESET] [--asr-lang CODE] [--video-frames N] [--xbrl-taxonomy DIR] [--use-web-browser] [--enrich-picture-classes] [--enrich-code] [--enrich-formula] [--document-timeout SECONDS] [--abort-on-error] [--output-dirs auto|flat|mirror] <input-file> | SOURCE...
 //!   --to FORMAT        repeatable (#491, like Python's `docling convert --to
 //!                      md --to json`): each document converts once and is
 //!                      written in every format named, `<stem>.md` +
@@ -294,7 +295,11 @@ PDF / IMAGE PIPELINE
                           --skip-ocr is the same)
   --text-layer-only       no models at all: the embedded text layer as flat
                           paragraphs (what --no-ocr did before 2.0)
-  --pdf-password PASSWORD password of an encrypted PDF (also --password)
+  --password PASSWORD     password of an encrypted PDF or Office document
+                          (.docx/.xlsx/.pptx/.doc/.xls/.ppt; also
+                          --pdf-password, docling's spelling)
+  --password-file PATH    the same password, read from the file's first line
+                          (keeps it out of the process list)
   --force-full-page-ocr   OCR the whole page, discarding the text layer
                           (docling's deprecated --force-ocr; = --ocr-mode full_page)
   --no-text-panels        disable the text-panel heuristic
@@ -467,12 +472,32 @@ fn main() -> ExitCode {
             // `--text-layer-only`.
             "--no-ocr" | "--skip-ocr" => opts.no_ocr = Some(true),
             "--text-layer-only" => opts.text_layer_only = Some(true),
-            // The password of an encrypted PDF (docling's `--pdf-password`;
-            // `--password` is the spelling PDF_CONFORMANCE.md used, #611).
-            "--pdf-password" | "--password" => match args.next() {
-                Some(v) => opts.pdf_password = Some(v),
+            // The password of an encrypted PDF or Office document (#611,
+            // #625); `--pdf-password` is docling's PDF-only spelling.
+            "--password" | "--pdf-password" => match args.next() {
+                Some(v) => opts.password = Some(v),
                 None => {
-                    eprintln!("error: {arg} needs the PDF's password");
+                    eprintln!("error: {arg} needs the document's password");
+                    return ExitCode::from(2);
+                }
+            },
+            // The same password read from a file (#625): a command-line
+            // argument is visible to every user of the machine (`ps`), a
+            // file can be private. Its first line, without the line break.
+            "--password-file" => match args
+                .next()
+                .map(|p| std::fs::read_to_string(&p).map(|t| (p, t)))
+            {
+                Some(Ok((_, text))) => {
+                    let line = text.lines().next().unwrap_or_default();
+                    opts.password = Some(line.to_string());
+                }
+                Some(Err(e)) => {
+                    eprintln!("error: --password-file: {e}");
+                    return ExitCode::from(2);
+                }
+                None => {
+                    eprintln!("error: --password-file needs a path");
                     return ExitCode::from(2);
                 }
             },
@@ -961,7 +986,7 @@ fn main() -> ExitCode {
             opts.no_table_former.unwrap_or(false),
             text_layer_only,
             opts.ocr_disabled(),
-            opts.pdf_password.as_deref(),
+            opts.password.as_deref(),
         ) {
             Ok(avg) => {
                 // Bare seconds on stdout for the benchmark harness; a human line on stderr.
@@ -991,7 +1016,7 @@ fn main() -> ExitCode {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "document".into());
-        let password = opts.pdf_password.as_deref();
+        let password = opts.password.as_deref();
         return match write_page_images(&source.bytes, password, pages, scale, Path::new(""), &stem)
         {
             Ok(written) => {
@@ -1692,7 +1717,7 @@ fn batch_convert_one(
     // Announce the document up front — with its page count for PDFs, so long
     // conversions are attributable while the dots tick.
     let pages = (source.format == InputFormat::Pdf)
-        .then(|| docling::pdf_page_count(&source.bytes, cfg.opts.pdf_password.as_deref()).ok())
+        .then(|| docling::pdf_page_count(&source.bytes, cfg.opts.password.as_deref()).ok())
         .flatten()
         .map(|n| match cfg.pages {
             // A --pages window converts only its slice of the document.
@@ -1729,7 +1754,7 @@ fn batch_convert_one(
         // not race a concurrent PDF conversion.
         let pages_written = {
             let _pdf_owner = pipe.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let password = cfg.opts.pdf_password.as_deref();
+            let password = cfg.opts.password.as_deref();
             write_page_images(&source.bytes, password, cfg.pages, cfg.scale, &dir, &stem)?
         };
         written.push(pages_written.first().cloned().unwrap_or(out));
@@ -1762,11 +1787,7 @@ fn batch_convert_one(
         match source.format {
             InputFormat::Pdf => {
                 let c = p
-                    .convert_outcome(
-                        &source.bytes,
-                        cfg.opts.pdf_password.as_deref(),
-                        &source.name,
-                    )
+                    .convert_outcome(&source.bytes, cfg.opts.password.as_deref(), &source.name)
                     .map_err(|e| e.to_string())?;
                 partial.extend(c.completion.message());
                 c.document

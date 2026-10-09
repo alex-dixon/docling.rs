@@ -90,8 +90,8 @@ the default build is a native PDF library:
 
 **Encrypted PDFs** open through lopdf: the empty user password most
 "protected" files carry is tried silently, the document's password
-(docling's `--pdf-password`, also `--password` — the `pdf_password` option
-on every surface since #611, `PdfMeta::open_with_password`) decrypts at load,
+(`--password`, also docling's `--pdf-password` — the `password` option on
+every surface since #611/#625, `PdfMeta::open_with_password`) decrypts at load,
 and a missing one is the error docling raises (`pdf: the PDF is encrypted: a
 password is required` — the `pdf_password` snapshot records it; a wrong one
 says `… and the password is wrong`).

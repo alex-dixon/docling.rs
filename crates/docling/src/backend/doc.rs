@@ -96,7 +96,7 @@ impl DeclarativeBackend for DocBackend {
         let n_fib = u16_at(&word, 2).unwrap_or(0);
         let flags = u16_at(&word, 0x0A).unwrap_or(0);
         if flags & 0x0100 != 0 {
-            return Err(ConversionError::Parse("doc: document is encrypted".into()));
+            return Err(crate::backend::offcrypto::encrypted("doc"));
         }
         if w_ident != 0xA5EC {
             if (101..=105).contains(&n_fib) {
@@ -738,7 +738,7 @@ pub(crate) fn is_word2(data: &[u8]) -> bool {
 fn convert_word2(name: &str, data: &[u8]) -> Result<DoclingDocument, ConversionError> {
     let flags = u16_at(data, 0x0A).unwrap_or(0);
     if flags & 0x0100 != 0 {
-        return Err(ConversionError::Parse("doc: document is encrypted".into()));
+        return Err(crate::backend::offcrypto::encrypted("doc"));
     }
     if flags & 0x0004 != 0 {
         return Err(ConversionError::Parse(

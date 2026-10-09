@@ -52,7 +52,7 @@ column.
 | `asr_model`, `asr_lang`, `video_frames` | string, string, int | Audio/video: ASR preset, transcription language, max sampled frames (0 = transcript only) |
 | `pages`, `document_timeout` | `"A-B"` or `"N"`, seconds | PDF page window (1-based inclusive); per-document budget (#497) |
 | `no_ocr`, `skip_ocr`, `text_layer_only`, `force_full_page_ocr`, `no_table_former`, `no_text_panels`, `heading_hierarchy` | bool | PDF/image pipeline switches (`no_ocr`: layout + TableFormer, never OCR — docling's `--no-ocr`; `skip_ocr` is its pre-2.0 name, still read; `text_layer_only`: no models, the text layer only — what `no_ocr` meant before 2.0, #611; `heading_hierarchy` #302: infer section-header levels) |
-| `pdf_password` | string | the password of an encrypted PDF (docling's `--pdf-password`, #611) |
+| `password` | string | the password of an encrypted PDF or Office document — .docx/.xlsx/.pptx/.doc/.xls/.ppt (#611, #625); `pdf_password`, docling's name, is read too |
 | `ocr_engine`, `ocr_lang`, `ocr_mode`, `ocr_scale`, `images_scale`, `page_images` | — | OCR engine (`ppocr` \| `tesseract`, #460) and language; which regions feed the OCR (#254); OCR / picture-crop scale in px per PDF point; keep page renders in the JSON (#520) |
 | `do_picture_classification`, `do_code_enrichment`, `do_formula_enrichment` | bool | Enrichment models (#423) |
 | `pipeline`, `vlm_endpoint`, `vlm_model`, `vlm_api_key`, `vlm_prompt`, `vlm_max_tokens` | — | `standard` (default) \| `vlm`: the remote vision-model pipeline (#77) and its settings |

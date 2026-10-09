@@ -135,12 +135,38 @@ impl DeclarativeBackend for OdfBackend {
 /// `http(s)` `draw:image` references to be fetched (bounded, SSRF-guarded);
 /// off, an external image reference yields no picture at all — exactly
 /// docling's `ImageResourceLoader` with remote fetch disabled (#4015).
+/// Whether the package manifest marks `content.xml` as encrypted.
+fn manifest_encrypts_content(manifest: &str) -> bool {
+    let Ok(dom) = Document::parse(manifest) else {
+        return false;
+    };
+    dom.descendants().any(|e| {
+        e.tag_name().name() == "file-entry"
+            && e.attributes()
+                .any(|a| a.name() == "full-path" && a.value() == "content.xml")
+            && e.children()
+                .any(|c| c.tag_name().name() == "encryption-data")
+    })
+}
+
 pub(crate) fn convert_odf(
     source: &SourceDocument,
     fetch_images: bool,
 ) -> Result<DoclingDocument, ConversionError> {
     {
         let mut pkg = Package::open(&source.bytes);
+        // A password-protected ODF package keeps its manifest in the clear
+        // and lists each encrypted part's `manifest:encryption-data` (ODF
+        // 1.2 part 3, 3.8); its content.xml is ciphertext, which used to
+        // read as "no content.xml" (#624).
+        if let Some(manifest) = pkg.as_mut().and_then(|p| p.read("META-INF/manifest.xml")) {
+            if manifest_encrypts_content(&manifest) {
+                return Err(crate::backend::offcrypto::unsupported(
+                    source.format.as_str(),
+                    "ODF package encryption",
+                ));
+            }
+        }
         let (content, styles_xml) = match pkg.as_mut() {
             Some(pkg) => (
                 pkg.read("content.xml")

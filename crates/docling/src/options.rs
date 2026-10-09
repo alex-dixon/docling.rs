@@ -99,8 +99,11 @@ pub struct ConvertOptions {
     /// serde alias, so a body that sends both spellings (a pre-2.0 form)
     /// is not a duplicate-field error.
     pub skip_ocr: Option<bool>,
-    /// The password of an encrypted PDF (docling's `--pdf-password`, #611).
-    pub pdf_password: Option<String>,
+    /// The password of an encrypted PDF or Office document (#611, #625).
+    /// `pdf_password`, docling's PDF-only name (`--pdf-password`), is read
+    /// as an alias.
+    #[serde(alias = "pdf_password")]
+    pub password: Option<String>,
     /// OCR every page, discarding the text layer.
     pub force_full_page_ocr: Option<bool>,
     /// Skip TableFormer (geometric tables instead).
@@ -278,7 +281,12 @@ pub const OPTIONS: &[OptionInfo] = &[
         python: Some(""),
         ..row("skip_ocr")
     },
-    row("pdf_password"),
+    // One password for PDFs and Office documents (#625); docling's
+    // PDF-only `pdf_password` stays readable on every surface.
+    OptionInfo {
+        aliases: &["pdf_password"],
+        ..row("password")
+    },
     row("force_full_page_ocr"),
     OptionInfo {
         python: Some("do_table_structure"),
@@ -482,8 +490,8 @@ impl ConvertOptions {
         if self.no_ocr.is_some() || self.skip_ocr.is_some() {
             c = c.no_ocr(self.ocr_disabled());
         }
-        if self.pdf_password.is_some() {
-            c = c.pdf_password(self.pdf_password.clone());
+        if self.password.is_some() {
+            c = c.password(self.password.clone());
         }
         if let Some(v) = self.force_full_page_ocr {
             c = c.force_full_page_ocr(v);
@@ -978,9 +986,10 @@ mod tests {
     /// #611: `no_ocr` is docling's `do_ocr=False` and `skip_ocr` its pre-2.0
     /// name — either one turns OCR off, and a body carrying both (a pre-2.0
     /// client sending both switches) parses instead of failing on a
-    /// duplicate field; `text_layer_only` and `pdf_password` are read too.
+    /// duplicate field; `text_layer_only` and `password` — under docling's
+    /// `pdf_password` too (#625) — are read.
     #[test]
-    fn ocr_spellings_and_pdf_password_parse() {
+    fn ocr_spellings_and_password_parse() {
         let both: ConvertOptions = serde_json::from_str(
             r#"{"no_ocr": false, "skip_ocr": true, "text_layer_only": true,
                 "pdf_password": "1234"}"#,
@@ -988,13 +997,15 @@ mod tests {
         .expect("both spellings parse");
         assert!(both.ocr_disabled());
         assert_eq!(both.text_layer_only, Some(true));
-        assert_eq!(both.pdf_password.as_deref(), Some("1234"));
+        assert_eq!(both.password.as_deref(), Some("1234"));
+        let neutral: ConvertOptions = serde_json::from_str(r#"{"password": "x"}"#).unwrap();
+        assert_eq!(neutral.password.as_deref(), Some("x"));
         let new: ConvertOptions = serde_json::from_str(r#"{"no_ocr": true}"#).unwrap();
         assert!(new.ocr_disabled());
         assert!(!ConvertOptions::default().ocr_disabled());
         // Merged like every option: a later layer's spelling adds to the base.
         let merged = new.merge_over(both);
         assert!(merged.ocr_disabled());
-        assert_eq!(merged.pdf_password.as_deref(), Some("1234"));
+        assert_eq!(merged.password.as_deref(), Some("1234"));
     }
 }

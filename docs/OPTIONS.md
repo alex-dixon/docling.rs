@@ -47,7 +47,7 @@ own output options next to the shared ones.
 | `no_ocr` | bool | false | `--no-ocr` | `do_ocr` | `noOcr` | Keep layout + TableFormer, never run OCR — docling's `--no-ocr` / `do_ocr=False` (#611; until 2.0 `no_ocr` was the text-layer path, now `text_layer_only`). Python: `do_ocr` (inverted). |
 | `skip_ocr` | bool | false | `--skip-ocr` | — | `skipOcr` | `no_ocr` under its pre-2.0 name (#244), still read: either one set skips OCR. Python: `do_ocr`. |
 | `text_layer_only` | bool | false | `--text-layer-only` | `text_layer_only` | `textLayerOnly` | Skip the whole ML stack: the embedded text layer as flat paragraphs (what `no_ocr` meant before 2.0, #611). |
-| `pdf_password` | string | unset | `--pdf-password` (also `--password`) | `pdf_password` | `pdfPassword` | The password of an encrypted PDF — docling's `--pdf-password` (#611). Python also reads docling's `PdfFormatOption(backend_options=PdfBackendOptions(password=…))`. Not read by the `pdf-text` / wasm build. |
+| `password` | string | unset | `--password` (also `--pdf-password`, docling's spelling; `--password-file PATH` reads it from a file) | `password` (also `pdf_password`) | `password` (also `pdfPassword`) | The password of an encrypted PDF — docling's `--pdf-password` (#611) — and of an encrypted Office document (`.docx`/`.xlsx`/`.pptx`/`.doc`/`.xls`/`.ppt`, #625; a docling.rs extension). `pdf_password`, docling's PDF-only name, is accepted on every surface. Python also reads docling's `PdfFormatOption(backend_options=PdfBackendOptions(password=…))`. The `pdf-text` / wasm build reads it for Office documents only. |
 | `force_full_page_ocr` | bool | false | `--force-full-page-ocr` | `force_full_page_ocr` | `forceFullPageOcr` | OCR every page, discarding the text layer. docling's deprecated `--force-ocr` is this (or `--ocr-mode full_page`); it gets no alias, as docling itself retires it. |
 | `no_table_former` | bool | false | `--no-table-former` (also `--no-tables`) | `do_table_structure` | `noTableFormer` | Skip TableFormer (geometric tables instead). Python: `do_table_structure` (inverted). |
 | `no_text_panels` | bool | false | `--no-text-panels` | `no_text_panels` | `noTextPanels` | Disable the text-panel heuristic (#173). |
@@ -93,7 +93,7 @@ codec or copybook when the conversion runs.
   number, got 0`. Python `docling convert`'s spellings are accepted too
   (#611): `--page-range` (`--pages`), `--image-export-mode` (`--images`),
   `--no-tables` (`--no-table-former`), `--no-ocr` with docling's meaning,
-  `--pdf-password`, and `--output-file PATH` — the one result written to
+  `--pdf-password` (= `--password`), and `--output-file PATH` — the one result written to
   exactly PATH, refused unless there is exactly one input document and one
   `--to` format (docling's checks and messages).
 - **serve** — the query string, the JSON body and multipart text parts are

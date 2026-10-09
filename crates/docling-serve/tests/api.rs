@@ -341,6 +341,65 @@ async fn unknown_format_is_422() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// #624: an encrypted Office file is a 422 naming the encryption — the
+/// `.ppt` used to stream an empty 200, the `.pptx` failed as "bad zip".
+#[tokio::test]
+async fn encrypted_office_files_are_422() {
+    for name in ["min_encrypted.ppt", "min_encrypted.pptx"] {
+        let bytes = std::fs::read(
+            repo_root()
+                .join("crates/docling/tests/data/encrypted")
+                .join(name),
+        )
+        .unwrap();
+        for query in ["", "?to=json"] {
+            let (ct, body) = multipart(name, &bytes, &[]);
+            let response = app()
+                .oneshot(convert_request(&ct, body, query))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{name}{query}"
+            );
+            let text = body_string(response).await;
+            assert!(
+                text.contains("document is encrypted"),
+                "{name}{query}: {text}"
+            );
+        }
+    }
+}
+
+/// #625: the request's `password` opens an encrypted Office file too (and
+/// `pdf_password`, its earlier name, still reads);
+/// a wrong one is a 422 saying so.
+#[tokio::test]
+async fn password_opens_an_encrypted_office_file() {
+    let bytes =
+        std::fs::read(repo_root().join("crates/docling/tests/data/encrypted/min_encrypted.pptx"))
+            .unwrap();
+    for field in ["password", "pdf_password"] {
+        let (ct, body) = multipart("deck.pptx", &bytes, &[(field, "1234")]);
+        let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{field}");
+        assert!(body_string(response).await.contains("Hello"), "{field}");
+    }
+    let (ct, body) = multipart("deck.pptx", &bytes, &[]);
+    let response = app()
+        .oneshot(convert_request(&ct, body, "?password=1234"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "query parameter");
+    let (ct, body) = multipart("deck.pptx", &bytes, &[("password", "4321")]);
+    let response = app().oneshot(convert_request(&ct, body, "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body_string(response)
+        .await
+        .contains("the password is wrong"));
+}
+
 #[tokio::test]
 async fn missing_file_part_is_400() {
     let (ct, body) = multipart("x.md", b"x", &[]);

@@ -122,7 +122,7 @@ fn bad_value(name: &str, v: &str) -> ApiError {
 /// `md_page_break_placeholder`, `do_pdf_heading_hierarchy`,
 /// `md_compact_tables`, the enrichment switches, `pipeline`,
 /// `ocr_engine` / `ocr_lang`); any other name this server knows as an option
-/// of its own is set as on `/v1/convert` (`strict`, `pdf_password`, …); the
+/// of its own is set as on `/v1/convert` (`strict`, `password`, …); the
 /// rest is ignored.
 pub(crate) fn parse_fields(fields: &[(String, String)]) -> Result<(ConvertOptions, Ask), ApiError> {
     let mut opts = ConvertOptions::default();
