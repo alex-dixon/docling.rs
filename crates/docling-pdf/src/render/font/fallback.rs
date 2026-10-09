@@ -6,6 +6,17 @@
 //! ship its own, and `DOCLING_RS_FONT_DIRS` (path-list separated) adds more.
 //! Without any face the renderer outlines each glyph's box in the thin blue
 //! docling-parse draws for an unresolved cell.
+//!
+//! The face a family resolves to is part of the page image, hence of the
+//! layout model's input: two hosts with different fonts installed convert
+//! the same file to different regions (#633 — Arial vs Liberation Sans
+//! shifted a title's score and surfaced a footnote on one host only).
+//! `DOCLING_RS_SYSTEM_FONTS=0` stops the search at the directories the
+//! deployment controls (`.models/fonts` + `DOCLING_RS_FONT_DIRS`), so a
+//! fleet that ships its fonts renders identically everywhere; the default
+//! keeps the host directories, as docling-parse's resolver does, so a
+//! desktop needs nothing installed. `DOCLING_RS_DEBUG=1` names the face each
+//! style resolved to.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -53,15 +64,38 @@ fn index() -> &'static Index {
 }
 
 fn font_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    dirs.push(PathBuf::from(crate::resolve_asset(".models/fonts")));
-    if let Some(extra) = docling_core::env::nonempty("DOCLING_RS_FONT_DIRS") {
-        for d in std::env::split_paths(&extra) {
-            dirs.push(d);
-        }
+    // Set to an "off" spelling → the host directories are left out; unset
+    // or truthy → the full list (`flag` alone would read "unset" as off).
+    let system = docling_core::env::nonempty("DOCLING_RS_SYSTEM_FONTS").is_none()
+        || docling_core::env::flag("DOCLING_RS_SYSTEM_FONTS");
+    font_dirs_from(
+        PathBuf::from(crate::resolve_asset(".models/fonts")),
+        docling_core::env::nonempty("DOCLING_RS_FONT_DIRS").as_deref(),
+        system.then(|| HostDirs {
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            windir: std::env::var_os("WINDIR").map(PathBuf::from),
+        }),
+    )
+}
+
+/// The host's own font locations, searched after the deployment's.
+struct HostDirs {
+    home: Option<PathBuf>,
+    windir: Option<PathBuf>,
+}
+
+/// The search order: the release's `.models/fonts`, then `extra`
+/// (`DOCLING_RS_FONT_DIRS`, a path list), then — unless the host directories
+/// are opted out — the user's and the system's font directories.
+fn font_dirs_from(models: PathBuf, extra: Option<&str>, host: Option<HostDirs>) -> Vec<PathBuf> {
+    let mut dirs = vec![models];
+    if let Some(extra) = extra {
+        dirs.extend(std::env::split_paths(extra));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
+    let Some(host) = host else {
+        return dirs;
+    };
+    if let Some(home) = host.home {
         dirs.push(home.join(".fonts"));
         dirs.push(home.join(".local/share/fonts"));
         dirs.push(home.join("Library/Fonts"));
@@ -77,8 +111,8 @@ fn font_dirs() -> Vec<PathBuf> {
     ] {
         dirs.push(PathBuf::from(d));
     }
-    if let Some(windir) = std::env::var_os("WINDIR") {
-        dirs.push(PathBuf::from(windir).join("Fonts"));
+    if let Some(windir) = host.windir {
+        dirs.push(windir.join("Fonts"));
     }
     dirs
 }
@@ -277,6 +311,18 @@ pub fn face(style: Style) -> Option<Arc<FallbackFace>> {
             bold: false,
             italic: false,
         });
+    } else {
+        // Once per style, so a host-dependent render can be traced to the
+        // face that produced it (#633).
+        docling_core::debug_log!(
+            "docling-pdf fallback font: {:?} bold={} italic={} → {}",
+            style.family,
+            style.bold,
+            style.italic,
+            found
+                .as_ref()
+                .map_or_else(|| "none".to_string(), |f| f.path.display().to_string())
+        );
     }
     if let Ok(mut c) = cache.lock() {
         c.insert(style, found.clone());
@@ -343,5 +389,44 @@ pub fn style_for(base_font: &str, flags: Option<i64>, serif_hint: Option<bool>) 
         family,
         bold,
         italic,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #633: with the host directories opted out, only the deployment's
+    /// directories are searched — `.models/fonts` first, then every entry of
+    /// `DOCLING_RS_FONT_DIRS` in order — so a fleet shipping its fonts renders
+    /// the same page everywhere.
+    #[test]
+    fn system_fonts_off_keeps_only_the_deployment_directories() {
+        let extra = std::env::join_paths(["/srv/fonts", "/opt/fonts"]).unwrap();
+        let dirs = font_dirs_from(PathBuf::from(".models/fonts"), extra.to_str(), None);
+        assert_eq!(
+            dirs,
+            [".models/fonts", "/srv/fonts", "/opt/fonts"].map(PathBuf::from)
+        );
+    }
+
+    /// The default keeps the host: the deployment's directories still come
+    /// first, then the user's, then the system's.
+    #[test]
+    fn host_directories_follow_the_deployment_ones() {
+        let dirs = font_dirs_from(
+            PathBuf::from(".models/fonts"),
+            Some("/srv/fonts"),
+            Some(HostDirs {
+                home: Some(PathBuf::from("/home/u")),
+                windir: Some(PathBuf::from("C:\\W")),
+            }),
+        );
+        assert_eq!(
+            dirs[..3],
+            [".models/fonts", "/srv/fonts", "/home/u/.fonts"].map(PathBuf::from)
+        );
+        assert!(dirs.contains(&PathBuf::from("/usr/share/fonts")));
+        assert_eq!(dirs.last(), Some(&PathBuf::from("C:\\W").join("Fonts")));
     }
 }

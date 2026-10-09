@@ -134,7 +134,8 @@ says `… and the password is wrong`).
   names, predefined and embedded CMaps, `/CIDToGIDMap`); fonts without a
   program draw from a host face (`fallback.rs`: `.models/fonts`, then the
   Liberation / DejaVu / URW / Noto directories, `DOCLING_RS_FONT_DIRS` adds
-  more; a host without fonts draws each glyph's box — `download_dependencies.sh
+  more, `DOCLING_RS_SYSTEM_FONTS=0` leaves the host directories out so the
+  render is the deployment's alone, #633; a host without fonts draws each glyph's box — `download_dependencies.sh
   --with-fonts` fetches Liberation + DejaVu, the Docker images install the
   same two packages).
 * **Images** (`render/image.rs`): the raster's decoders behind a general

@@ -1820,7 +1820,13 @@ images do), or `download_dependencies.sh --with-fonts`
 (`DOCLING_RS_WITH_FONTS=1`) to drop both families into `.models/fonts/`
 (Liberation from Debian's package — needs `ar` — and DejaVu from its GitHub
 release, licence texts alongside). `DOCLING_RS_FONT_DIRS` names further
-directories at runtime.
+directories at runtime. The face a non-embedded font resolves to is part of
+the page image the layout model reads, so two hosts with different fonts
+installed can convert the same file to different regions (#633):
+`DOCLING_RS_SYSTEM_FONTS=0` limits the search to `.models/fonts` and
+`DOCLING_RS_FONT_DIRS` — ship the fonts with the deployment and every host
+renders the same page; `DOCLING_RS_DEBUG=1` prints the face each style
+resolved to.
 
 #### Whisper and Parakeet models for audio/ASR
 
@@ -2281,7 +2287,9 @@ the Rust renderer otherwise; `DOCLING_PARSE_RENDER_LIB` /
 `DOCLING_PARSE_RESOURCES` point at the plugin explicitly), `DOCLING_RS_FONT_DIRS` (extra font
 directories for the Rust renderer's fallback faces — fonts a PDF does not
 embed; `.models/fonts` and the usual Liberation/DejaVu/URW/Noto system
-directories are scanned by default), `DOCLING_RS_SCAN_RASTER` (`rust`, the default: an image-only
+directories are scanned by default), `DOCLING_RS_SYSTEM_FONTS` (`0` keeps the
+host's `$HOME` and system font directories out of that search, so the render
+depends only on `.models/fonts` + `DOCLING_RS_FONT_DIRS`, #633), `DOCLING_RS_SCAN_RASTER` (`rust`, the default: an image-only
 page's bitmap comes from the pure-Rust raster, pdfium's bytes exactly;
 `pdfium` renders it with the library under the `pdfium` feature), `DOCLING_RS_PDF_THREADS` (total thread budget;
 `_WORKERS`/`_INTRA` below split it), `DOCLING_RS_TIMING=1` (per-stage
