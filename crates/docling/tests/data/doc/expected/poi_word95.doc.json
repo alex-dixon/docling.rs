@@ -69,8 +69,8 @@
       "content_layer": "body",
       "label": "text",
       "prov": [],
-      "orig": "Paragraph 3. Has some RED text and some BLUE BOLD text in it.",
-      "text": "Paragraph 3. Has some RED text and some BLUE BOLD text in it."
+      "orig": "Paragraph 3. Has some RED text and some **BLUE BOLD** text in it.",
+      "text": "Paragraph 3. Has some RED text and some **BLUE BOLD** text in it."
     },
     {
       "self_ref": "#/texts/3",

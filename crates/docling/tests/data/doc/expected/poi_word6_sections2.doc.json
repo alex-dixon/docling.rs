@@ -64,6 +64,9 @@
       },
       {
         "$ref": "#/texts/15"
+      },
+      {
+        "$ref": "#/texts/16"
       }
     ],
     "content_layer": "body",
@@ -81,8 +84,8 @@
       "content_layer": "body",
       "label": "text",
       "prov": [],
-      "orig": "STATEMENT  OF  INSOLVENCY  PRACTICE  10  (SCOTLAND)",
-      "text": "STATEMENT  OF  INSOLVENCY  PRACTICE  10  (SCOTLAND)"
+      "orig": "**STATEMENT  OF  INSOLVENCY  PRACTICE  10  (SCOTLAND)**",
+      "text": "**STATEMENT  OF  INSOLVENCY  PRACTICE  10  (SCOTLAND)**"
     },
     {
       "self_ref": "#/texts/1",
@@ -93,8 +96,8 @@
       "content_layer": "body",
       "label": "text",
       "prov": [],
-      "orig": "PROXY  FORMS",
-      "text": "PROXY  FORMS"
+      "orig": "**PROXY  FORMS**",
+      "text": "**PROXY  FORMS**"
     },
     {
       "self_ref": "#/texts/2",
@@ -105,8 +108,8 @@
       "content_layer": "body",
       "label": "text",
       "prov": [],
-      "orig": "SCOTLAND",
-      "text": "SCOTLAND"
+      "orig": "**SCOTLAND**",
+      "text": "**SCOTLAND**"
     },
     {
       "self_ref": "#/texts/3",
@@ -141,8 +144,8 @@
       "content_layer": "body",
       "label": "text",
       "prov": [],
-      "orig": "3\tCorporate Insolvency - Proxies",
-      "text": "3\tCorporate Insolvency - Proxies"
+      "orig": "3\t**Corporate Insolvency - Proxies**",
+      "text": "3\t**Corporate Insolvency - Proxies**"
     },
     {
       "self_ref": "#/texts/6",
@@ -201,8 +204,8 @@
       "content_layer": "body",
       "label": "text",
       "prov": [],
-      "orig": "4\tIndividual Insolvency - Mandates",
-      "text": "4\tIndividual Insolvency - Mandates"
+      "orig": "4\t**Individual Insolvency - Mandates**",
+      "text": "4\t**Individual Insolvency - Mandates**"
     },
     {
       "self_ref": "#/texts/11",
@@ -263,6 +266,18 @@
       "prov": [],
       "orig": "Issued August 1997",
       "text": "Issued August 1997"
+    },
+    {
+      "self_ref": "#/texts/16",
+      "parent": {
+        "$ref": "#/body"
+      },
+      "children": [],
+      "content_layer": "furniture",
+      "label": "page_footer",
+      "prov": [],
+      "orig": "g:\\1998\\publicat\\sips\\sip10sco.doc",
+      "text": "g:\\1998\\publicat\\sips\\sip10sco.doc"
     }
   ],
   "pictures": [],
